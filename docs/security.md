@@ -9,7 +9,7 @@ write capability turned on.
 
 | Identity | Used by | Permissions | Notes |
 |---|---|---|---|
-| Reader (operating identity), e.g. user-assigned managed identity `id-orqentis-reader` | `RestFabricClient` (all reads); Agent Framework chat client | Fabric workspace **Viewer** on monitored workspaces; Power BI dataset read (refresh history); deployment pipeline read; Azure OpenAI **Cognitive Services OpenAI User** | Least privilege. No write role anywhere. |
+| Reader (operating identity), e.g. user-assigned managed identity `id-orqentis-reader` | `RestFabricClient` (all reads); Agent Framework chat client | Fabric workspace **Viewer** on monitored workspaces (includes semantic model read for refresh history); Azure OpenAI **Cognitive Services OpenAI User**; AcrPull on the image registry | Least privilege. No write role anywhere. |
 | Actor (write capability), e.g. `id-orqentis-actor` | `FabricWriteClient`, held only by the `ActionGateway` | Fabric **Contributor** only on workspaces where approved remediation is allowed | Not attached to the app unless `enableWriteActions` is set at deployment **and** `ORQENTIS_ENABLE_WRITE_ACTIONS=true`. The MVP ships no REST write adapter. |
 | Human approvers | REST API (`/approvals/*`) | Entra ID app roles `FabricOps.Operator`, `FabricOps.PlatformAdmin` | Roles arrive in the Easy Auth client principal. |
 | The agent | `AGENT_PRINCIPAL` (`agent:FabricOpsInvestigator`) | Tool allowlist from policy | Cannot approve, cannot execute, cannot be impersonated through the API. |
@@ -25,9 +25,13 @@ Fabric prerequisites for the reader identity:
    settings), scoped to a security group that contains the identity.
 2. Grant the identity the workspace **Viewer** role on each monitored workspace (Fabric portal,
    Manage access, or `POST /v1/workspaces/{id}/roleAssignments`).
-3. Grant read on deployment pipelines if deployment drift is used.
+3. Do **not** grant the reader deployment-pipeline or capacity roles. The roles that make those
+   visible also carry write rights (deploying, assigning workspaces to capacities). As a result,
+   deployment-state and capacity lookups return nothing in rest mode, and the investigation
+   records that gap.
 
-ARM/Bicep cannot assign Fabric workspace roles; see `infra/bicep/README.md`.
+ARM/Bicep cannot assign Fabric workspace roles. See `infra/bicep/README.md` for the step-by-step
+grants and for checking them with `POST /telemetry/collect` (`collector_errors` must be empty).
 
 ## 2. Authentication (Microsoft Entra ID)
 

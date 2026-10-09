@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,llm]"
+
+      - name: Lint (ruff)
+        run: ruff check src tests
+
+      - name: Format check (ruff)
+        run: ruff format --check src tests
+
+      - name: Type check (mypy)
+        run: mypy
+
+      - name: Tests
+        run: pytest -q
+
+      - name: Validate runbooks
+        run: python -m orqentis runbooks
+
+      - name: Demo smoke test (mock estate, no credentials)
+        run: python -m orqentis demo --no-report
+
+      - name: Upload demo incident report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-incident-report-py${{ matrix.python-version }}
+          path: var/demo/evidence/**/report.md
+          if-no-files-found: warn
+          retention-days: 14
+
+  bicep:
+    name: Bicep build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Bicep
+        run: az bicep install
+
+      - name: Build main.bicep
+        run: az bicep build --file infra/bicep/main.bicep --stdout > /dev/null
+
+      - name: Build main.bicepparam
+        run: az bicep build-params --file infra/bicep/main.bicepparam --stdout > /dev/null
+
+  docker:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build image (no push)
+        run: docker build --pull -t orqentis-fabricops:ci .
+
+      - name: Smoke test (/health)
+        run: |
+          docker run -d --name orqentis -p 8000:8000 orqentis-fabricops:ci
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health; then
+              echo
+              docker rm -f orqentis > /dev/null
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs orqentis
+          exit 1

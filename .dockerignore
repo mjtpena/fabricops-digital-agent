@@ -1,0 +1,41 @@
+# Build context: only pyproject.toml, README.md, LICENSE, src/, runbooks/ and fixtures/ are needed.
+
+# Virtual environments and local runtime data
+.venv/
+venv/
+var/
+.env
+.env.*
+
+# VCS and CI metadata
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Caches and build output
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Not shipped in the image
+tests/
+docs/
+infra/
+Dockerfile
+.dockerignore
+Makefile
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
