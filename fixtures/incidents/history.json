@@ -1,0 +1,139 @@
+{
+  "incidents": [
+    {
+      "incident_id": "INC-2026-0012",
+      "tenant_id": "tenant-contoso",
+      "title": "Pipeline ingest_finance_prod failed: ERP connection authentication",
+      "status": "CLOSED",
+      "severity": "HIGH",
+      "category": "AUTH_FAILURE",
+      "detected_at": "2026-04-06T05:01:00+10:00",
+      "source": "orqentis.detection",
+      "workspace_id": "ws-finance-prod",
+      "primary_item_id": "pl-ingest-finance-prod",
+      "primary_item_type": "DataPipeline",
+      "primary_item_name": "ingest_finance_prod",
+      "environment": "PROD",
+      "symptoms": [
+        {
+          "description": "AADSTS7000222: The provided client secret keys for app 'app-fabric-erp-reader' are expired.",
+          "observed_at": "2026-04-06T05:01:00+10:00",
+          "source": "fabric.jobs",
+          "item_id": "pl-ingest-finance-prod"
+        }
+      ],
+      "resolution_summary": "Client secret for app-fabric-erp-reader expired (6-month rotation). New secret issued and connection conn-erp-gl-prod credential updated; pipeline rerun at 06:20.",
+      "resolved_with_runbook_id": "RB-AUTH-FAILURE-001",
+      "created_at": "2026-04-06T05:01:00+10:00",
+      "updated_at": "2026-04-06T05:01:00+10:00"
+    },
+    {
+      "incident_id": "INC-2026-0038",
+      "tenant_id": "tenant-contoso",
+      "title": "Pipeline ingest_inventory_prod failed under capacity throttling",
+      "status": "CLOSED",
+      "severity": "HIGH",
+      "category": "CAPACITY_PRESSURE",
+      "detected_at": "2026-09-21T06:04:00+10:00",
+      "source": "orqentis.detection",
+      "workspace_id": "ws-supply-prod",
+      "primary_item_id": "pl-ingest-inventory-prod",
+      "primary_item_type": "DataPipeline",
+      "primary_item_name": "ingest_inventory_prod",
+      "environment": "PROD",
+      "symptoms": [
+        {
+          "description": "Spark session could not be started. Capacity 'Contoso PROD F64' has exceeded its limits (CapacityLimitExceeded).",
+          "observed_at": "2026-09-21T06:04:00+10:00",
+          "source": "fabric.jobs",
+          "item_id": "pl-ingest-inventory-prod"
+        }
+      ],
+      "resolution_summary": "Capacity saturated by ml_feature_backfill (Data Science Sandbox). Pipeline rerun at 07:15 after the backfill completed.",
+      "resolved_with_runbook_id": "RB-CAPACITY-THROTTLING-001",
+      "created_at": "2026-09-21T06:04:00+10:00",
+      "updated_at": "2026-09-21T06:04:00+10:00"
+    },
+    {
+      "incident_id": "INC-2026-0039",
+      "tenant_id": "tenant-contoso",
+      "title": "Semantic model FinanceSemanticModel refresh failed",
+      "status": "CLOSED",
+      "severity": "MEDIUM",
+      "category": "SEMANTIC_MODEL_REFRESH_FAILURE",
+      "detected_at": "2026-09-24T05:31:00+10:00",
+      "source": "orqentis.detection",
+      "workspace_id": "ws-finance-prod",
+      "primary_item_id": "sm-finance",
+      "primary_item_type": "SemanticModel",
+      "primary_item_name": "FinanceSemanticModel",
+      "environment": "PROD",
+      "symptoms": [
+        {
+          "description": "Refresh failed: the gateway data source credentials are invalid.",
+          "observed_at": "2026-09-24T05:31:00+10:00",
+          "source": "fabric.jobs",
+          "item_id": "sm-finance"
+        }
+      ],
+      "resolution_summary": "Data source credential re-entered by the dataset owner; refresh rerun.",
+      "resolved_with_runbook_id": "RB-SM-REFRESH-FAILURE-001",
+      "created_at": "2026-09-24T05:31:00+10:00",
+      "updated_at": "2026-09-24T05:31:00+10:00"
+    },
+    {
+      "incident_id": "INC-2026-0040",
+      "tenant_id": "tenant-contoso",
+      "title": "Pipeline ingest_inventory_prod failed under capacity throttling",
+      "status": "CLOSED",
+      "severity": "HIGH",
+      "category": "CAPACITY_PRESSURE",
+      "detected_at": "2026-09-28T05:51:00+10:00",
+      "source": "orqentis.detection",
+      "workspace_id": "ws-supply-prod",
+      "primary_item_id": "pl-ingest-inventory-prod",
+      "primary_item_type": "DataPipeline",
+      "primary_item_name": "ingest_inventory_prod",
+      "environment": "PROD",
+      "symptoms": [
+        {
+          "description": "Notebook execution failed: Capacity 'Contoso PROD F64' has exceeded its limits and background operations are being rejected.",
+          "observed_at": "2026-09-28T05:51:00+10:00",
+          "source": "fabric.jobs",
+          "item_id": "pl-ingest-inventory-prod"
+        }
+      ],
+      "resolution_summary": "Second Monday in a row. Rerun after contention cleared; follow-up raised to move ml_feature_backfill off the PROD capacity (not yet actioned).",
+      "resolved_with_runbook_id": "RB-CAPACITY-THROTTLING-001",
+      "created_at": "2026-09-28T05:51:00+10:00",
+      "updated_at": "2026-09-28T05:51:00+10:00"
+    },
+    {
+      "incident_id": "INC-2026-0041",
+      "tenant_id": "tenant-contoso",
+      "title": "Pipeline ingest_sales_prod failed: upstream column rename",
+      "status": "CLOSED",
+      "severity": "HIGH",
+      "category": "SCHEMA_DRIFT",
+      "detected_at": "2026-08-17T06:02:00+10:00",
+      "source": "orqentis.detection",
+      "workspace_id": "ws-sales-prod",
+      "primary_item_id": "pl-ingest-sales-prod",
+      "primary_item_type": "DataPipeline",
+      "primary_item_name": "ingest_sales_prod",
+      "environment": "PROD",
+      "symptoms": [
+        {
+          "description": "Notebook execution failed at cell 4: AnalysisException: expected column \"order_ts\" is missing from input schema of sales_orders_raw.",
+          "observed_at": "2026-08-17T06:02:00+10:00",
+          "source": "fabric.jobs",
+          "item_id": "pl-ingest-sales-prod"
+        }
+      ],
+      "resolution_summary": "CRM release 2026.08 renamed order_ts to order_timestamp. transform_sales schema mapping updated, promoted via deployment pipeline, pipeline rerun at 07:10. sales_gold SLA missed by 40 minutes.",
+      "resolved_with_runbook_id": "RB-SCHEMA-DRIFT-001",
+      "created_at": "2026-08-17T06:02:00+10:00",
+      "updated_at": "2026-08-17T06:02:00+10:00"
+    }
+  ]
+}

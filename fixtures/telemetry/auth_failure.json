@@ -1,0 +1,241 @@
+{
+  "scenario": {
+    "name": "auth_failure",
+    "title": "Pipeline ingest_finance_prod fails: expired service principal secret",
+    "description": "05:00 ingest_finance_prod fails copying from the ERP general ledger because the client secret of the service principal used by the connection expired on 2026-10-04.",
+    "now": "2026-10-05T05:20:00+11:00",
+    "expected_category": "AUTH_FAILURE",
+    "expected_runbook_id": "RB-AUTH-FAILURE-001"
+  },
+  "pipeline_runs": [
+    {
+      "id": "run-fin-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "pl-ingest-finance-prod",
+      "display_name": "ingest_finance_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-02T05:00:03+10:00",
+      "end_time": "2026-10-02T05:12:41+10:00"
+    },
+    {
+      "id": "run-fin-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "pl-ingest-finance-prod",
+      "display_name": "ingest_finance_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-03T05:00:03+10:00",
+      "end_time": "2026-10-03T05:12:41+10:00"
+    },
+    {
+      "id": "run-fin-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "pl-ingest-finance-prod",
+      "display_name": "ingest_finance_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-04T05:00:03+11:00",
+      "end_time": "2026-10-04T05:12:41+11:00"
+    },
+    {
+      "id": "run-fin-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "pl-ingest-finance-prod",
+      "display_name": "ingest_finance_prod",
+      "environment": "PROD",
+      "status": "Failed",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-05T05:00:03+11:00",
+      "end_time": "2026-10-05T05:00:41+11:00",
+      "failure": {
+        "error_code": "ActivityFailed",
+        "failure_type": "UserError",
+        "message": "Operation on target copy_erp_gl_to_lakehouse failed: ErrorCode=UserErrorFailedToConnectToSource, 'Failed to acquire token for connection conn-erp-gl-prod. AADSTS7000222: The provided client secret keys for app 'app-fabric-erp-reader' are expired. Visit the Azure portal to create new keys for your app. Request: grant_type=client_credentials&client_secret=Zx9~sQ.8hY2-abcDEF123ghiJKL Trace ID: 5be1c0d2-77aa-4f0e-9b1e-2c3d4e5f6a7b'"
+      },
+      "correlation_id": "corr-1f4be870"
+    }
+  ],
+  "activity_runs": [
+    {
+      "id": "act-fin-1",
+      "pipeline_run_id": "run-fin-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "pipeline_item_id": "pl-ingest-finance-prod",
+      "activity_name": "copy_erp_gl_to_lakehouse",
+      "activity_type": "Copy",
+      "status": "Failed",
+      "start_time": "2026-10-05T05:00:05+11:00",
+      "end_time": "2026-10-05T05:00:40+11:00",
+      "target_item_id": "lh-finance",
+      "error": {
+        "error_code": "2200",
+        "failure_type": "UserError",
+        "message": "Operation on target copy_erp_gl_to_lakehouse failed: ErrorCode=UserErrorFailedToConnectToSource, 'Failed to acquire token for connection conn-erp-gl-prod. AADSTS7000222: The provided client secret keys for app 'app-fabric-erp-reader' are expired. Visit the Azure portal to create new keys for your app. Request: grant_type=client_credentials&client_secret=Zx9~sQ.8hY2-abcDEF123ghiJKL Trace ID: 5be1c0d2-77aa-4f0e-9b1e-2c3d4e5f6a7b'"
+      },
+      "correlation_id": "corr-1f4be870"
+    },
+    {
+      "id": "act-fin-2",
+      "pipeline_run_id": "run-fin-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "pipeline_item_id": "pl-ingest-finance-prod",
+      "activity_name": "transform_gl",
+      "activity_type": "TridentNotebook",
+      "status": "Skipped",
+      "start_time": null,
+      "end_time": null,
+      "target_item_id": "nb-transform-gl",
+      "correlation_id": "corr-1f4be870"
+    },
+    {
+      "id": "act-fin-3",
+      "pipeline_run_id": "run-fin-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "pipeline_item_id": "pl-ingest-finance-prod",
+      "activity_name": "refresh_finance_model",
+      "activity_type": "PBISemanticModelRefresh",
+      "status": "Skipped",
+      "start_time": null,
+      "end_time": null,
+      "target_item_id": "sm-finance",
+      "correlation_id": "corr-1f4be870"
+    }
+  ],
+  "refreshes": [
+    {
+      "id": "ref-fin-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "sm-finance",
+      "refresh_type": "ViaApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-02T05:13:20+10:00",
+      "end_time": "2026-10-02T05:16:02+10:00"
+    },
+    {
+      "id": "ref-fin-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "sm-finance",
+      "refresh_type": "ViaApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-03T05:13:20+10:00",
+      "end_time": "2026-10-03T05:16:02+10:00"
+    },
+    {
+      "id": "ref-fin-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "sm-finance",
+      "refresh_type": "ViaApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-04T05:13:20+11:00",
+      "end_time": "2026-10-04T05:16:02+11:00"
+    }
+  ],
+  "capacity_snapshots": [
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T04:40:00+11:00",
+      "cu_utilization_percent": 22.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 9.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T04:50:00+11:00",
+      "cu_utilization_percent": 25.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 10.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T05:00:00+11:00",
+      "cu_utilization_percent": 28.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 11.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T05:10:00+11:00",
+      "cu_utilization_percent": 31.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 12.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    }
+  ]
+}

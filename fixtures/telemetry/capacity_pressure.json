@@ -1,0 +1,223 @@
+{
+  "scenario": {
+    "name": "capacity_pressure",
+    "title": "Pipeline ingest_inventory_prod fails under capacity throttling",
+    "description": "05:58 ingest_inventory_prod fails because the PROD F64 capacity is rejecting background operations. A DEV data-science backfill scheduled on the PROD capacity consumes most CU. Third consecutive Monday.",
+    "now": "2026-10-05T06:15:00+11:00",
+    "expected_category": "CAPACITY_PRESSURE",
+    "expected_runbook_id": "RB-CAPACITY-THROTTLING-001"
+  },
+  "pipeline_runs": [
+    {
+      "id": "run-inv-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "pl-ingest-inventory-prod",
+      "display_name": "ingest_inventory_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-02T05:45:03+10:00",
+      "end_time": "2026-10-02T05:54:41+10:00"
+    },
+    {
+      "id": "run-inv-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "pl-ingest-inventory-prod",
+      "display_name": "ingest_inventory_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-03T05:45:03+10:00",
+      "end_time": "2026-10-03T05:54:41+10:00"
+    },
+    {
+      "id": "run-inv-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "pl-ingest-inventory-prod",
+      "display_name": "ingest_inventory_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-04T05:45:03+11:00",
+      "end_time": "2026-10-04T05:54:41+11:00"
+    },
+    {
+      "id": "run-inv-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "pl-ingest-inventory-prod",
+      "display_name": "ingest_inventory_prod",
+      "environment": "PROD",
+      "status": "Failed",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-05T05:45:02+11:00",
+      "end_time": "2026-10-05T05:58:47+11:00",
+      "failure": {
+        "error_code": "ActivityFailed",
+        "failure_type": "SystemError",
+        "message": "Operation on target build_inventory_snapshot failed: Notebook execution failed: Spark session could not be started. Capacity 'Contoso PROD F64' has exceeded its limits and background operations are being rejected (CapacityLimitExceeded, HTTP 430 TooManyRequestsForCapacity)."
+      },
+      "correlation_id": "corr-0c99d2ab"
+    }
+  ],
+  "activity_runs": [
+    {
+      "id": "act-inv-1",
+      "pipeline_run_id": "run-inv-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "pipeline_item_id": "pl-ingest-inventory-prod",
+      "activity_name": "copy_wms_to_lakehouse",
+      "activity_type": "Copy",
+      "status": "Succeeded",
+      "start_time": "2026-10-05T05:45:05+11:00",
+      "end_time": "2026-10-05T05:51:10+11:00",
+      "target_item_id": "lh-supply",
+      "output": {
+        "rowsRead": 912004,
+        "rowsCopied": 912004,
+        "throughputKBps": 412
+      },
+      "correlation_id": "corr-0c99d2ab"
+    },
+    {
+      "id": "act-inv-2",
+      "pipeline_run_id": "run-inv-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "pipeline_item_id": "pl-ingest-inventory-prod",
+      "activity_name": "build_inventory_snapshot",
+      "activity_type": "TridentNotebook",
+      "status": "Failed",
+      "start_time": "2026-10-05T05:51:12+11:00",
+      "end_time": "2026-10-05T05:58:46+11:00",
+      "target_item_id": "nb-inventory-snapshot",
+      "error": {
+        "error_code": "430",
+        "failure_type": "SystemError",
+        "message": "Operation on target build_inventory_snapshot failed: Notebook execution failed: Spark session could not be started. Capacity 'Contoso PROD F64' has exceeded its limits and background operations are being rejected (CapacityLimitExceeded, HTTP 430 TooManyRequestsForCapacity)."
+      },
+      "correlation_id": "corr-0c99d2ab"
+    }
+  ],
+  "capacity_snapshots": [
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T05:30:00+11:00",
+      "cu_utilization_percent": 71.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "nb-ml-feature-backfill",
+          "workspace_id": "ws-datascience-dev",
+          "display_name": "ml_feature_backfill",
+          "item_type": "Notebook",
+          "cu_percent": 44.0
+        },
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 0.0
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T05:40:00+11:00",
+      "cu_utilization_percent": 94.0,
+      "interactive_delay_percent": 4.0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "nb-ml-feature-backfill",
+          "workspace_id": "ws-datascience-dev",
+          "display_name": "ml_feature_backfill",
+          "item_type": "Notebook",
+          "cu_percent": 58.0
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T05:50:00+11:00",
+      "cu_utilization_percent": 108.0,
+      "interactive_delay_percent": 12.0,
+      "background_rejection_percent": 9.0,
+      "top_workloads": [
+        {
+          "item_id": "nb-ml-feature-backfill",
+          "workspace_id": "ws-datascience-dev",
+          "display_name": "ml_feature_backfill",
+          "item_type": "Notebook",
+          "cu_percent": 61.0
+        },
+        {
+          "item_id": "pl-ingest-inventory-prod",
+          "workspace_id": "ws-supply-prod",
+          "display_name": "ingest_inventory_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 17.0
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T06:00:00+11:00",
+      "cu_utilization_percent": 117.0,
+      "interactive_delay_percent": 20.0,
+      "background_rejection_percent": 15.0,
+      "top_workloads": [
+        {
+          "item_id": "nb-ml-feature-backfill",
+          "workspace_id": "ws-datascience-dev",
+          "display_name": "ml_feature_backfill",
+          "item_type": "Notebook",
+          "cu_percent": 63.0
+        },
+        {
+          "item_id": "pl-ingest-inventory-prod",
+          "workspace_id": "ws-supply-prod",
+          "display_name": "ingest_inventory_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 9.0
+        },
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 14.0
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T06:10:00+11:00",
+      "cu_utilization_percent": 102.0,
+      "interactive_delay_percent": 8.0,
+      "background_rejection_percent": 3.0,
+      "top_workloads": [
+        {
+          "item_id": "nb-ml-feature-backfill",
+          "workspace_id": "ws-datascience-dev",
+          "display_name": "ml_feature_backfill",
+          "item_type": "Notebook",
+          "cu_percent": 57.0
+        },
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 16.0
+        }
+      ]
+    }
+  ]
+}

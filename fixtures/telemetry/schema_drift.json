@@ -1,0 +1,335 @@
+{
+  "scenario": {
+    "name": "schema_drift",
+    "title": "Pipeline ingest_sales_prod fails after an upstream schema change",
+    "description": "06:02 ingest_sales_prod fails in transform_sales: expected column customer_id is missing. The CRM feed renamed customer_id to client_id. sales_gold must be available before 06:30.",
+    "now": "2026-10-05T06:05:00+11:00",
+    "expected_category": "SCHEMA_DRIFT",
+    "expected_runbook_id": "RB-SCHEMA-DRIFT-001"
+  },
+  "pipeline_runs": [
+    {
+      "id": "run-sales-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "pl-ingest-sales-prod",
+      "display_name": "ingest_sales_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-02T06:00:03+10:00",
+      "end_time": "2026-10-02T06:18:41+10:00"
+    },
+    {
+      "id": "run-sales-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "pl-ingest-sales-prod",
+      "display_name": "ingest_sales_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-03T06:00:03+10:00",
+      "end_time": "2026-10-03T06:18:41+10:00"
+    },
+    {
+      "id": "run-sales-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "pl-ingest-sales-prod",
+      "display_name": "ingest_sales_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-04T06:00:03+11:00",
+      "end_time": "2026-10-04T06:18:41+11:00"
+    },
+    {
+      "id": "run-fin-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "pl-ingest-finance-prod",
+      "display_name": "ingest_finance_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-02T05:00:03+10:00",
+      "end_time": "2026-10-02T05:12:41+10:00"
+    },
+    {
+      "id": "run-fin-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "pl-ingest-finance-prod",
+      "display_name": "ingest_finance_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-03T05:00:03+10:00",
+      "end_time": "2026-10-03T05:12:41+10:00"
+    },
+    {
+      "id": "run-fin-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "pl-ingest-finance-prod",
+      "display_name": "ingest_finance_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-04T05:00:03+11:00",
+      "end_time": "2026-10-04T05:12:41+11:00"
+    },
+    {
+      "id": "run-fin-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "pl-ingest-finance-prod",
+      "display_name": "ingest_finance_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-05T05:00:02+11:00",
+      "end_time": "2026-10-05T05:12:55+11:00"
+    },
+    {
+      "id": "run-sales-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "pl-ingest-sales-prod",
+      "display_name": "ingest_sales_prod",
+      "environment": "PROD",
+      "status": "Failed",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-05T06:00:02+11:00",
+      "end_time": "2026-10-05T06:02:11+11:00",
+      "failure": {
+        "error_code": "ActivityFailed",
+        "failure_type": "UserError",
+        "message": "Operation on target transform_sales failed: Notebook execution failed at cell 4: AnalysisException: [UNRESOLVED_COLUMN] expected column \"customer_id\" is missing from input schema of sales_orders_raw. Available columns: order_id, client_id, order_ts, amount, currency, region."
+      },
+      "correlation_id": "corr-7d3a91c2"
+    }
+  ],
+  "activity_runs": [
+    {
+      "id": "act-sales-1",
+      "pipeline_run_id": "run-sales-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "pipeline_item_id": "pl-ingest-sales-prod",
+      "activity_name": "copy_crm_to_bronze",
+      "activity_type": "Copy",
+      "status": "Succeeded",
+      "start_time": "2026-10-05T06:00:05+11:00",
+      "end_time": "2026-10-05T06:01:31+11:00",
+      "target_item_id": "lh-sales-bronze",
+      "output": {
+        "rowsRead": 184233,
+        "rowsCopied": 184233,
+        "sinkTable": "sales_orders_raw"
+      },
+      "correlation_id": "corr-7d3a91c2"
+    },
+    {
+      "id": "act-sales-2",
+      "pipeline_run_id": "run-sales-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "pipeline_item_id": "pl-ingest-sales-prod",
+      "activity_name": "transform_sales",
+      "activity_type": "TridentNotebook",
+      "status": "Failed",
+      "start_time": "2026-10-05T06:01:33+11:00",
+      "end_time": "2026-10-05T06:02:10+11:00",
+      "target_item_id": "nb-transform-sales",
+      "error": {
+        "error_code": "2011",
+        "failure_type": "UserError",
+        "message": "Notebook execution failed at cell 4: AnalysisException: [UNRESOLVED_COLUMN] expected column \"customer_id\" is missing from input schema of sales_orders_raw. Available columns: order_id, client_id, order_ts, amount, currency, region."
+      },
+      "correlation_id": "corr-7d3a91c2"
+    },
+    {
+      "id": "act-sales-3",
+      "pipeline_run_id": "run-sales-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "pipeline_item_id": "pl-ingest-sales-prod",
+      "activity_name": "refresh_sales_model",
+      "activity_type": "PBISemanticModelRefresh",
+      "status": "Skipped",
+      "start_time": null,
+      "end_time": null,
+      "target_item_id": "sm-sales",
+      "correlation_id": "corr-7d3a91c2"
+    }
+  ],
+  "refreshes": [
+    {
+      "id": "ref-sales-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "sm-sales",
+      "refresh_type": "ViaApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-02T06:19:30+10:00",
+      "end_time": "2026-10-02T06:24:10+10:00"
+    },
+    {
+      "id": "ref-sales-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "sm-sales",
+      "refresh_type": "ViaApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-03T06:19:30+10:00",
+      "end_time": "2026-10-03T06:24:10+10:00"
+    },
+    {
+      "id": "ref-sales-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "sm-sales",
+      "refresh_type": "ViaApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-04T06:19:30+11:00",
+      "end_time": "2026-10-04T06:24:10+11:00"
+    },
+    {
+      "id": "ref-fin-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-finance-prod",
+      "item_id": "sm-finance",
+      "refresh_type": "ViaApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-05T05:13:20+11:00",
+      "end_time": "2026-10-05T05:16:02+11:00"
+    }
+  ],
+  "capacity_snapshots": [
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T05:30:00+11:00",
+      "cu_utilization_percent": 34.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 9.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T05:40:00+11:00",
+      "cu_utilization_percent": 37.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 10.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T05:50:00+11:00",
+      "cu_utilization_percent": 40.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 11.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T06:00:00+11:00",
+      "cu_utilization_percent": 43.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 12.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "event_id": "evt-schema-lh-sales-bronze-v42",
+      "event_type": "SCHEMA_CHANGED",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "lh-sales-bronze",
+      "item_type": "Lakehouse",
+      "display_name": "SalesBronze",
+      "environment": "PROD",
+      "timestamp": "2026-10-05T06:01:31+11:00",
+      "severity": "WARNING",
+      "summary": "Schema change on SalesBronze.sales_orders_raw (Delta version 41 -> 42): column customer_id removed, column client_id added.",
+      "dedupe_key": "schema:lh-sales-bronze:sales_orders_raw:42",
+      "source": "orqentis.collectors.delta-schema-watcher",
+      "payload": {
+        "table": "sales_orders_raw",
+        "previous_version": 41,
+        "current_version": 42,
+        "removed_columns": [
+          "customer_id"
+        ],
+        "added_columns": [
+          "client_id"
+        ],
+        "type_changes": [],
+        "written_by_run_id": "run-sales-20261005",
+        "upstream_source_item_id": "src-crm-sales-orders"
+      }
+    }
+  ]
+}

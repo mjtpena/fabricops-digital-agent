@@ -1,0 +1,80 @@
+# Orqentis FabricOps default policy.
+# Evaluated by deterministic code (orqentis.policies.engine); the agent cannot read or change it.
+# Precedence: DENY > REQUIRE_APPROVAL > ALLOW > default_effect.
+# MVP invariant (enforced in code, not configurable): a mutation is never ALLOWed automatically.
+version: "2026.10.1"
+default_effect: DENY
+
+role_hierarchy:          # lowest to highest privilege
+  - FabricOps.Operator
+  - FabricOps.PlatformAdmin
+
+risk_classification:
+  INSPECT_LOGS: READ_ONLY
+  QUERY_DEPENDENCIES: READ_ONLY
+  QUERY_TELEMETRY: READ_ONLY
+  MANUAL_STEP: READ_ONLY
+  RERUN_PIPELINE: LOW_RISK            # retry of an idempotent, previously successful job
+  CANCEL_JOB: LOW_RISK
+  REFRESH_SEMANTIC_MODEL: LOW_RISK
+  RESTART_ORCHESTRATION: MEDIUM_RISK
+  MODIFY_CONFIGURATION: MEDIUM_RISK
+  MODIFY_ITEM_DEFINITION: MEDIUM_RISK
+  UPDATE_CONNECTION_CREDENTIAL: MEDIUM_RISK
+  SCALE_CAPACITY: HIGH_RISK
+  DEPLOY_TO_STAGE: HIGH_RISK
+  CHANGE_PERMISSIONS: HIGH_RISK
+  DELETE_ITEM: HIGH_RISK
+
+rules:
+  - id: POL-001-deny-delete
+    description: Deleting Fabric items is prohibited for FabricOps.
+    match: { action_types: [DELETE_ITEM] }
+    effect: DENY
+
+  - id: POL-002-deny-production-permissions
+    description: FabricOps never changes production permissions.
+    match: { action_types: [CHANGE_PERMISSIONS], environments: [PROD] }
+    effect: DENY
+
+  - id: POL-010-read-only-automatic
+    description: Read-only operations (telemetry, dependencies, logs) run automatically.
+    match: { risks: [READ_ONLY] }
+    effect: ALLOW
+
+  - id: POL-020-production-write-approval
+    description: Any production write requires approval by an operator.
+    match: { mutation: true, environments: [PROD] }
+    effect: REQUIRE_APPROVAL
+    required_role: FabricOps.Operator
+
+  - id: POL-021-write-approval
+    description: Non-production writes also require approval during the MVP.
+    match: { mutation: true }
+    effect: REQUIRE_APPROVAL
+    required_role: FabricOps.Operator
+
+  - id: POL-030-high-risk-admin
+    description: High-risk changes (capacity, deployments, permissions) require a platform administrator.
+    match: { risks: [HIGH_RISK] }
+    effect: REQUIRE_APPROVAL
+    required_role: FabricOps.PlatformAdmin
+
+# Tools the FabricOps Investigator agent may call. Anything else is refused at the tool boundary.
+agent_tool_allowlist:
+  - get_pipeline_run
+  - get_pipeline_activity_runs
+  - get_item
+  - get_workspace
+  - get_upstream_dependencies
+  - get_downstream_dependencies
+  - get_semantic_model_refresh_history
+  - get_capacity_context
+  - get_recent_related_incidents
+  - search_runbooks
+  - get_deployment_state
+  - get_sla
+  - get_operational_events
+  - request_pipeline_rerun
+  - request_semantic_model_refresh
+  - request_item_change
