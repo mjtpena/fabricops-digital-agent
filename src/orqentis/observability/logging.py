@@ -71,7 +71,10 @@ def configure_logging(
     level: str = "INFO", fmt: str = "json", log_file: Path | None = None, *, stream: bool = True
 ) -> None:
     root = logging.getLogger("orqentis")
-    root.handlers.clear()
+    # Close replaced handlers: an open FileHandler keeps its log file locked on Windows.
+    for old in root.handlers[:]:
+        root.removeHandler(old)
+        old.close()
     root.setLevel(level.upper())
     root.propagate = False
     formatter: logging.Formatter = JsonFormatter() if fmt == "json" else ConsoleFormatter()

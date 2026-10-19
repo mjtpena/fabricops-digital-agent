@@ -9,10 +9,13 @@
 # ORQENTIS_FABRIC_MODE=rest and the managed identity variables; the operating identity comes from the
 # platform (user-assigned managed identity), never from the image.
 
-ARG PYTHON_IMAGE=python:3.12-slim
+# Base image: the Docker official python:3.12-slim image, pulled from its Amazon ECR Public mirror rather than
+# Docker Hub, whose anonymous pull rate limit (HTTP 429) broke CI on shared runners. The mirror serves the same
+# image index (identical digest). Pinned by digest so builds are reproducible; Dependabot (.github/dependabot.yml)
+# proposes digest updates. Both stages must use the same reference.
 
 # --------------------------------------------------------------------------------------------- builder
-FROM ${PYTHON_IMAGE} AS builder
+FROM public.ecr.aws/docker/library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -31,7 +34,7 @@ RUN pip install --upgrade pip \
     && pip install ".[llm,azure-monitor]"
 
 # --------------------------------------------------------------------------------------------- runtime
-FROM ${PYTHON_IMAGE} AS runtime
+FROM public.ecr.aws/docker/library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS runtime
 
 ARG APP_UID=10001
 ARG APP_GID=10001

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -16,7 +17,7 @@ from rich.table import Table
 
 from orqentis import __version__
 from orqentis.actions.gateway import ActionBlockedError
-from orqentis.bootstrap import Container, build_container
+from orqentis.bootstrap import Container, build_container, reset_local_state
 from orqentis.config.settings import FabricMode, Settings
 from orqentis.domain.principals import AGENT_PRINCIPAL, Principal, PrincipalKind
 from orqentis.fabric.fixtures import list_scenarios
@@ -45,6 +46,13 @@ def _observability(settings: Settings, *, stream_logs: bool) -> None:
         console=settings.otel_console_exporter,
         appinsights_connection_string=secret.get_secret_value() if secret else None,
     )
+
+
+def _utf8_stdio() -> None:
+    """Write UTF-8 even when stdout is a pipe on Windows (cp1252 cannot encode the report's box characters)."""
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper) and stream.encoding.lower().replace("-", "") != "utf8":
+            stream.reconfigure(encoding="utf-8")
 
 
 def _display(path: Path | None) -> str:
@@ -111,8 +119,10 @@ async def _boundary_check(c: Container, incident_id: str, console: Console) -> N
 
 async def run_demo(scenario: str, data_dir: Path, *, show_report: bool, console: Console) -> int:
     settings = _settings(data_dir=data_dir, scenario=scenario, fabric_mode=FabricMode.MOCK)
+    # Reset before logging opens data_dir/logs: Windows cannot delete a file that is still open.
+    reset_local_state(settings)
     _observability(settings, stream_logs=False)
-    c = await build_container(settings, reset=True)
+    c = await build_container(settings)
     try:
         assert c.scenario is not None
         tz = ZoneInfo(settings.default_timezone)
@@ -278,6 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     audit = sub.add_parser("audit", help="Verify the audit trail hash chain")
     audit.add_argument("--data-dir", type=Path, default=None)
     args = parser.parse_args(argv)
+    _utf8_stdio()
     console = Console(highlight=False, width=None if sys.stdout.isatty() else 120)
 
     if args.command == "demo":
