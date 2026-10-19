@@ -37,7 +37,7 @@ one PR to `main`. Briefs live in [`docs/programme/briefs/`](programme/briefs/).
 | WS2 | Portability and contracts | 1 | | not started | | | |
 | WS3 | Identity and API hardening | 1 | | not started | | | |
 | WS4 | Delivery pipeline | 1 | A6 (OIDC) for the push dry run | not started | | | |
-| WS5 | Live sandbox estate and live test harness | 1 | A1–A5 | not started | orchestrator | | |
+| WS5 | Live sandbox estate and live test harness | 1 | D8, A3–A5 | not started | orchestrator | | |
 | WS6 | Durable storage and stateless app | 2 | D1, WS1 | not started | | | |
 | WS7 | Signals and detection breadth | 2 | D2, WS1, WS5 | not started | | | |
 | WS8 | Notifications and web UI | 2 | D3, WS3 (WS6 preferred) | not started | | | |
@@ -63,6 +63,7 @@ Hot files (additive changes only; merged in dependency order): `src/orqentis/boo
 | D5 | Monthly cost cap; approval for billable resources | Cap proposed in the kickoff message; budget with 50/80/100% alerts | pending | | |
 | D6 | Merge authority | Orchestrator merges workstream PRs after green CI and the review gate; owner approves every `prod` deploy and `v1.0.0`; owner does repo-admin settings | pending | | |
 | D7 | LLM resource and model | New dedicated Azure OpenAI account in Australia East; `gpt-5.5` GlobalStandard; WS10 compares newer deployments on the golden set | pending | | |
+| D8 | Sandbox Fabric capacity | New F2 `fabricopssandbox` | **Use the existing `fabricdemocap2026` (F4, Australia East, `RG-FABRICDEMO`, *Sandbox Environment 2026*). The orchestrator may resume it for live work and pause it when idle.** Consequences: USD 0.84/h while running; pausing also takes its 4 other workspaces offline; their load is part of the capacity signals; no new capacity is created (A1 and A2 withdrawn) | 2026-10-20 | |
 
 ## 4. Blockers and risks
 
@@ -73,6 +74,7 @@ Hot files (additive changes only; merged in dependency order): `src/orqentis/boo
 | R1 | `ubuntu-latest` migrates to Ubuntu 26 from 2026-10-19. WS4 pins runner images | WS4 | open |
 | R2 | The tenant hosts other production subscriptions and workspaces. All FabricOps resources stay in prefixed, tagged resource groups and workspaces | orchestrator | open |
 | R3 | "Service principals can call Fabric public APIs" is enabled for the whole organisation, not a scoped group. FabricOps docs recommend a scoped group; changing it is the tenant owner's call | owner | accepted for now |
+| R4 | The sandbox capacity (D8) is shared with 4 non-programme workspaces. Capacity signals include their load, and reading the Capacity Metrics app's workspace (not created by the programme) needs the owner's approval before the WS7 spike | orchestrator | open |
 
 ## 5. Cost
 
@@ -83,3 +85,4 @@ Monthly cap: pending (D5). Spend to date: USD 0 (no billable resources created).
 | Date | Change |
 |---|---|
 | 2026-10-20 | Kickoff: repo verified, live tenant discovered read-only, WS0 opened, ledger created |
+| 2026-10-20 | D8: sandbox uses the existing F4 `fabricdemocap2026`, with resume/pause authorised |

@@ -5,7 +5,9 @@ live tenant. Branch: `prod/ws5-live-sandbox`. One PR to `main`.
 
 ## Preconditions
 
-Owner approval of the Wave 1 list: A1 (sandbox resource group), A2 (F2 capacity), A3 (sandbox
+Decision D8: the sandbox uses the existing F4 capacity `fabricdemocap2026` (Australia East,
+`RG-FABRICDEMO`); the orchestrator may resume it for live work and pause it when idle, logging each
+change. Pausing also takes its 4 non-programme workspaces offline. Owner approval of A3 (sandbox
 workspaces and items), A4 (least-privilege test service principal), A5 (budget). Decision D0.
 
 ## Plan
@@ -13,7 +15,7 @@ workspaces and items), A4 (least-privilege test service principal), A5 (budget).
 1. `scripts/live-estate/` with idempotent `create.sh` and `teardown.sh` (bash + `az rest`), plus a
    `config.env.example` (names and ids only, no secrets). Create, in order:
    * workspaces `FabricOps Sandbox [DEV]`, `FabricOps Sandbox [TEST]`, `FabricOps Sandbox [PROD]`
-     and `FabricOps Sandbox Consumer` on the sandbox capacity;
+     and `FabricOps Sandbox Consumer` on `fabricdemocap2026`;
    * in each environment workspace: lakehouse `crm_source` with table `customers`, notebook
      `transform_customers`, pipeline `ingest_customers` running the notebook;
    * in the consumer workspace: a semantic model over the transformed table and a report;
@@ -35,7 +37,8 @@ workspaces and items), A4 (least-privilege test service principal), A5 (budget).
    secrets) and use them to harden the mocked REST tests. Every mapping mismatch gets an adapter fix
    and a regression test.
 6. Log every tenant change in `docs/live-environment.md`, keep `teardown.sh` current, pause the
-   capacity when idle.
+   capacity when idle. Teardown removes only programme workspaces and never deletes or reassigns
+   the shared capacity.
 
 ## Acceptance
 
