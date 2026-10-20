@@ -27,6 +27,7 @@ from orqentis.domain.principals import SYSTEM_PRINCIPAL
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
 from orqentis.observability.redaction import redact_text
+from orqentis.runtime.fencing import Fence, fenced
 from orqentis.runtime.lease import LeaderLease, Lease
 
 _log = get_logger(__name__)
@@ -330,7 +331,9 @@ class Scheduler:
         budget = asyncio.timeout(timeout.total_seconds() if timeout else None)
         try:
             async with budget:
-                await spec.run(context)
+                # Stores that fence (PostgreSQL) refuse this job's writes once the lease has been taken over.
+                with fenced(Fence(self._lease_name, context.holder_id, context.fencing_token)):
+                    await spec.run(context)
         except asyncio.CancelledError:
             outcome = "cancelled"
             _log.info("scheduled job cancelled", extra={"job": spec.name})

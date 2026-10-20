@@ -56,9 +56,9 @@ async def investigate(
 
 @router.get("/{incident_id}/investigation", response_model=InvestigationJob)
 async def latest_investigation(incident_id: str, c: ContainerDep, _: ReadPrincipal) -> InvestigationJob:
-    """The most recent investigation job of an incident (this process keeps the last few hundred jobs)."""
+    """The most recent investigation job of an incident (any replica's; a local run keeps the last few hundred)."""
     await c.incidents.get(incident_id)  # 404 for an unknown incident
-    job = c.investigation_jobs.latest_for(incident_id)
+    job = await c.investigation_jobs.latest_for(incident_id)
     if job is None:
         raise InvestigationJobNotFoundError(incident_id)
     return job

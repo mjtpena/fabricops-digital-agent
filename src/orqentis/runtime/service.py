@@ -97,6 +97,8 @@ class Runtime:
 
     async def _become_ready(self, container: Container) -> None:
         self._container = container
+        # Every replica works on queued investigations (a shared job store), whether or not it runs the scheduler.
+        await container.investigation_jobs.start()
         if self._settings.scheduler_enabled:
             await container.scheduler.start()
         else:

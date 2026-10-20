@@ -13,8 +13,8 @@ router = APIRouter(prefix="/investigations", tags=["investigations"])
 
 @router.get("/{job_id}", response_model=InvestigationJob)
 async def get_investigation(job_id: str, c: ContainerDep, _: ReadPrincipal) -> InvestigationJob:
-    """Status (QUEUED, RUNNING, SUCCEEDED, FAILED), timestamps and the result summary of one job."""
-    job = c.investigation_jobs.get(job_id)
+    """Status (QUEUED, RUNNING, SUCCEEDED, FAILED), timestamps and the result summary of one job (any replica)."""
+    job = await c.investigation_jobs.get(job_id)
     if job is None:
         raise InvestigationJobNotFoundError(job_id)
     return job

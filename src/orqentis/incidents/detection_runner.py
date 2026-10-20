@@ -11,11 +11,10 @@ the triggering event), so re-reading is harmless.
 
 from __future__ import annotations
 
-import asyncio
-
 from orqentis.domain.incidents import Incident
 from orqentis.incidents.detection import DetectionEngine
 from orqentis.observability.logging import get_logger
+from orqentis.runtime.mutex import InProcessMutex, Mutex
 from orqentis.storage.event_store import EventStore
 
 _log = get_logger(__name__)
@@ -31,6 +30,7 @@ class DetectionRunner:
         *,
         consumer: str = DETECTION_CONSUMER,
         batch_size: int = 500,
+        mutex: Mutex | None = None,
     ) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1")
@@ -38,11 +38,13 @@ class DetectionRunner:
         self._engine = engine
         self._consumer = consumer
         self._batch_size = batch_size
-        self._lock = asyncio.Lock()
+        # Detection is check-then-act (is there an incident for this failure? open one). Across replicas the mutex
+        # keeps two passes (the leader's scheduled run, a manual collection elsewhere) from both opening it.
+        self._mutex: Mutex = mutex if mutex is not None else InProcessMutex()
 
     async def run(self) -> list[Incident]:
         """Process every event stored since the last run; returns the incidents that were opened."""
-        async with self._lock:
+        async with self._mutex.hold("detection"):
             created: list[Incident] = []
             position = await self._events.get_cursor(self._consumer)
             processed = 0
