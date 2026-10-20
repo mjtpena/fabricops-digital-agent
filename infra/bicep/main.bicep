@@ -374,13 +374,15 @@ param alertTeamsWebhookUri string = ''
 @description('Base URL of docs/operations.md; every alert links to one section of it.')
 param alertRunbookBaseUrl string = 'https://github.com/mjtpena/fabricops-digital-agent/blob/main/docs/operations.md'
 
-@description('Minutes between evaluations of the log alert rules. Every alert window must be at least this long, or the deployment of that rule is refused.')
+@description('Minutes between evaluations of the log alert rules. Every log alert window below must be at least this long: the deployment is refused, naming the windows that are too short, otherwise.')
 @allowed([
   1
   5
   10
   15
   30
+  45
+  60
 ])
 param alertEvaluationFrequencyMinutes int = 5
 
@@ -394,9 +396,22 @@ param alertEvaluationFrequencyMinutes int = 5
 ])
 param alertAppDownWindowMinutes int = 5
 
-@description('restart-loop: window in minutes in which restarts are counted.')
-@minValue(5)
-@maxValue(1440)
+@description('restart-loop: window in minutes in which restarts are counted. Azure accepts only these log alert windows: 5, 10, 15, 30, 45, 60, 120, 180, 240, 300, 360, 1440 or 2880 minutes.')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
 param alertRestartWindowMinutes int = 15
 
 @description('restart-loop: alert at this many restarts in the window. One deploy is one restart.')
@@ -404,9 +419,22 @@ param alertRestartWindowMinutes int = 15
 @maxValue(100)
 param alertRestartThreshold int = 3
 
-@description('5xx: window in minutes over which the share of 5xx responses is computed.')
-@minValue(5)
-@maxValue(1440)
+@description('5xx: window in minutes over which the share of 5xx responses is computed (a log alert window, see alertRestartWindowMinutes).')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
 param alertHttp5xxWindowMinutes int = 10
 
 @description('5xx: alert when at least this percentage of the requests in the window answered 5xx.')
@@ -419,9 +447,22 @@ param alertHttp5xxRatePercent int = 5
 @maxValue(100000)
 param alertHttp5xxMinRequests int = 20
 
-@description('collector-errors: window in minutes in which failing collector runs are counted.')
-@minValue(5)
-@maxValue(1440)
+@description('collector-errors: window in minutes in which failing collector runs are counted (a log alert window, see alertRestartWindowMinutes).')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
 param alertCollectorErrorWindowMinutes int = 15
 
 @description('collector-errors: alert when one collector had at least this many failing runs in the window.')
@@ -429,15 +470,42 @@ param alertCollectorErrorWindowMinutes int = 15
 @maxValue(1000)
 param alertCollectorErrorRuns int = 2
 
-@description('heartbeat: alert when there was no successful collection for this many minutes. The alert is switched off automatically while schedulerEnabled or collectEnabled is false.')
-@minValue(5)
-@maxValue(1440)
+@description('heartbeat: alert when there was no successful collection for this many minutes (a log alert window, see alertRestartWindowMinutes). The alert is switched off automatically while schedulerEnabled or collectEnabled is false.')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
 param alertHeartbeatMinutes int = 15
 
-@description('audit-verification: window in minutes in which a failed verification keeps the alert open; keep it above auditVerifyIntervalMinutes.')
-@minValue(5)
-@maxValue(2880)
-param alertAuditFailureWindowMinutes int = 65
+@description('audit-verification: window in minutes in which a failed verification is visible to the rule. 0 (the default) derives it from auditVerifyIntervalMinutes: at least twice the interval, rounded up to the next log alert window (120 for the default hourly verification). Otherwise one of the log alert windows (see alertRestartWindowMinutes).')
+@allowed([
+  0
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
+param alertAuditFailureWindowMinutes int = 0
 
 // ================================================================================================= variables
 
@@ -1106,6 +1174,7 @@ module monitoring 'modules/monitoring.bicep' = if (monitoringEnabled) {
     // A deliberately paused scheduler (or collect job) must not page anyone for a missing heartbeat.
     heartbeatAlertEnabled: schedulerEnabled && collectEnabled
     auditFailureWindowMinutes: alertAuditFailureWindowMinutes
+    auditVerifyIntervalMinutes: auditVerifyIntervalMinutes
   }
 }
 

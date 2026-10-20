@@ -141,14 +141,17 @@ then collector errors, then 5xx: the earlier ones usually explain the later ones
 
 | Alert (`$PREFIX-...`) | Sev | Fires when (defaults) | Parameters |
 |---|---|---|---|
-| `audit-verification-failure` | 0 | a scheduled audit verification failed or could not read the log | `alertAuditFailureWindowMinutes` 65 |
+| `audit-verification-failure` | 0 | a scheduled audit verification failed or could not read the log | `alertAuditFailureWindowMinutes` 0 (derived: 120 min at the hourly default) |
 | `app-down` | 1 | no running replica for 5 min | `alertAppDownWindowMinutes` 5 |
 | `restart-loop` | 1 | 3 process starts or container terminations in 15 min | `alertRestartWindowMinutes` 15, `alertRestartThreshold` 3 |
 | `collection-heartbeat` | 1 | no successful collection for 15 min | `alertHeartbeatMinutes` 15 |
 | `collector-errors` | 2 | one collector had 2 failing runs in 15 min (one alert per collector) | `alertCollectorErrorWindowMinutes` 15, `alertCollectorErrorRuns` 2 |
 | `5xx-rate` | 2 | 5 % or more of at least 20 requests in 10 min answered 5xx | `alertHttp5xxWindowMinutes` 10, `alertHttp5xxRatePercent` 5, `alertHttp5xxMinRequests` 20 |
 
-A window must be at least as long as the evaluation frequency (the deployment of a rule whose window is shorter is refused).
+Windows are limited to the durations Azure accepts for a log alert (5, 10, 15, 30, 45, 60, 120, 180, 240, 300, 360, 1440 or
+2880 minutes; 1, 5, 15, 30 or 60 for the app-down metric alert), so a value such as 20 or 65 is rejected when the parameter
+is read. A window must also be at least as long as the evaluation frequency: otherwise the deployment stops with a message
+naming the windows that are too short.
 Change a threshold or window by editing the parameter file (or passing `-p alertRestartThreshold=5`) and redeploying; the
 deployed rule is replaced in place.
 
@@ -170,8 +173,10 @@ running, so the API and the scheduler are both off. Sev 1.
    (section 10), then investigate.
 
 **Limits.** The alert does not see a replica that exists but is not ready or keeps crashing; that is the *restart loop*,
-*heartbeat* and *5xx* alerts. If `Replicas` reports nothing (instead of `0`) for a deactivated app the alert cannot fire;
-the dev test fire (section 7) checks that.
+*heartbeat* and *5xx* alerts. If `Replicas` reports nothing (instead of `0`) for an app with no active revision, this alert
+cannot fire: **the *collection heartbeat* is the backstop**, firing within `alertHeartbeatMinutes` (15) because nothing
+collects any more. The dev test fire (section 7) shows which of the two happens; an availability test is the follow-up
+that would make this alert independent of that metric.
 
 ### Alert: restart loop
 
@@ -179,6 +184,8 @@ the dev test fire (section 7) checks that.
 window (15 min). One deployment is one start, so three in a quarter of an hour is a crash loop, not a rollout. The count is
 the larger of two independent signals: the application's own `orqentis process started` console line (it survives a
 metrics outage and a crash before the first metric is exported) and the platform's termination events in the system log.
+The console line is recognised by its JSON fields (`logger` = `orqentis.runtime.service`, `message` = `orqentis process
+started`), not by the phrase appearing anywhere in a line, so an error message from Fabric that quotes it does not count.
 Sev 1.
 
 **First three things to check.**
@@ -255,7 +262,12 @@ pipeline. It is switched off by the template while `schedulerEnabled` or `collec
 
 **Meaning.** The scheduled `audit-verify` job found the audit hash chain (or its immutable anchor, **after WS6**) invalid,
 or could not read the log after retrying; or an append was refused after the log shrank. The audit trail is the record of
-what the agent and the humans did, so **treat this as tampering until shown otherwise**. Sev 0.
+what the agent and the humans did, so **treat this as tampering until shown otherwise**. Sev 0. The log leg matches the
+exact JSON fields `logger` and `message` of our own two log lines, so text chosen by Fabric or the model cannot raise it.
+
+**It does not resolve itself.** After a restart the process forgets that the log had shrunk, so the next verification
+could look clean while the evidence is gone; a person resolves this alert after the investigation. While the failure
+persists the action group is reminded at most every six hours (`muteActionsDuration`), not at every evaluation.
 
 **First three things to check.** Preserve evidence first; do not restart, redeploy or "fix" anything yet.
 
@@ -271,8 +283,8 @@ what the agent and the humans did, so **treat this as tampering until shown othe
    and data-plane diagnostic logs if enabled; who holds `Storage File Data Privileged Contributor`; recent deployments.
 
 Do not edit the log to make it verify. After the investigation the owner decides whether to archive the broken file and
-start a new chain, which is a deliberate, audited act. With the chain valid again (or archived) the next hourly run closes
-the alert. A `read` failure that repeats is a storage problem: check the Azure Files mount (section 5, *app down*).
+start a new chain, which is a deliberate, audited act. With the chain valid again (or archived), resolve the alert in the portal; the next hourly run
+confirms it. A `read` failure that repeats is a storage problem: check the Azure Files mount (section 5, *app down*).
 
 ## 6. On call: the first five minutes
 

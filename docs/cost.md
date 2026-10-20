@@ -26,7 +26,7 @@ assume 730 hours (2,592,000 seconds in 30 days). The programme's budget and its 
 | Managed identities `id-<prefix>-reader`, `-actor` | n/a | free | n/a | 0 |
 | Easy Auth, ingress, probes | n/a | included | n/a | 0 |
 | Action group `ag-<prefix>` | email and webhook receivers | Email and webhook notifications are free within monthly allowances (see *Notifications* on the Azure Monitor pricing page) | [Azure Monitor pricing, Notifications](https://azure.microsoft.com/pricing/details/monitor/) | 0 |
-| Log alert rules (5) | one per alert, every 5 minutes | A flat monthly fee per rule by evaluation frequency: USD 3.00 at 1 min, **USD 1.50 at 5 min**, USD 0.50 at 15 min (meters `Alerts System Log Monitored at <n> Minute Frequency`) | service `Azure Monitor` | **USD 7.50** at the default 5 minutes; **USD 2.50** at 15 minutes (`alertEvaluationFrequencyMinutes=15`) |
+| Log alert rules (5) | one per alert, every 5 minutes | A flat monthly fee per rule by evaluation frequency: USD 3.00 at 1 min, **USD 1.50 at 5 min**, USD 0.50 at 15 min (meters `Alerts System Log Monitored at <n> Minute Frequency`) | service `Azure Monitor` | **USD 7.50** at the default 5 minutes; **USD 2.50** at 15 minutes (`alertEvaluationFrequencyMinutes=15` and `alertHttp5xxWindowMinutes=15`, see below) |
 | Metric alert rule (1, app down) | evaluated every minute | The first 10 metric time series a month are free | same | 0 |
 | Workbook | one shared workbook | free | n/a | 0 |
 
@@ -79,8 +79,10 @@ Biggest first:
    when reached. Reaching it also stops the metrics the alerts read, so the *collection heartbeat* alert fires and the
    audit and collector alerts go blind until the cap resets (shown on the workspace's *Daily cap* page): use it only where that is acceptable (a sandbox), never in
    `prod`.
-4. **Alert evaluation every 15 minutes** instead of 5 (`alertEvaluationFrequencyMinutes=15`): USD 5 a month less for five
-   rules, and alerts up to ten minutes later.
+4. **Alert evaluation every 15 minutes** instead of 5: USD 5 a month less for five rules, and alerts up to ten minutes
+   later. Every alert window must be at least the evaluation frequency (the deployment is refused otherwise, naming the
+   window), and the 5xx window defaults to 10 minutes, so set both: `alertEvaluationFrequencyMinutes=15` and
+   `alertHttp5xxWindowMinutes=15` (the other windows already default to 15 or more; the audit window is derived).
 5. **Retention at 30 days** (`logRetentionInDays=30`), the minimum the template accepts.
 6. **Right-size the container**: `containerCpu` / `containerMemory` (0.25 / 0.5 Gi is enough for the mock and sandbox
    estates; if the app is `OOMKilled`, raise it, see the *restart loop* section of `operations.md`).

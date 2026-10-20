@@ -51,17 +51,19 @@ param teamsWebhookUri string = ''
 @description('Base URL of docs/operations.md. Each alert links to one section of it (<base>#alert-...). Point it at your fork or an internal copy of the guide when you run your own.')
 param runbookBaseUrl string = 'https://github.com/mjtpena/fabricops-digital-agent/blob/main/docs/operations.md'
 
-@description('Minutes between evaluations of the log alert rules. Every alert window must be at least this long, or the deployment of that rule is refused.')
+@description('Minutes between evaluations of the log alert rules. Every log alert window must be at least this long: the deployment is refused, with the names of the windows that are too short, otherwise.')
 @allowed([
   1
   5
   10
   15
   30
+  45
+  60
 ])
 param evaluationFrequencyMinutes int = 5
 
-@description('app-down: minutes for which the Container App must have had no running replica.')
+@description('app-down: minutes for which the Container App must have had no running replica (a metric alert: Azure offers 1, 5, 15, 30 or 60).')
 @allowed([
   1
   5
@@ -71,9 +73,22 @@ param evaluationFrequencyMinutes int = 5
 ])
 param appDownWindowMinutes int = 5
 
-@description('restart-loop: window in minutes in which process starts or container terminations are counted.')
-@minValue(5)
-@maxValue(1440)
+@description('restart-loop: window in minutes in which process starts or container terminations are counted. One of the windows Azure offers for a log alert: 5, 10, 15, 30, 45, 60, 120, 180, 240, 300, 360, 1440 or 2880.')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
 param restartWindowMinutes int = 15
 
 @description('restart-loop: alert at this many restarts within the window. One deploy causes one start, so 3 is a loop, not a rollout.')
@@ -81,9 +96,22 @@ param restartWindowMinutes int = 15
 @maxValue(100)
 param restartThreshold int = 3
 
-@description('5xx: window in minutes over which the rate is computed.')
-@minValue(5)
-@maxValue(1440)
+@description('5xx: window in minutes over which the rate is computed (an Azure log alert window, see restartWindowMinutes). At least the evaluation frequency.')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
 param http5xxWindowMinutes int = 10
 
 @description('5xx: alert when at least this percentage of requests in the window answered 5xx.')
@@ -96,9 +124,22 @@ param http5xxRatePercent int = 5
 @maxValue(100000)
 param http5xxMinRequests int = 20
 
-@description('collector-errors: window in minutes in which failing collector runs are counted.')
-@minValue(5)
-@maxValue(1440)
+@description('collector-errors: window in minutes in which failing collector runs are counted (an Azure log alert window, see restartWindowMinutes).')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
 param collectorErrorWindowMinutes int = 15
 
 @description('collector-errors: alert when one collector had at least this many failing runs in the window (a run fails when any of its scopes fails). The default collection interval is 5 minutes, so 2 means two consecutive failures.')
@@ -106,25 +147,98 @@ param collectorErrorWindowMinutes int = 15
 @maxValue(1000)
 param collectorErrorRuns int = 2
 
-@description('heartbeat: alert when there was no successful collection (a collect + detect run in which not everything failed) for this many minutes.')
-@minValue(5)
-@maxValue(1440)
+@description('heartbeat: alert when there was no successful collection (a collect + detect run in which not everything failed) for this many minutes (an Azure log alert window, see restartWindowMinutes).')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
 param heartbeatMinutes int = 15
 
 @description('heartbeat: false when the collect job is not scheduled (schedulerEnabled or collectEnabled is false), so a deliberately paused scheduler does not page anyone.')
 param heartbeatAlertEnabled bool = true
 
-@description('audit-verification: window in minutes in which a failed verification is still visible to the rule. Keep it above the verification interval (60 by default) so the alert stays open until the next run.')
-@minValue(5)
-@maxValue(2880)
-param auditFailureWindowMinutes int = 65
+@description('audit-verification: window in minutes in which a failed verification is visible to the rule. 0 (the default) derives it from auditVerifyIntervalMinutes: at least twice the interval, rounded up to the next window Azure offers (120 for the default hourly verification). Otherwise one of the log alert windows (see restartWindowMinutes).')
+@allowed([
+  0
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
+param auditFailureWindowMinutes int = 0
+
+@description('Minutes between audit verifications (main.bicep auditVerifyIntervalMinutes); the audit alert window is derived from it.')
+@minValue(1)
+@maxValue(10080)
+param auditVerifyIntervalMinutes int = 60
 
 // ================================================================================================= variables
 
 var actionGroupName = 'ag-${prefix}'
 // Action group short names are limited to 12 characters (they appear in SMS and push notifications).
 var actionGroupShortName = take(replace(replace(prefix, '-', ''), '_', ''), 12)
-var evaluationFrequency = 'PT${evaluationFrequencyMinutes}M'
+// Azure accepts only these ISO 8601 durations for an alert's window and evaluation frequency ('PT60M' and 'PT65M' are
+// refused), so minutes are mapped explicitly instead of being formatted into 'PT<n>M'. A log alert window is any of
+// these except PT1M (which needs a one-minute frequency); a metric alert window is PT1M, PT5M, PT15M, PT30M or PT1H.
+var isoDuration = {
+  '1': 'PT1M'
+  '5': 'PT5M'
+  '10': 'PT10M'
+  '15': 'PT15M'
+  '30': 'PT30M'
+  '45': 'PT45M'
+  '60': 'PT1H'
+  '120': 'PT2H'
+  '180': 'PT3H'
+  '240': 'PT4H'
+  '300': 'PT5H'
+  '360': 'PT6H'
+  '1440': 'P1D'
+  '2880': 'P2D'
+}
+var logAlertWindowMinutes = [5, 10, 15, 30, 45, 60, 120, 180, 240, 300, 360, 1440, 2880]
+
+// The audit alert must still see the last failed verification while the next one has not run yet: at least twice the
+// verification interval, rounded up to a window Azure offers (2880 minutes, two days, is the longest).
+var auditWindowWanted = auditFailureWindowMinutes > 0 ? auditFailureWindowMinutes : 2 * auditVerifyIntervalMinutes
+var auditWindowCandidates = filter(logAlertWindowMinutes, minutes => minutes >= auditWindowWanted)
+var auditWindowMinutes = empty(auditWindowCandidates) ? 2880 : auditWindowCandidates[0]
+
+var evaluationFrequency = isoDuration['${evaluationFrequencyMinutes}']
+
+// Bicep has no assert: a window shorter than the evaluation frequency makes Azure refuse the rule, so say which window
+// it is before anything is deployed (the same module main.bicep uses for the service-principal inputs).
+var alertWindows = {
+  alertRestartWindowMinutes: restartWindowMinutes
+  alertHttp5xxWindowMinutes: http5xxWindowMinutes
+  alertCollectorErrorWindowMinutes: collectorErrorWindowMinutes
+  alertHeartbeatMinutes: heartbeatMinutes
+  alertAuditFailureWindowMinutes: auditWindowMinutes
+}
+var windowsTooShort = filter(items(alertWindows), window => window.value < evaluationFrequencyMinutes)
+var alertWindowProblem = empty(windowsTooShort)
+  ? 'ok'
+  : 'these alert windows (minutes) are shorter than alertEvaluationFrequencyMinutes (${evaluationFrequencyMinutes}): ${join(map(windowsTooShort, window => '${window.key}=${window.value}'), ', ')}. Raise them or lower the frequency'
 
 var runbookAppDown = '${runbookBaseUrl}#alert-app-down'
 var runbookRestartLoop = '${runbookBaseUrl}#alert-restart-loop'
@@ -138,10 +252,15 @@ var restartLoopQuery = replace(
   '''
 // Process starts (one console line per start) and container terminations reported by the platform; one restart
 // shows up in both, so the larger of the two is the number of restarts.
+// The decision is the exact match on the JSON fields logger and message, never a phrase anywhere in the line: other
+// lines carry text chosen by Fabric or the model, and a Fabric error that quotes this phrase must not count as a start.
+// The `has` only narrows the rows before they are parsed.
 let starts = toscalar(
     ContainerAppConsoleLogs_CL
     | where ContainerAppName_s == '__APP__'
-    | where Log_s has 'orqentis process started'
+    | where Log_s has 'process started'
+    | extend log = parse_json(Log_s)
+    | where tostring(log.logger) == 'orqentis.runtime.service' and tostring(log.message) == 'orqentis process started'
     | count);
 let terminations = toscalar(
     ContainerAppSystemLogs_CL
@@ -186,6 +305,9 @@ AppMetrics
 var auditVerificationQuery = replace(
   '''
 // Failed verifications from the metric and from the console log (the log line also covers a metrics outage).
+// The log leg matches the exact JSON fields logger and message, never a phrase anywhere in the line: lines that carry
+// text chosen by Fabric or the model must not be able to raise a severity 0 tampering alert. The `has` only narrows
+// the rows before they are parsed.
 let fromMetric = toscalar(
     AppMetrics
     | where Name == 'orqentis.audit.verifications'
@@ -194,7 +316,10 @@ let fromMetric = toscalar(
 let fromLog = toscalar(
     ContainerAppConsoleLogs_CL
     | where ContainerAppName_s == '__APP__'
-    | where Log_s has 'audit chain verification failed' or Log_s has 'audit log integrity breach'
+    | where Log_s has 'audit chain verification failed' or Log_s has 'integrity breach'
+    | extend log = parse_json(Log_s)
+    | where (tostring(log.logger) == 'orqentis.runtime.audit_verification' and tostring(log.message) == 'audit chain verification failed')
+        or (tostring(log.logger) == 'orqentis.observability.audit' and tostring(log.message) == 'audit log integrity breach; appends are refused')
     | count);
 print failures = coalesce(fromMetric, 0.0) + todouble(coalesce(fromLog, 0))
 ''',
@@ -232,6 +357,14 @@ resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
 
 // ================================================================================================= alert rules
 
+// Fails the deployment, naming the windows, when one is shorter than the evaluation frequency.
+module alertWindowCheck 'input-check.bicep' = {
+  name: 'orqentis-check-alert-windows'
+  params: {
+    result: any(alertWindowProblem)
+  }
+}
+
 @description('App down: the Container App has had no running replica for the whole window. Sev 1.')
 resource appDown 'Microsoft.Insights/metricAlerts@2018-03-01' = {
   name: '${prefix}-app-down'
@@ -243,7 +376,7 @@ resource appDown 'Microsoft.Insights/metricAlerts@2018-03-01' = {
     enabled: true
     scopes: [containerAppId]
     evaluationFrequency: 'PT1M'
-    windowSize: 'PT${appDownWindowMinutes}M'
+    windowSize: isoDuration['${appDownWindowMinutes}']
     autoMitigate: true
     criteria: {
       'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
@@ -274,6 +407,7 @@ resource appDown 'Microsoft.Insights/metricAlerts@2018-03-01' = {
 @description('Restart loop: the app process (container) started or was terminated restartThreshold times within the window. Sev 1.')
 resource restartLoop 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
   name: '${prefix}-restart-loop'
+  dependsOn: [alertWindowCheck]
   location: location
   tags: tags
   kind: 'LogAlert'
@@ -284,7 +418,7 @@ resource restartLoop 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview'
     enabled: true
     scopes: [logAnalyticsWorkspaceId]
     evaluationFrequency: evaluationFrequency
-    windowSize: 'PT${restartWindowMinutes}M'
+    windowSize: isoDuration['${restartWindowMinutes}']
     skipQueryValidation: true
     autoMitigate: true
     criteria: {
@@ -315,6 +449,7 @@ resource restartLoop 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview'
 @description('5xx rate: at least http5xxRatePercent percent of the requests in the window answered 5xx. Sev 2.')
 resource http5xx 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
   name: '${prefix}-5xx-rate'
+  dependsOn: [alertWindowCheck]
   location: location
   tags: tags
   kind: 'LogAlert'
@@ -325,7 +460,7 @@ resource http5xx 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
     enabled: true
     scopes: [logAnalyticsWorkspaceId]
     evaluationFrequency: evaluationFrequency
-    windowSize: 'PT${http5xxWindowMinutes}M'
+    windowSize: isoDuration['${http5xxWindowMinutes}']
     skipQueryValidation: true
     autoMitigate: true
     criteria: {
@@ -356,6 +491,7 @@ resource http5xx 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
 @description('Collector errors: a collector had collectorErrorRuns or more failing runs within the window (one alert per collector). Sev 2.')
 resource collectorErrors 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
   name: '${prefix}-collector-errors'
+  dependsOn: [alertWindowCheck]
   location: location
   tags: tags
   kind: 'LogAlert'
@@ -366,7 +502,7 @@ resource collectorErrors 'Microsoft.Insights/scheduledQueryRules@2023-03-15-prev
     enabled: true
     scopes: [logAnalyticsWorkspaceId]
     evaluationFrequency: evaluationFrequency
-    windowSize: 'PT${collectorErrorWindowMinutes}M'
+    windowSize: isoDuration['${collectorErrorWindowMinutes}']
     skipQueryValidation: true
     autoMitigate: true
     criteria: {
@@ -404,6 +540,7 @@ resource collectorErrors 'Microsoft.Insights/scheduledQueryRules@2023-03-15-prev
 @description('Heartbeat: no successful collection for heartbeatMinutes minutes. Sev 1.')
 resource heartbeat 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
   name: '${prefix}-collection-heartbeat'
+  dependsOn: [alertWindowCheck]
   location: location
   tags: tags
   kind: 'LogAlert'
@@ -414,7 +551,7 @@ resource heartbeat 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' =
     enabled: heartbeatAlertEnabled
     scopes: [logAnalyticsWorkspaceId]
     evaluationFrequency: evaluationFrequency
-    windowSize: 'PT${heartbeatMinutes}M'
+    windowSize: isoDuration['${heartbeatMinutes}']
     skipQueryValidation: true
     autoMitigate: true
     criteria: {
@@ -445,6 +582,7 @@ resource heartbeat 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' =
 @description('Audit verification failure: the hash chain (or its immutable anchor) did not verify, or could not be read. Sev 0.')
 resource auditVerification 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
   name: '${prefix}-audit-verification-failure'
+  dependsOn: [alertWindowCheck]
   location: location
   tags: tags
   kind: 'LogAlert'
@@ -455,9 +593,13 @@ resource auditVerification 'Microsoft.Insights/scheduledQueryRules@2023-03-15-pr
     enabled: true
     scopes: [logAnalyticsWorkspaceId]
     evaluationFrequency: evaluationFrequency
-    windowSize: 'PT${auditFailureWindowMinutes}M'
+    windowSize: isoDuration['${auditWindowMinutes}']
     skipQueryValidation: true
-    autoMitigate: true
+    // Tampering evidence must not disappear on its own: after a restart the in-memory proof of a truncated log is gone and
+    // the next verification could look clean, so a person resolves this alert. While the failure persists, the action
+    // group is reminded of it at most every six hours instead of at every evaluation.
+    autoMitigate: false
+    muteActionsDuration: 'PT6H'
     criteria: {
       allOf: [
         {
@@ -592,7 +734,9 @@ var chartsRestarts = replace(
   '''
 ContainerAppConsoleLogs_CL
 | where ContainerAppName_s == '__APP__'
-| where Log_s has 'orqentis process started'
+| where Log_s has 'process started'
+| extend log = parse_json(Log_s)
+| where tostring(log.logger) == 'orqentis.runtime.service' and tostring(log.message) == 'orqentis process started'
 | summarize processStarts = count() by bin(TimeGenerated, 15m)
 ''',
   '__APP__',

@@ -73,7 +73,8 @@ param fileShareQuotaGiB = 8
 //   ALERT_TEAMS_WEBHOOK_URI   a Teams Workflows webhook URL (a secret: keep it in the deployer's secret store)
 // Both empty: the rules still evaluate and show in the portal, but nobody is notified.
 var alertEmailList = readEnvironmentVariable('ALERT_EMAIL_RECEIVERS', '')
-param alertEmailReceivers = empty(alertEmailList) ? [] : split(alertEmailList, ',')
+// Whitespace around an address is trimmed ("a@example.com, b@example.com") and empty entries are dropped.
+param alertEmailReceivers = filter(map(split(alertEmailList, ','), address => trim(address)), address => !empty(address))
 param alertTeamsWebhookUri = readEnvironmentVariable('ALERT_TEAMS_WEBHOOK_URI', '')
 
 // A daily cap keeps the sandbox bill bounded. Reaching it stops ingestion (the heartbeat alert then fires) until the

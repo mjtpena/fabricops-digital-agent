@@ -104,7 +104,8 @@ param fabricAuthMode = 'managed_identity'
 param monitoringEnabled = true
 param alertEmailReceivers = []                  // for example ['oncall@example.com']; real addresses stay out of the repository
 // param alertTeamsWebhookUri = readEnvironmentVariable('ALERT_TEAMS_WEBHOOK_URI', '')   // a secret: never write the URL here
-// Thresholds and windows (the values below are the defaults).
+// Thresholds and windows (the values below are the defaults). Windows are limited to what Azure accepts: 5, 10, 15, 30,
+// 45, 60, 120, 180, 240, 300, 360, 1440 or 2880 minutes, and none may be shorter than alertEvaluationFrequencyMinutes.
 param alertEvaluationFrequencyMinutes = 5
 param alertAppDownWindowMinutes = 5             // no running replica for this long
 param alertRestartWindowMinutes = 15            // restart loop: alertRestartThreshold restarts within this window
@@ -115,7 +116,7 @@ param alertHttp5xxMinRequests = 20
 param alertCollectorErrorWindowMinutes = 15     // collector errors: alertCollectorErrorRuns failing runs of one collector
 param alertCollectorErrorRuns = 2
 param alertHeartbeatMinutes = 15                // no successful collection for this long
-param alertAuditFailureWindowMinutes = 65       // keep above auditVerifyIntervalMinutes
+param alertAuditFailureWindowMinutes = 0        // 0: derived from auditVerifyIntervalMinutes (twice the interval, rounded up to a window Azure offers)
 param auditVerifyEnabled = true
 param auditVerifyIntervalMinutes = 60
 // Log Analytics daily cap in GB (-1: none). Caps stop ingestion when reached, alerts included: dev only.

@@ -62,6 +62,21 @@ conditions, and they have a guide for running it.
      component, because the restart and audit signals live in Container Apps tables. They are deployed with
      `skipQueryValidation`: the tables exist only after the first ingested row, and a deployment must not fail on a new
      environment.
+   * **Console-log alerts trust fields, not phrases.** Some log lines carry text chosen by Fabric (a collector's error
+     message) or by the model (the exception text of a failed reasoner), so a query that matched a phrase anywhere in a line
+     would let a Fabric error that quotes `audit chain verification failed` raise the Sev 0 tampering alert, or one that quotes
+     `orqentis process started` inflate the restart count. The queries parse `Log_s` as JSON and match the exact `logger` and
+     `message` fields (`has` only narrows the rows first). That is sound because every log call in the application passes a
+     constant message and puts variable text in extra fields (a test walks the source to keep it so), and because the JSON
+     formatter escapes newlines, so one record is one line and a forged line cannot be smuggled inside another.
+   * **Windows are what Azure accepts.** Azure takes only fixed durations for a log alert window (5, 10, 15, 30, 45 minutes, 1-6
+     hours, 1 or 2 days) and refuses anything else, so the window parameters are `@allowed` lists, minutes are mapped to ISO
+     durations through an explicit table (never formatted into `PT<n>M`), a window shorter than the evaluation frequency stops
+     the deployment with a message that names it, and the audit window is derived from the verification interval (twice the
+     interval, rounded up to an allowed window).
+   * **The audit alert is sticky.** It has `autoMitigate: false` and re-notifies at most every six hours: after a restart the
+     in-memory proof of a truncated log is gone and the next verification can look clean, so a person, not the clock, resolves
+     a tampering alert.
    * **Silence is detected by absence.** The heartbeat query counts the successful-run rows and fires on `0`
      (`count()` over an empty set is `0`, a `sum()` would be null and never fire). It is switched off in the template while
      `schedulerEnabled` or `collectEnabled` is false, so a deliberately paused scheduler does not page anyone.
@@ -114,7 +129,8 @@ conditions, and they have a guide for running it.
 * The alerts cost money: five log alert rules at a 5-minute evaluation frequency are about USD 7.50 a month at list price
   (USD 2.50 at 15 minutes), more than the programme's earlier USD 1-3 estimate for one deliberate sandbox (`docs/cost.md`).
 * Blind spots, stated: **app down** sees a replica that does not exist, not one that runs without being ready (that appears as
-  a restart loop, a missing heartbeat or 5xx); the 5xx alert counts what the *app* answered, so 503s produced by the ingress
+  a restart loop, a missing heartbeat or 5xx), and if the `Replicas` metric reports no data for an app without an active
+  revision it cannot fire at all, in which case the heartbeat (15 minutes) is the backstop; the 5xx alert counts what the *app* answered, so 503s produced by the ingress
   while no replica is ready are covered by app down and the heartbeat; the heartbeat depends on the metrics pipeline, so a
   broken exporter looks like a dead scheduler (the first check says so).
 * With the PostgreSQL storage (WS6) the app runs two or more replicas: only the lease holder emits the heartbeat and
