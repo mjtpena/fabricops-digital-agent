@@ -5,6 +5,8 @@
 version: "2026.10.1"
 default_effect: DENY
 
+# Approval roles only. The API-only roles FabricOps.Automation and FabricOps.Reader (orqentis.api.roles) are
+# deliberately absent: neither may ever decide or execute an approval, so never add them here.
 role_hierarchy:          # lowest to highest privilege
   - FabricOps.Operator
   - FabricOps.PlatformAdmin

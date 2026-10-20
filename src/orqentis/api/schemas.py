@@ -3,21 +3,55 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.incidents import ApprovalState, BlastRadius, Incident, IncidentStatus
 from orqentis.domain.taxonomy import Severity
+from orqentis.runtime.investigations import InvestigationJob
 
 
 class Health(BaseModel):
+    """Anonymous liveness answer. Deliberately without capability flags (see ``SystemInfo``).
+
+    Says nothing about whether the estate has been loaded: that is ``Ready`` (``/health/ready``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     status: str
     version: str
     fabric_mode: str
     reasoner: str
-    write_actions_enabled: bool
     time: datetime
+
+
+class Ready(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ready"] = "ready"
+    scheduler: Literal["disabled", "standby", "leader"]
+
+
+class NotReady(BaseModel):
+    """``503`` body of the unauthenticated readiness probe: a fixed code and an exception type, never a message."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["not_ready"] = "not_ready"
+    reason: Literal["starting", "build_failed"]
+    # Class name of the last build failure (for example ``FileNotFoundError``); the detail is in the logs only.
+    error_type: str | None = None
+    attempts: int
+    retry_in_seconds: float | None = None
+
+
+class SystemInfo(Health):
+    """What an authenticated caller may learn about the deployment, including whether writes are enabled."""
+
+    write_actions_enabled: bool
 
 
 class IncidentSummary(BaseModel):
@@ -56,13 +90,12 @@ class IncidentSummary(BaseModel):
         )
 
 
-class InvestigationResult(BaseModel):
-    incident: IncidentSummary
-    trace_id: str
-    findings: int
-    evidence: int
-    tool_calls: int
-    approval_ids: list[str]
+class InvestigationAccepted(InvestigationJob):
+    """``202 Accepted`` for ``POST /incidents/{id}/investigate``: the job to poll."""
+
+    status_url: str
+    # True when an investigation of this incident was already queued or running and that job is returned.
+    already_active: bool = False
 
 
 class CollectionResult(BaseModel):

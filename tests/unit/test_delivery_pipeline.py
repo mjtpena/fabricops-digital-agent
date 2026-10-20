@@ -457,3 +457,44 @@ def test_the_audit_allowlist_never_excuses_build_tooling() -> None:
         assert not re.search(rf'package\s*=\s*"{tool}"', code), (
             f"{tool} belongs outside the audited set, not in the allowlist"
         )
+
+
+def _ci_check_names() -> set[str]:
+    names: set[str] = set()
+    ci = _load(WORKFLOWS / "ci.yml")
+    for job in ci["jobs"].values():
+        versions = job.get("strategy", {}).get("matrix", {}).get("python-version", [None])
+        for version in versions:
+            names.add(str(job["name"]).replace("${{ matrix.python-version }}", str(version)))
+    return names
+
+
+def test_required_checks_in_the_docs_are_exactly_the_ci_jobs() -> None:
+    text = (ROOT / "docs" / "delivery.md").read_text(encoding="utf-8")
+    documented = set(re.findall(r'\{ "context": "([^"]+)", "integration_id": 15368 \}', text))
+    assert documented == _ci_check_names(), (
+        "docs/delivery.md section 8 and the jobs in ci.yml must list the same checks"
+    )
+
+
+@pytest.mark.parametrize("environment", ["dev", "test", "prod"])
+def test_environment_files_match_the_merged_template(environment: str) -> None:
+    """The parameters introduced by WS1 (scheduler) and WS3 (ingress) are set deliberately in every environment."""
+    text = (ROOT / "infra" / "bicep" / "env" / f"{environment}.bicepparam").read_text(encoding="utf-8")
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+    assert "param ingressMode = 'externalAuthenticated'" in code
+    assert "externalIngress" not in code, "deprecated, and the template fails a deployment that sets both"
+    assert "param anonymousHealthEndpoints = true" in code, "the smoke test calls /health without a token"
+    assert "allowedIpRanges" not in code, "an allow list would deny the GitHub-hosted runner that smoke-tests the app"
+    assert "param schedulerEnabled = true" in code
+    assert "param defaultTimezone = " in code
+    assert "param enableWriteActions = false" in code
+
+
+def test_bicep_validation_script_builds_every_parameter_file() -> None:
+    text = (ROOT / "scripts" / "validate-bicep.sh").read_text(encoding="utf-8")
+    assert "infra/bicep/examples/*.bicepparam" in text
+    assert "infra/bicep/env/*.bicepparam" in text
+    assert "infra/bicep/main.bicepparam" in text
+    on_disk = {p.name for p in (ROOT / "infra" / "bicep" / "env").glob("*.bicepparam")}
+    assert on_disk == {"dev.bicepparam", "test.bicepparam", "prod.bicepparam"}

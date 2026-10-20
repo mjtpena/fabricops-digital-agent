@@ -110,9 +110,16 @@ module-per-scope pattern as the Azure OpenAI role.
   a token that can push images cannot deploy.
 * CI runs twice for a merge (on the pull request, then again inside `cd.yml`). That is the price of making the registry
   and the environments unreachable without CI, independent of branch protection.
-* `dev` smoke tests need the API reachable from a GitHub-hosted runner: the environment files set
-  `externalIngress = true` (Entra-authenticated; unauthenticated callers get 401). WS3 owns the ingress modes and
-  excludes `/health` from authentication by default; if that is turned off set `SMOKE_HEALTH_AUTHENTICATED=true`.
+* The smoke tests need the API reachable from a GitHub-hosted runner: the environment files set
+  `ingressMode = 'externalAuthenticated'` (ADR-0015; Entra-authenticated, unauthenticated callers get 401) with no IP
+  allow list, and keep `anonymousHealthEndpoints = true` so that `/health` needs no token, which is what the smoke test
+  asserts. CI (`scripts/validate-bicep.sh`) fails if an environment file reverts to the deprecated `externalIngress`, drops
+  the anonymous health endpoints or turns the scheduler off. Whether `prod` should be public at all is the owner's call;
+  `vnet` mode needs a runner inside the network. If a deployment turns the anonymous endpoints off, set
+  `SMOKE_HEALTH_AUTHENTICATED=true`.
+* The autonomous scheduler (ADR-0013) is on in all three environments. A rollout runs the old and the new revision side
+  by side on one SQLite volume until the PostgreSQL system of record exists, so the start-up delay and a post-deploy
+  `GET /audit/verify` are the mitigations (infra/bicep/README.md); a pipeline step that verifies the audit chain is a follow-up.
 * Required reviewers, deployment rules and rulesets on a private repository need a GitHub plan that supports them; the
   owner must verify that before `prod` is configured (docs/delivery.md).
 * The dependency set is not locked (`pip install` resolves fresh), so image builds are not bit-for-bit reproducible.

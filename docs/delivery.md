@@ -107,8 +107,9 @@ export PROD_API_APP_ID=<appId of the prod API registration>
 ```
 
 The registration needs the **`FabricOps.Automation`** application role (`allowedMemberTypes: ["Application"]`), which
-the smoke test identity uses. It is added by the WS3 script in that README. If it is not there yet, add it by hand,
-keeping the roles that already exist (`--app-roles` replaces the whole list):
+the smoke test identity uses, and the `idtyp` optional claim and `requestedAccessTokenVersion = 2` that the API relies on
+to classify app-only callers as services. The script in that README creates all of it. If a registration predates it, add
+the role by hand, keeping the roles that already exist (`--app-roles` replaces the whole list):
 
 ```bash
 APP_ID=$DEV_API_APP_ID        # repeat for test and prod
@@ -593,7 +594,7 @@ bump it, change `ACTIONLINT_VERSION` and `ACTIONLINT_SHA256` together (the check
 | `Resource group ... does not exist` | Section 1 |
 | Deployment fine, smoke test `AADSTS501051` or `403` on `/incidents` | The deploy principal lacks the `FabricOps.Automation` role (section 6), or the role is missing on the API registration (section 2) |
 | Smoke test `FAIL revision` | The latest revision is not ready, is not serving all traffic or runs another image than the one deployed. Check `az containerapp revision list -g rg-fabricops-<env> -n ca-fabricops-<env>` and the revision's system logs |
-| Smoke test `GET /health -> 401` | `/health` is behind Container Apps authentication: either `anonymousHealthEndpoints = false`, or the template deployed predates WS3's change (before it, every path required sign-in). Set `SMOKE_HEALTH_AUTHENTICATED=true`, or deploy a template that excludes `/health` |
+| Smoke test `GET /health -> 401` | `/health` is behind Container Apps authentication, which means `anonymousHealthEndpoints = false` was set (the default and the environment files keep it `true`). Either turn it back on, or set `SMOKE_HEALTH_AUTHENTICATED=true` |
 | First revision `ImagePullBackOff` | `AcrPull` propagation delay: restart the revision |
 | Release: `No successful CD run on main` | CD has not finished for the tagged commit, or `prod` is still waiting for approval, or a stage failed. Wait for or fix CD, then re-push the tag |
 | CD: `already points at … Tags are not moved` | An earlier build of this commit already tagged an image. Re-running every job rebuilds a different digest; push a new commit instead, or re-run only the failed jobs |

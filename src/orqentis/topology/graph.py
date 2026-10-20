@@ -34,12 +34,20 @@ class GraphNode:
 class DependencyGraph:
     def __init__(self, edges: Iterable[Dependency], catalog: EstateCatalog) -> None:
         self._catalog = catalog
-        self._edges = list(edges)
+        self._edges: list[Dependency] = []
         self._down: dict[str, list[Dependency]] = {}
         self._up: dict[str, list[Dependency]] = {}
-        for edge in self._edges:
-            self._down.setdefault(edge.upstream_id, []).append(edge)
-            self._up.setdefault(edge.downstream_id, []).append(edge)
+        self.replace_edges(edges)
+
+    def replace_edges(self, edges: Iterable[Dependency]) -> None:
+        """Swap in a new edge set. The indexes are rebuilt aside and bound at the end, with no ``await`` between."""
+        new_edges = list(edges)
+        down: dict[str, list[Dependency]] = {}
+        up: dict[str, list[Dependency]] = {}
+        for edge in new_edges:
+            down.setdefault(edge.upstream_id, []).append(edge)
+            up.setdefault(edge.downstream_id, []).append(edge)
+        self._edges, self._down, self._up = new_edges, down, up
 
     @classmethod
     async def from_store(cls, store: DependencyStore, catalog: EstateCatalog) -> DependencyGraph:

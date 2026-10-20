@@ -7,7 +7,9 @@
 # defaults for them, so a forgotten variable fails the deployment instead of deploying a wrong value. This script
 # supplies obvious placeholders (never real identifiers) so the files can be compiled without a deployment.
 #
-# It also asserts the production safety setting: prod.bicepparam must keep enableWriteActions = false.
+# It also asserts, for dev, test and prod: enableWriteActions = false (production writes stay disabled), an explicit
+# ingressMode without the deprecated externalIngress, anonymous health endpoints (the smoke test needs them) and the
+# scheduler on.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -37,7 +39,7 @@ echo "az bicep build infra/bicep/main.bicep"
 az bicep build --file infra/bicep/main.bicep --stdout > /dev/null
 
 shopt -s nullglob
-param_files=(infra/bicep/main.bicepparam infra/bicep/env/*.bicepparam)
+param_files=(infra/bicep/main.bicepparam infra/bicep/examples/*.bicepparam infra/bicep/env/*.bicepparam)
 for file in "${param_files[@]}"; do
   echo "az bicep build-params ${file}"
   az bicep build-params --file "$file" --stdout > "${out_dir}/$(basename "$file").json"
@@ -52,17 +54,42 @@ done
 
 # `build-params --stdout` prints {"parametersJson": "<ARM parameters file as a string>", ...}; the parameters file
 # itself is {"parameters": {"enableWriteActions": {"value": false}, ...}}.
-"$python_bin" -I - "${out_dir}/prod.bicepparam.json" <<'PY'
+"$python_bin" -I - "$out_dir" <<'PY'
 import json
+import pathlib
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as handle:
-    parameters = json.loads(json.load(handle)["parametersJson"])["parameters"]
-if parameters.get("enableWriteActions", {}).get("value") is not False:
-    sys.exit("infra/bicep/env/prod.bicepparam must set enableWriteActions = false")
-if parameters.get("deploymentEnvironment", {}).get("value") != "prod":
-    sys.exit("infra/bicep/env/prod.bicepparam must set deploymentEnvironment = 'prod'")
-print("prod.bicepparam: enableWriteActions = false")
+out_dir = pathlib.Path(sys.argv[1])
+
+
+def parameters(environment: str) -> dict:
+    document = json.loads((out_dir / f"{environment}.bicepparam.json").read_text(encoding="utf-8"))
+    return json.loads(document["parametersJson"])["parameters"]
+
+
+def value(params: dict, name: str):
+    return params.get(name, {}).get("value")
+
+
+for environment in ("dev", "test", "prod"):
+    params = parameters(environment)
+    where = f"infra/bicep/env/{environment}.bicepparam"
+    if value(params, "deploymentEnvironment") != environment:
+        sys.exit(f"{where} must set deploymentEnvironment = '{environment}'")
+    if value(params, "enableWriteActions") is not False:
+        sys.exit(f"{where} must set enableWriteActions = false")
+    # The template fails a deployment that sets both; the deprecated bool is not used in this repository.
+    if "externalIngress" in params:
+        sys.exit(f"{where} uses the deprecated externalIngress; set ingressMode instead")
+    if value(params, "ingressMode") not in ("externalAuthenticated", "vnet", "internal"):
+        sys.exit(f"{where} must set ingressMode explicitly")
+    # The post-deployment smoke test calls /health without a token.
+    if value(params, "anonymousHealthEndpoints") is not True and value(params, "ingressMode") == "externalAuthenticated":
+        sys.exit(f"{where}: the smoke test needs anonymousHealthEndpoints = true")
+    if value(params, "schedulerEnabled") is not True:
+        sys.exit(f"{where} must keep the autonomous scheduler on (schedulerEnabled = true)")
+print("env parameter files: deploymentEnvironment matches, enableWriteActions = false everywhere (prod included),")
+print("ingressMode explicit (no deprecated externalIngress), anonymous health endpoints, scheduler on")
 PY
 
 echo "Bicep validation passed"

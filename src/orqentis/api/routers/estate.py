@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from orqentis.api.auth import CurrentPrincipal
+from orqentis.api.authz import ReadPrincipal
 from orqentis.api.deps import ContainerDep
 from orqentis.api.schemas import DependencyNode, ItemDependencies
 from orqentis.domain.estate import Workspace
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/estate", tags=["estate"])
 
 
 @router.get("/workspaces", response_model=list[Workspace])
-async def list_workspaces(c: ContainerDep, _: CurrentPrincipal) -> list[Workspace]:
+async def list_workspaces(c: ContainerDep, _: ReadPrincipal) -> list[Workspace]:
     return sorted(c.catalog.workspaces.values(), key=lambda w: w.display_name)
 
 
@@ -22,7 +22,7 @@ async def list_workspaces(c: ContainerDep, _: CurrentPrincipal) -> list[Workspac
 async def item_dependencies(
     item_id: str,
     c: ContainerDep,
-    _: CurrentPrincipal,
+    _: ReadPrincipal,
     max_depth: int | None = Query(default=None, ge=1, le=10),
 ) -> ItemDependencies:
     node = c.catalog.node(item_id)

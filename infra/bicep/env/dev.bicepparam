@@ -42,10 +42,23 @@ param azureOpenAiEndpoint = ''
 param azureOpenAiDeployment = ''
 param azureOpenAiResourceId = ''
 
-// Reachable from the GitHub runner for the smoke test; every request still needs an Entra token (unauthenticated
-// callers get 401). Ingress modes are owned by WS3; keep this in step with the mode it introduces.
-param externalIngress = true
+// API exposure (WS3): a public endpoint where every request needs an Entra token (unauthenticated callers get 401). The
+// GitHub-hosted runner must reach it for the post-deployment smoke test, so no allowedIpRanges are set (they would deny
+// the runner), and /health and /health/ready are excluded from authentication, which is what the smoke test assumes.
+// If allowedClientApplications is ever set, it must include this environment's fabricops-deploy-* client id.
+param ingressMode = 'externalAuthenticated'
+param anonymousHealthEndpoints = true
 param infrastructureSubnetId = ''
+
+// Autonomous runtime (WS1): the app collects, detects, investigates, sweeps SLAs and refreshes its catalog on its own.
+// It stays on outside local development. A deploy runs the old and the new revision side by side on the same Azure
+// Files volume until the PostgreSQL system of record exists (infra/bicep/README.md, "Deploying an update"): the start-up
+// delay lets the old revision drain first, and the audit chain can be verified afterwards with GET /audit/verify.
+param schedulerEnabled = true
+param schedulerStartupDelaySeconds = 120
+
+// IANA time zone for time-of-day reasoning and report times.
+param defaultTimezone = 'Australia/Sydney'
 
 param containerCpu = '0.25'
 param containerMemory = '0.5Gi'
