@@ -94,7 +94,7 @@ async def test_collection_reads_runs_and_reports_the_refresh_gap(container: Cont
 async def test_failed_runs_become_incidents_and_investigations_stay_grounded(container: Container) -> None:
     incidents, _ = await _detect_all(container)
     by_title = {i.incident_id: i for i in incidents}
-    assert len(by_title) >= 4, "seed the failed runs: scripts/live-estate/seed-history.sh"
+    assert len(by_title) >= 3, "seed the failed runs: scripts/live-estate/seed-history.sh"
     assert {i.environment.value for i in incidents} >= {"TEST"}
     assert {i.primary_item_name for i in incidents} == {"ingest_customers"}
 

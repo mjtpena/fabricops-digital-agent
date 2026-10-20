@@ -81,8 +81,12 @@ json_str() { grep -o "\"$1\" *: *\"[^\"]*\"" | head -1 | sed 's/^[^:]*: *"\(.*\)
 # --------------------------------------------------------------------------------------- az rest
 # Runs `az` with retries on throttling and transient service errors; prints the response body.
 az_retry() {
-  local attempt=0 err out msg
+  local attempt=0 err out msg transient='429|502|503|504|TooManyRequests|Too Many Requests'
   err="$WORK/az.err"
+  # A bare HTTP 500 is retried only for reads and deletes (a repeated create could be a duplicate).
+  if [[ " $* " == *" --method GET "* || " $* " == *" --method DELETE "* ]]; then
+    transient+='|500|Internal Server Error'
+  fi
   while :; do
     attempt=$((attempt + 1))
     if out=$(az "$@" 2>"$err"); then
@@ -90,7 +94,7 @@ az_retry() {
       return 0
     fi
     msg=$(<"$err")
-    if ((attempt < 6)) && grep -qiE '(^|[^0-9])(429|502|503|504)([^0-9]|$)|TooManyRequests|Too Many Requests' <<<"$msg"; then
+    if ((attempt < 6)) && grep -qiE "(^|[^0-9])($transient)([^0-9]|\$)" <<<"$msg"; then
       log "throttled or transient error (attempt $attempt); retrying"
       sleep $((attempt * 8))
       continue
