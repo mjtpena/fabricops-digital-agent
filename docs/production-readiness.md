@@ -33,10 +33,10 @@ one PR to `main`. Briefs live in [`docs/programme/briefs/`](programme/briefs/).
 | WS | Title | Wave | Depends on | Status | Owner session | PR | Evidence |
 |---|---|---|---|---|---|---|---|
 | WS0 | CI fix (Docker Hub 429; Windows local gates) | 0 | | in progress (blocked on B1) | orchestrator | [#1](https://github.com/mjtpena/fabricops-digital-agent/pull/1) | Local gates green; CI not started (B1) |
-| WS1 | Autonomous runtime | 1 | | in progress | `ws1-runtime` (Sonnet) | | |
-| WS2 | Portability and contracts | 1 | | in progress | `ws2-portability` (Sonnet) | | |
-| WS3 | Identity and API hardening | 1 | | in progress | `ws3-identity` (Sonnet) | | |
-| WS4 | Delivery pipeline | 1 | A6 (done) for the push dry run | in progress | `ws4-delivery` (Sonnet) | | |
+| WS1 | Autonomous runtime | 1 | | in review | `ws1-runtime` (Sonnet) | [#4](https://github.com/mjtpena/fabricops-digital-agent/pull/4) | |
+| WS2 | Portability and contracts | 1 | | in review | `ws2-portability` (Sonnet) | [#5](https://github.com/mjtpena/fabricops-digital-agent/pull/5) | |
+| WS3 | Identity and API hardening | 1 | | in review | `ws3-identity` (Sonnet) | [#3](https://github.com/mjtpena/fabricops-digital-agent/pull/3) | |
+| WS4 | Delivery pipeline | 1 | A6 (done) for the push dry run | in review | `ws4-delivery` (Sonnet) | [#6](https://github.com/mjtpena/fabricops-digital-agent/pull/6) | |
 | WS5 | Live sandbox estate and live test harness | 1 | D8, A3–A5 | in progress | orchestrator's local subagent (Sonnet, shares the `az` login) | | |
 | WS6 | Durable storage and stateless app | 2 | D1, WS1 | not started | | | |
 | WS7 | Signals and detection breadth | 2 | D2, WS1, WS5 | not started | | | |
