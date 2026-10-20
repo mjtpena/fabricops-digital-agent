@@ -163,7 +163,7 @@ workspaces and nothing else. The evidence is in `tests/live` (skipped unless `OR
 | Job instances of pipelines and notebooks | Works | Returned newest first. |
 | Pipeline activity runs (`POST .../queryactivityruns`, a read-only query) | Works | Carries the activity error text. A timed-out activity has an empty error object; the adapter now says "timed out". |
 | Semantic model metadata (`GET .../datasets/{id}`, list datasets and reports) | Works | |
-| **Semantic model refresh history** (`GET .../datasets/{id}/refreshes`) | **Denied: 403 `Unauthorized`** | Power BI requires write permission on the model for refresh history, and Fabric job instances do not cover semantic models (404). There is no read-only grant for it, so the programme did **not** grant one: a Viewer-only FabricOps cannot see refresh outcomes. The refresh collector records the 403 in `collector_errors` and the other collectors carry on. Decision for the owner: accept the gap, grant model-level write (a real privilege increase), or take refresh outcomes from another source (workspace monitoring, or refreshes driven by a pipeline so that the pipeline's run history carries the result). |
+| **Semantic model refresh history** (`GET .../datasets/{id}/refreshes`) | **Denied: 403 `Unauthorized`** | Power BI requires **Write** permission on the model for the refresh *list* ([documented limitation](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/get-refresh-history-in-group): "Caller must have Write permissions on the dataset"). No read-only dataset grant changes that (see "Refresh history: what was tried" below), so the programme did **not** grant anything: a Viewer-only FabricOps cannot list refresh outcomes. The refresh collector records the 403 in `collector_errors` and the other collectors carry on. Decision for the owner: accept the gap, give the principal workspace Contributor (the only way to get dataset Write; a real privilege increase), or take refresh outcomes from another source. One narrow read path does exist for a *known* refresh id: see below. |
 | List capacities (`GET /v1/capacities`) | Works, but is not what it seems | Returns only capacities that are open to everyone (in the sandbox tenant a trial capacity and a PPU capacity). The dedicated F-SKU sandbox capacity is invisible. Capacity roles carry write rights, so they stay ungranted. |
 | Deployment pipelines | Empty list | No deployment-pipeline role is granted (the roles that expose them can deploy). |
 | OneLake (`_delta_log`, tables, files) | **Denied: 403 on every path** | See below. |
@@ -207,6 +207,27 @@ the Viewer assignment could not be isolated: after the Viewer assignment was del
 it for the service principal for at least 16 minutes (workspace, items, runs and activity runs stayed
 readable). Grant both, and do not assume that removing a service principal's workspace role takes effect
 immediately.
+
+### Refresh history: what was tried (2026-10-20, sandbox `customers_model`, test principal)
+
+| Attempt | Result |
+|---|---|
+| Baseline: `GET .../datasets/{id}/refreshes?$top=5` with workspace Viewer | 403 at 02:22:51Z and again at 02:24:03Z, 02:24:22Z; body `{"error":{"code":"Unauthorized","message":"Api accessed by user <eupi>{principal object id}</eupi> with insufficient privileges. request is unauthorized, identity None."}}`. The sandbox owner reads the same endpoint with 200. |
+| (a) Dataset `Read` granted directly (`POST .../datasets/{id}/users`, `principalType: App`) | **Not possible and not needed.** 400 `InvalidRequest`: "API supported only for User or Group principal types" (02:23:17Z; the docs say the same: adding permissions to service principals is not supported). Not needed because `GET .../users` already lists the principal with `datasetUserAccessRight: Read`, derived from the Viewer role, and the 403 above is what Read gets. |
+| (b) `ReadExplore` (Build), `POST` and `PUT` | Same 400 for both (02:23:37Z, 02:23:39Z). Build cannot be set on a service principal through the API. Per the docs Viewer has Read but not Build, and Build is "build new content" and XMLA querying, not refresh history. A Build grant for a group would need an Entra group, which is out of scope. Not tested further. |
+| (c) Fabric API, `GET /v1/workspaces/{ws}/items/{id}/jobs/instances` for the SemanticModel item | 404 `ItemNotFound` "Could not found the requested item" for the test principal **and** for the owner (02:23:39Z): the job API does not support semantic models at all. |
+| Other Power BI reads | `GET /v1.0/myorg/datasets/{id}/refreshes` (no group): 403 "API is not accessible for application". `GET .../datasets/{id}` metadata: 200. `GET .../users`, `.../refreshSchedule`: 401 / 404. |
+| **`GET .../datasets/{id}/refreshes/{requestId}`** ([Get Refresh Execution Details](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/get-refresh-execution-details-in-group)) | **200 with Viewer only**, for a completed refresh (02:24:43Z), a Direct Lake framing refresh (02:24:53Z) and a **failed** one (02:26:31Z, with the engine `messages` and `serviceExceptionJson`, i.e. the error text). It needs the refresh's request id, and there is no way to list ids as a Viewer. |
+
+No dataset or workspace grant was made or changed by this investigation. The permission that does open the list is dataset **Write**
+([semantic model permissions](https://learn.microsoft.com/en-us/power-bi/connect-data/service-datasets-permissions): Write is implicit
+for workspace Admin, Member and Contributor, never for Viewer, and the REST API "can't be used to grant dataset Write"). For a service
+principal that means the Contributor workspace role, which also lets it create and change every item in the workspace.
+
+The execution-details endpoint is the only read-only route to refresh outcomes. It is usable where something else already knows the
+request id (a refresh started by a pipeline's semantic model refresh activity, whose run output should carry it: not verified here,
+because that activity needs a Power BI connection that the sandbox deliberately does not create), not for scheduled or manual
+refreshes.
 
 ### Failure-injection facts that affect detection
 
