@@ -51,7 +51,7 @@ param teamsWebhookUri string = ''
 @description('Base URL of docs/operations.md. Each alert links to one section of it (<base>#alert-...). Point it at your fork or an internal copy of the guide when you run your own.')
 param runbookBaseUrl string = 'https://github.com/mjtpena/fabricops-digital-agent/blob/main/docs/operations.md'
 
-@description('Minutes between evaluations of the log alert rules.')
+@description('Minutes between evaluations of the log alert rules. Every alert window must be at least this long, or the deployment of that rule is refused.')
 @allowed([
   1
   5

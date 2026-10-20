@@ -148,6 +148,7 @@ then collector errors, then 5xx: the earlier ones usually explain the later ones
 | `collector-errors` | 2 | one collector had 2 failing runs in 15 min (one alert per collector) | `alertCollectorErrorWindowMinutes` 15, `alertCollectorErrorRuns` 2 |
 | `5xx-rate` | 2 | 5 % or more of at least 20 requests in 10 min answered 5xx | `alertHttp5xxWindowMinutes` 10, `alertHttp5xxRatePercent` 5, `alertHttp5xxMinRequests` 20 |
 
+A window must be at least as long as the evaluation frequency (the deployment of a rule whose window is shorter is refused).
 Change a threshold or window by editing the parameter file (or passing `-p alertRestartThreshold=5`) and redeploying; the
 deployed rule is replaced in place.
 
