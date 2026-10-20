@@ -112,19 +112,84 @@ def test_key_vault_secret_uri_shape(uri: str, valid: bool) -> None:
     assert bool(KEY_VAULT_SECRET_URI.fullmatch(uri)) is valid
 
 
+CREDENTIAL_NAME = re.compile(r"(?i)secret|password|key|certificate|token|credential|passphrase")
+
+
+def credential_problems(body: str) -> list[str]:
+    """What is wrong with the credential-like parameters of a ``.bicepparam`` file's text.
+
+    * A parameter whose name suggests a credential (secret, password, key, certificate, token, ...) and that ends in
+      ``Uri`` may only point at a Key Vault secret (a versionless secrets URI, any national-cloud suffix).
+    * Any other credential-named parameter with a value is a credential in the file, except a resource id
+      (``...Id`` holding a ``/subscriptions/...`` path, such as the vault's).
+    * Every parameter whose value is a Key Vault URL must be a proper Key Vault secret URI.
+    """
+    problems: list[str] = []
+    for name, value in re.findall(r"^param (\w+) = '([^']*)'", body, flags=re.MULTILINE):
+        if not value:
+            continue
+        credential_like = bool(CREDENTIAL_NAME.search(name))
+        if name.endswith("Uri") and credential_like and not KEY_VAULT_SECRET_URI.fullmatch(value):
+            problems.append(f"{name}: not a Key Vault secret URI")
+        elif (
+            credential_like
+            and not name.endswith("Uri")
+            and not (name.endswith("Id") and value.startswith("/subscriptions/"))
+        ):
+            problems.append(f"{name}: looks like a credential value in a parameter file")
+        elif ".vault." in value and not KEY_VAULT_SECRET_URI.fullmatch(value):
+            problems.append(f"{name}: a Key Vault URL that is not a versionless secret URI")
+    return problems
+
+
 def test_parameter_files_only_reference_secrets_in_key_vault() -> None:
     """A parameter file may point at a Key Vault secret (a versionless URI); it never holds a value."""
-    checked = 0
-    for path in sorted(BICEP.rglob("*.bicepparam")):
-        body = path.read_text(encoding="utf-8")
-        for name, value in re.findall(r"^param (fabricServicePrincipal\w*(?:Uri)) = '([^']*)'", body, flags=re.M):
-            checked += 1
-            assert not value or KEY_VAULT_SECRET_URI.fullmatch(value), (
-                f"{path.name}: {name} must be a Key Vault reference"
-            )
-        for name, _ in re.findall(r"^param (\w*(?:Secret|Password|Key)\w*) = '([^']*)'", body, flags=re.M):
-            assert name.endswith("Uri"), f"{path.name}: {name} looks like a credential; use a Key Vault reference"
-    assert checked >= 1
+    files = sorted(BICEP.rglob("*.bicepparam"))
+    assert files
+    for path in files:
+        assert credential_problems(path.read_text(encoding="utf-8")) == [], path.name
+    cross_tenant = (BICEP / "examples" / "cross-tenant.bicepparam").read_text(encoding="utf-8")
+    assert "param fabricServicePrincipalSecretUri = 'https://" in cross_tenant  # the check has something to check
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        # What the guard must refuse ...
+        (
+            "param tlsCertificate = 'MIIB1TCCAX...'",
+            ["tlsCertificate: looks like a credential value in a parameter file"],
+        ),
+        ("param otherSecretUri = 'https://evil.example.com/x'", ["otherSecretUri: not a Key Vault secret URI"]),
+        ("param apiKey = 'hunter2-hunter2'", ["apiKey: looks like a credential value in a parameter file"]),
+        ("param adminPassword = 'Pa55w0rd!'", ["adminPassword: looks like a credential value in a parameter file"]),
+        (
+            "param fabricServicePrincipalSecretUri = 'hunter2'",
+            ["fabricServicePrincipalSecretUri: not a Key Vault secret URI"],
+        ),
+        (
+            "param fabricServicePrincipalCertificateUri = 'https://kv.vault.azure.net/keys/sp'",
+            ["fabricServicePrincipalCertificateUri: not a Key Vault secret URI"],
+        ),
+        (
+            "param fabricServicePrincipalSecretUri = 'https://kv.vault.azure.net/secrets/sp/0123456789abcdef0123456789abcdef'",
+            ["fabricServicePrincipalSecretUri: not a Key Vault secret URI"],
+        ),
+        (
+            "param sourceUrl = 'https://kv.vault.azure.net/keys/sp'",
+            ["sourceUrl: a Key Vault URL that is not a versionless secret URI"],
+        ),
+        # ... and what it must accept.
+        ("param fabricServicePrincipalSecretUri = 'https://kv.vault.azure.net/secrets/sp'", []),
+        ("param fabricServicePrincipalCertificateUri = 'https://kv.vault.usgovcloudapi.net/secrets/sp-cert'", []),
+        ("param fabricServicePrincipalSecretUri = 'https://kv.vault.azure.cn/secrets/sp'", []),
+        ("param fabricServicePrincipalSecretUri = ''", []),
+        ("param keyVaultResourceId = '/subscriptions/0/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv'", []),
+        ("param fabricServicePrincipalClientId = '22222222-2222-2222-2222-222222222222'", []),
+    ],
+)
+def test_credential_guard_refuses_credentials_and_foreign_uris(line: str, expected: list[str]) -> None:
+    assert credential_problems(line) == expected
 
 
 def test_main_bicep_checks_service_principal_inputs_and_scopes_the_key_vault_role() -> None:

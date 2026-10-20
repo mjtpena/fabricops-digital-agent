@@ -30,6 +30,29 @@
     },
     {
       "method": "GET",
+      "path": "/v1/capacities",
+      "status": 200,
+      "body": {
+        "value": [
+          {
+            "id": "cap-1",
+            "displayName": "Shared F64",
+            "sku": "F64",
+            "region": "australiaeast",
+            "state": "Active"
+          },
+          {
+            "id": "cap-2",
+            "displayName": "Prod F128",
+            "sku": "F128",
+            "region": "australiaeast",
+            "state": "Active"
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/ws-sales/items",
       "status": 200,
       "body": {

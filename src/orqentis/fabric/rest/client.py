@@ -16,7 +16,7 @@ import asyncio
 import inspect
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -53,10 +53,14 @@ from orqentis.fabric.rest.auth import FABRIC_SCOPE, POWERBI_SCOPE, TokenProvider
 from orqentis.fabric.rest.http import FabricHttp, JsonObject
 from orqentis.observability.logging import get_logger
 from orqentis.topology.environment import (
+    EnvironmentChange,
     EnvironmentResolver,
     EnvironmentSource,
+    capacity_change,
     infer_environment,  # noqa: F401  (re-exported: callers import it from this module)
+    item_change,
     stage_environment,
+    workspace_change,
 )
 
 _log = get_logger(__name__)
@@ -236,6 +240,31 @@ def _segment(value: str) -> str:
     return quote(value, safe="")
 
 
+EnvironmentObserver = Callable[[EnvironmentChange], Awaitable[None]]
+
+
+class _EnvironmentFeed:
+    """Tells an observer, the first time a node is mapped, that a declaration changed its classification.
+
+    The services map responses synchronously, so changes are noted there and handed to the observer (which is
+    async: it writes the audit trail) by ``flush`` once the call completes. Without an observer nothing is kept.
+    """
+
+    def __init__(self) -> None:
+        self.observer: EnvironmentObserver | None = None
+        self._pending: list[EnvironmentChange] = []
+
+    def note(self, change: EnvironmentChange | None) -> None:
+        if change is not None and self.observer is not None:
+            self._pending.append(change)
+
+    async def flush(self) -> None:
+        pending, self._pending = self._pending, []
+        if self.observer is not None:
+            for change in pending:
+                await self.observer(change)
+
+
 @dataclass(frozen=True)
 class _Context:
     """What every service needs: the HTTP client, the API base URLs, the tenant id and the environments."""
@@ -245,6 +274,7 @@ class _Context:
     powerbi_base_url: str
     tenant_id: str
     environments: EnvironmentResolver
+    feed: _EnvironmentFeed = field(default_factory=_EnvironmentFeed)
 
     def fabric(self, *segments: str) -> str:
         return "/".join((self.fabric_base_url.rstrip("/"), *(_segment(s) for s in segments)))
@@ -278,15 +308,20 @@ class RestWorkspaceService:
             ),
         )
         self._environments[workspace.id] = workspace.environment
+        self._ctx.feed.note(workspace_change(workspace))
         return workspace
 
     async def list_workspaces(self) -> list[Workspace]:
         raw = await self._ctx.http.paginate(self._ctx.fabric("workspaces"), scope=FABRIC_SCOPE)
-        return [self._map(entry) for entry in raw]
+        workspaces = [self._map(entry) for entry in raw]
+        await self._ctx.feed.flush()
+        return workspaces
 
     async def get_workspace(self, workspace_id: str) -> Workspace:
         raw = await self._ctx.http.get_json(self._ctx.fabric("workspaces", workspace_id), scope=FABRIC_SCOPE)
-        return self._map(raw)
+        workspace = self._map(raw)
+        await self._ctx.feed.flush()
+        return workspace
 
     def known_environment(self, workspace_id: str) -> Environment:
         """Environment of an already-seen workspace (no network call); UNKNOWN otherwise."""
@@ -325,9 +360,11 @@ class RestItemService:
             ),
         }
         item_class = _ITEM_CLASSES.get(fabric_type or "")
-        if item_class is not None:
-            return item_class(**fields)
-        return GenericItem(**fields, fabric_type=fabric_type)
+        item: FabricItem = (
+            item_class(**fields) if item_class is not None else GenericItem(**fields, fabric_type=fabric_type)
+        )
+        self._ctx.feed.note(item_change(item, environment))
+        return item
 
     async def list_items(self, workspace_id: str, *, item_type: ItemType | None = None) -> list[FabricItem]:
         if item_type in (ItemType.DATA_PRODUCT, ItemType.EXTERNAL_SOURCE):
@@ -340,13 +377,16 @@ class RestItemService:
         )
         environment = await self._workspaces.environment_of(workspace_id)
         items = [self._map(raw, workspace_id, environment) for raw in raw_items]
+        await self._ctx.feed.flush()
         return [i for i in items if item_type is None or i.item_type == item_type]
 
     async def get_item(self, workspace_id: str, item_id: str) -> FabricItem:
         raw = await self._ctx.http.get_json(
             self._ctx.fabric("workspaces", workspace_id, "items", item_id), scope=FABRIC_SCOPE
         )
-        return self._map(raw, workspace_id, await self._workspaces.environment_of(workspace_id))
+        item = self._map(raw, workspace_id, await self._workspaces.environment_of(workspace_id))
+        await self._ctx.feed.flush()
+        return item
 
 
 class RestJobService:
@@ -518,6 +558,9 @@ class RestCapacityService:
                     ),
                 )
             )
+        for capacity in capacities:
+            self._ctx.feed.note(capacity_change(capacity))
+        await self._ctx.feed.flush()
         return capacities
 
     async def get_capacity_metrics(self, capacity_id: str, *, start: datetime, end: datetime) -> list[CapacitySnapshot]:
@@ -722,6 +765,7 @@ class RestFabricClient:
         ctx = _Context(
             self._http, fabric_base_url, powerbi_base_url, tenant_id, EnvironmentResolver(contracts.environments)
         )
+        self._environment_feed = ctx.feed
         self._workspaces = RestWorkspaceService(ctx)
         self._items = RestItemService(ctx, self._workspaces)
         self._jobs = RestJobService(ctx, self._workspaces)
@@ -776,6 +820,10 @@ class RestFabricClient:
     @property
     def dependencies(self) -> DeclaredDependencyService:
         return self._dependencies
+
+    def observe_environment_changes(self, observer: EnvironmentObserver | None) -> None:
+        """Be told, once per mapped node, when a contracts declaration changed its classification."""
+        self._environment_feed.observer = observer
 
     async def aclose(self) -> None:
         try:

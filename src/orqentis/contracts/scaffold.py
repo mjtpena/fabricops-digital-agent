@@ -27,7 +27,14 @@ from orqentis.contracts.catalog import CatalogSnapshot
 from orqentis.contracts.lineage import LineageScan, LineageScanner
 from orqentis.contracts.model import EstateContracts
 from orqentis.domain.common import Environment, ItemType
-from orqentis.domain.estate import DataProduct, EnvironmentDeclaration, ExternalSource, FabricItem, Workspace
+from orqentis.domain.estate import (
+    Capacity,
+    DataProduct,
+    EnvironmentDeclaration,
+    ExternalSource,
+    FabricItem,
+    Workspace,
+)
 from orqentis.domain.sla import SLA
 from orqentis.domain.topology import Dependency, DependencyType
 from orqentis.fabric.errors import FabricError
@@ -128,7 +135,12 @@ async def scaffold_contracts(
             listed = []
         items_by_workspace[workspace.id] = listed
         items.extend(listed)
-    catalog = CatalogSnapshot.of(workspaces, items)
+    capacities: list[Capacity] = []
+    try:
+        capacities = sorted(await fabric.capacities.list_capacities(), key=lambda c: (c.display_name, c.id))
+    except FabricError as exc:
+        notes.append(f"capacities not listed ({_reason(exc)}); capacity declarations cannot be checked against them")
+    catalog = CatalogSnapshot.of(workspaces, items, capacities)
     inferred = {w.id: infer_environment(w.display_name) for w in workspaces}
 
     edges: dict[tuple[str, str, DependencyType], Dependency] = {}
@@ -219,6 +231,7 @@ async def scaffold_contracts(
     stats = {
         "workspaces": len(workspaces),
         "items": len(items),
+        "capacities": len(capacities),
         "environments": len(environments),
         "dependencies": len(contracts.dependencies),
         "external_sources": len(external_sources),

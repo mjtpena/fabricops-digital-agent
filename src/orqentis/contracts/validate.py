@@ -169,6 +169,12 @@ class _Checker:
                 self.add(f"{pointer}/workspace_id", f"workspace '{declaration.workspace_id}' is not in the catalog")
             if declaration.item_id is not None and declaration.item_id not in self.catalog.items:
                 self.add(f"{pointer}/item_id", f"item '{declaration.item_id}' is not in the catalog")
+            if (
+                declaration.capacity_id is not None
+                and self.catalog.capacities  # a catalog without capacities cannot say
+                and declaration.capacity_id not in self.catalog.capacities
+            ):
+                self.add(f"{pointer}/capacity_id", f"capacity '{declaration.capacity_id}' is not in the catalog")
             if pattern is not None and not any(
                 name_matches(pattern, w.display_name) for w in self.catalog.workspaces.values()
             ):
@@ -202,14 +208,21 @@ class _Checker:
                 workspace_environment, resolved_item.environment
             ):
                 lowered[resolved_item.declaration_index].append(item.id)
+        for capacity in self.catalog.capacities.values():
+            resolved_capacity = resolver.resolve_capacity(capacity.id, capacity.display_name)
+            if resolved_capacity.declaration_index is not None and is_downgrade(
+                infer_environment(capacity.display_name), resolved_capacity.environment
+            ):
+                lowered[resolved_capacity.declaration_index].append(capacity.id)
         for index, ids in sorted(lowered.items()):
             if index in accepted:
                 continue
             shown = ", ".join(f"'{i}'" for i in sorted(ids)[:3]) + (", ..." if len(ids) > 3 else "")
             self.add(
                 f"/environments/{index}",
-                f"lowers {len(ids)} PROD workspace(s) or item(s) ({shown}): their incidents become less severe and "
-                "production-only policy rules (POL-002, POL-020) stop applying to them. Confirm this is intended",
+                f"lowers {len(ids)} PROD workspace(s), item(s) or capacity(ies) ({shown}): their incidents become "
+                "less severe and production-only policy rules (POL-002, POL-020) stop applying to them. "
+                "Confirm this is intended",
                 "warning",
             )
 

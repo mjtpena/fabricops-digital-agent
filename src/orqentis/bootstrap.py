@@ -57,7 +57,7 @@ from orqentis.tools.mutation_tools import build_mutation_request_tools
 from orqentis.tools.read_tools import ReadToolDependencies, build_read_tools
 from orqentis.tools.registry import ToolRegistry
 from orqentis.topology.catalog import EstateCatalog
-from orqentis.topology.environment_audit import record_environment_changes
+from orqentis.topology.environment_audit import EnvironmentChangeRecorder
 from orqentis.topology.graph import DependencyGraph
 
 _log = get_logger(__name__)
@@ -204,11 +204,18 @@ async def build_container(
     evidence_store = LocalEvidenceStore(settings.evidence_dir)
     audit = LocalAuditLog(settings.audit_log_path, clock)
 
-    catalog = await EstateCatalog.load(fabric, contracts)
-    if contracts.source_sha256 is not None:  # rest mode: say which declared environments changed a classification
-        await record_environment_changes(
-            catalog, audit, contracts_sha256=contracts.source_sha256, contracts_path=settings.contracts_path
+    recorder: EnvironmentChangeRecorder | None = None
+    if contracts.source_sha256 is not None:  # rest mode: say which declared environments change a classification
+        recorder = EnvironmentChangeRecorder(
+            contracts_sha256=contracts.source_sha256, contracts_path=settings.contracts_path
         )
+        await recorder.bind(audit)
+        observe = getattr(fabric, "observe_environment_changes", None)  # the REST adapter; the mock has no contracts
+        if callable(observe):
+            observe(recorder.observe)  # also reports workspaces and items discovered after this listing
+    catalog = await EstateCatalog.load(fabric, contracts)
+    if recorder is not None:
+        await recorder.record_loaded(catalog)
     dependency_store = SqliteDependencyStore(state_db)
     await dependency_store.replace_all(await fabric.dependencies.list_dependencies())
     graph = await DependencyGraph.from_store(dependency_store, catalog)

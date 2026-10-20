@@ -180,7 +180,8 @@ The contracts file is reviewed like code. Tools draft and check it; a person dec
    **Lowering production is deliberate and visible.** The environment drives incident severity (PROD is HIGH)
    and policy rules such as `POL-002`, so declaring a workspace the name calls PROD as TEST or DEV lowers its
    incidents' severity and switches its production-only policy rules off. That is allowed (names do lie) but never
-   silent: at startup every override that changes a classification is logged (WARNING for a downgrade) and written
+   silent: the first time a workspace, item or capacity is classified (at startup, and for any discovered later) every
+   override that changes the classification is logged (WARNING for a downgrade) and written
    to the audit trail (`contracts.environment_override`: id, inferred and resolved environment, source, and the
    SHA-256 of the contracts file; plus one `contracts.loaded` record), and `contracts validate` warns about each
    downgrade and about catch-all patterns such as `*`. `"accepts_downgrade": true` records that a reviewer
@@ -207,7 +208,9 @@ The contracts file is reviewed like code. Tools draft and check it; a person dec
    with its workspace's, and references that could not be checked because no catalog was given. Schema errors are reported first; the consistency checks run once the
    schema passes. A full estate file (`fixtures/fabric/estate.json`) is its own catalog.
    `--strict` turns warnings into failures, which is what a CI check on the reviewed file should use.
-   Refresh the catalog with `scaffold --catalog-output` whenever the estate changes.
+   The catalog lists workspaces, items and (when the scaffold could read them) capacities; capacity
+   declarations are checked only against a catalog that has capacities. Refresh it with
+   `scaffold --catalog-output` whenever the estate changes.
 
 4. **Deploy** the file to `ORQENTIS_CONTRACTS_PATH` (for Azure, see the Bicep README, step 4).
 

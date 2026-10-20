@@ -143,7 +143,7 @@ param fabricServicePrincipalSecretUri string = ''
 @description('service_principal mode, option 2: URI of the Key Vault secret that holds the client certificate AND private key as PEM (create the Key Vault certificate with content type application/x-pem-file; its secret is then the PEM). Mounted read-only at /mnt/fabric-sp. Set this or the secret URI, not both.')
 param fabricServicePrincipalCertificateUri string = ''
 
-@description('Optional: full resource id of the Key Vault named in the URIs above. When set, the reader identity is granted "Key Vault Secrets User" on it (the vault must use Azure RBAC; it may be in another resource group or subscription). Leave empty if access is granted some other way.')
+@description('Optional: full resource id of the Key Vault named in the URIs above. When set, the reader identity is granted "Key Vault Secrets User" on the secret(s) named in the URIs above and on nothing else in the vault (the vault must use Azure RBAC; it may be in another resource group or subscription). Leave empty if access is granted some other way.')
 param keyVaultResourceId string = ''
 
 // ------------------------------------------------------------------------------------------------- sovereign clouds
@@ -234,11 +234,16 @@ var keyVaultIdSegments = split(
   '/'
 )
 
+// A Key Vault secret URI https://<vault>.<dns-suffix>/secrets/<name>[/<version>] splits on '/' into
+// ['https:', '', '<vault>.<dns-suffix>', 'secrets', '<name>'] (plus '<version>'). Segments are indexed only after
+// the length is known: a malformed URI must reach the readable check below, not fail here with an index error.
+var secretUriSegments = split(fabricServicePrincipalSecretUri, '/')
+var certificateUriSegments = split(fabricServicePrincipalCertificateUri, '/')
+
 // The secrets (by name) the reader identity must read; the Key Vault role is assigned on these, not on the vault.
-// Names are the segment after /secrets/ in https://<vault>.vault.azure.net/secrets/<name>[/<version>].
 var keyVaultSecretNames = concat(
-  useClientSecret ? [split(fabricServicePrincipalSecretUri, '/')[4]] : [],
-  useClientCertificate ? [split(fabricServicePrincipalCertificateUri, '/')[4]] : []
+  useClientSecret && length(secretUriSegments) > 4 ? [secretUriSegments[4]] : [],
+  useClientCertificate && length(certificateUriSegments) > 4 ? [certificateUriSegments[4]] : []
 )
 
 // service_principal inputs checked when the deployment runs (see modules/input-check.bicep): 'ok', or what is wrong.
@@ -246,6 +251,8 @@ var keyVaultSecretNames = concat(
 var credentialUri = empty(fabricServicePrincipalSecretUri)
   ? fabricServicePrincipalCertificateUri
   : fabricServicePrincipalSecretUri
+var credentialUriSegments = split(credentialUri, '/')
+var credentialUriShape = 'the Key Vault credential URI must look like https://<vault-name>.<key-vault-dns-suffix>/secrets/<secret-name> (optionally followed by /<version>): the secrets endpoint, not keys or certificates'
 var servicePrincipalCheck = !servicePrincipalMode
   ? 'ok'
   : empty(fabricServicePrincipalClientId)
@@ -254,11 +261,17 @@ var servicePrincipalCheck = !servicePrincipalMode
           ? 'fabricAuthMode is service_principal, so fabricTenantId must be set to the id (a GUID) of the Fabric tenant, not left empty'
           : empty(fabricServicePrincipalSecretUri) == empty(fabricServicePrincipalCertificateUri)
               ? 'fabricAuthMode is service_principal, so set exactly one of fabricServicePrincipalSecretUri and fabricServicePrincipalCertificateUri'
-              : !startsWith(credentialUri, 'https://') || !contains(credentialUri, '/secrets/') || length(split(credentialUri, '/')) < 5
-                  ? 'the Key Vault credential URI must look like https://<vault-name>.<key-vault-dns-suffix>/secrets/<secret-name> (the secrets endpoint, not keys or certificates)'
-                  : !empty(keyVaultResourceId) && !startsWith(split(credentialUri, '/')[2], '${keyVaultIdSegments[8]}.')
-                      ? 'the Key Vault credential URI is not in the vault named by keyVaultResourceId'
-                      : 'ok'
+              : !startsWith(credentialUri, 'https://')
+                  ? credentialUriShape
+                  : length(credentialUriSegments) < 5 || length(credentialUriSegments) > 6
+                      ? credentialUriShape
+                      : credentialUriSegments[3] != 'secrets' || empty(credentialUriSegments[4])
+                          ? credentialUriShape
+                          : !contains(credentialUriSegments[2], '.') || startsWith(credentialUriSegments[2], '.')
+                              ? credentialUriShape
+                              : !empty(keyVaultResourceId) && !startsWith(credentialUriSegments[2], '${keyVaultIdSegments[8]}.')
+                                  ? 'the Key Vault credential URI is not in the vault named by keyVaultResourceId'
+                                  : 'ok'
 
 var keyVaultSecrets = concat(
   useClientSecret

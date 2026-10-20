@@ -34,5 +34,6 @@ param fabricServicePrincipalSecretUri = 'https://kv-fabricops.vault.azure.net/se
 // param fabricServicePrincipalSecretUri = ''
 // param fabricServicePrincipalCertificateUri = 'https://kv-fabricops.vault.azure.net/secrets/fabric-sp-cert'
 
-// Optional: let the template grant the reader identity "Key Vault Secrets User" on the vault (Azure RBAC vaults).
+// Optional: let the template grant the reader identity "Key Vault Secrets User" on the referenced secret(s) only,
+// not on the whole vault (Azure RBAC vaults).
 param keyVaultResourceId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-shared/providers/Microsoft.KeyVault/vaults/kv-fabricops'

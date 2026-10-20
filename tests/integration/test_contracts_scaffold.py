@@ -148,6 +148,7 @@ async def test_scaffold_makes_no_write_calls() -> None:
     assert transport.calls("POST", "/getInfo") == []
     assert all(r.headers["Authorization"].startswith("Bearer ") for r in transport.requests)
     assert result.stats["workspaces"] == 3 and result.stats["items"] == 10
+    assert result.stats["capacities"] == 2
 
 
 async def test_the_recorded_transport_really_refuses_writes() -> None:
@@ -257,6 +258,24 @@ async def test_an_unreadable_workspace_is_reported_not_fatal() -> None:
     assert validate_text(result.contracts_json(), catalog=result.catalog).errors == ()
 
 
+async def test_unreadable_capacities_are_reported_not_fatal() -> None:
+    class NoCapacities(RecordedTransport):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/capacities"):
+                self.requests.append(request)
+                return httpx.Response(403, json={"errorCode": "InsufficientPrivileges", "message": "no"})
+            return super().__call__(request)
+
+    fabric = read_client(NoCapacities())
+    try:
+        result = await scaffold_contracts(fabric, OPTIONS)
+    finally:
+        await fabric.aclose()
+    assert any("capacities not listed (InsufficientPrivileges)" in n for n in result.notes)
+    assert result.catalog.capacities == {} and ("pl-sales", "nb-sales", "TRIGGERS") in edges(result)
+    assert validate_text(result.contracts_json(), catalog=result.catalog).errors == ()
+
+
 # ----------------------------------------------------------------------------- the scanner adapter
 async def test_scanner_polls_until_the_scan_succeeds_and_batches_workspaces() -> None:
     transport = RecordedTransport(allow_scanner=True)
@@ -322,6 +341,7 @@ def test_cli_scaffold_then_validate(
     assert main(["contracts", "validate", str(draft), "--catalog", str(catalog)]) == 0
     assert main(["contracts", "validate", str(draft), "--catalog", str(catalog), "--strict"]) == 1
     assert CatalogSnapshot.load(catalog).items.keys() >= {"pl-sales", "nb-fin", "lh-shared"}
+    assert CatalogSnapshot.load(catalog).capacities.keys() == {"cap-1", "cap-2"}
     # Never overwrites by accident.
     assert main(args) == 1
     assert "already exists" in capsys.readouterr().out

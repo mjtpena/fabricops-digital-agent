@@ -78,7 +78,7 @@ grants and for checking them with `POST /telemetry/collect` (`collector_errors` 
 * **A declared environment is a trust decision.** Declaring a PROD workspace as DEV lowers incident
   severity and stops production-only policy rules (`POL-002`, `POL-020`) from matching it. Therefore: only
   *reviewed* entries are enforced (a scaffold draft marked `inferred`, or an `UNKNOWN` entry, never overrides the
-  name); every override that changes a classification is logged and written to the hash-chained audit trail
+  name); every override that changes a classification is logged, the first time the node is classified, and written to the hash-chained audit trail
   with the SHA-256 of the contracts file (`contracts.environment_override`, `contracts.loaded`); and
   `orqentis contracts validate --strict` flags downgrades and catch-all patterns for CI. Review changes to
   `environments` like code. The code-level invariant is unaffected: no mutation is ever auto-allowed in any

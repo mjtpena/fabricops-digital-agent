@@ -12,7 +12,15 @@ from orqentis.contracts.catalog import CatalogSnapshot
 from orqentis.contracts.schema import contracts_json_schema
 from orqentis.contracts.validate import ValidationReport, validate_text
 from orqentis.domain.common import Environment
-from orqentis.domain.estate import EnvironmentDeclaration, ExternalSource, Lakehouse, Notebook, Pipeline, Workspace
+from orqentis.domain.estate import (
+    Capacity,
+    EnvironmentDeclaration,
+    ExternalSource,
+    Lakehouse,
+    Notebook,
+    Pipeline,
+    Workspace,
+)
 from orqentis.topology.environment import EnvironmentResolver, EnvironmentSource, is_downgrade
 
 PROD, TEST, DEV, UNKNOWN = Environment.PROD, Environment.TEST, Environment.DEV, Environment.UNKNOWN
@@ -51,7 +59,7 @@ def test_declaring_a_prod_workspace_lower_warns() -> None:
     report = check({"environments": [entry("DEV", workspace_id="ws-sales")]})
     assert report.errors == ()
     (message,) = warnings(report, "/environments/0")
-    assert "lowers 1 PROD workspace(s) or item(s) ('ws-sales')" in message
+    assert "lowers 1 PROD workspace(s), item(s) or capacity(ies) ('ws-sales')" in message
     assert "POL-002" in message and "less severe" in message
     assert not report.ok(strict=True)  # --strict is how CI refuses an unconfirmed downgrade
 
@@ -81,7 +89,7 @@ def test_a_catch_all_pattern_warns_and_lists_what_it_lowers() -> None:
 def test_an_item_declared_lower_than_its_prod_workspace_warns() -> None:
     report = check({"environments": [entry("DEV", item_id="nb-sales")]})
     (message,) = warnings(report, "/environments/0")
-    assert "lowers 1 PROD workspace(s) or item(s) ('nb-sales')" in message
+    assert "lowers 1 PROD workspace(s), item(s) or capacity(ies) ('nb-sales')" in message
 
 
 @pytest.mark.parametrize(
@@ -213,3 +221,36 @@ def test_is_downgrade() -> None:
 
 def test_external_source_model_is_unaffected() -> None:
     assert ExternalSource(id="s", tenant_id=T, workspace_id="w", display_name="d").environment is UNKNOWN
+
+
+# ------------------------------------------------------------------------------------------ capacities
+def catalog_with_capacities() -> CatalogSnapshot:
+    base = catalog()
+    capacities = [
+        Capacity(id="cap-prod", tenant_id=T, display_name="Prod F64", sku="F64"),
+        Capacity(id="cap-shared", tenant_id=T, display_name="Shared F8", sku="F8"),
+    ]
+    return CatalogSnapshot.of(list(base.workspaces.values()), list(base.items.values()), capacities)
+
+
+def check_capacities(document: dict[str, Any]) -> ValidationReport:
+    return validate_text(json.dumps(document), catalog=catalog_with_capacities())
+
+
+def test_lowering_a_prod_capacity_warns_like_any_other_downgrade() -> None:
+    report = check_capacities({"environments": [entry("DEV", capacity_id="cap-prod")]})
+    (message,) = warnings(report, "/environments/0")
+    assert "lowers 1 PROD workspace(s), item(s) or capacity(ies) ('cap-prod')" in message
+    confirmed = {"environments": [{**entry("DEV", capacity_id="cap-prod"), "accepts_downgrade": True}]}
+    assert check_capacities(confirmed).violations == ()
+
+
+def test_naming_an_unnamed_capacity_is_not_a_downgrade() -> None:
+    assert warnings(check_capacities({"environments": [entry("PROD", capacity_id="cap-shared")]})) == []
+
+
+def test_a_capacity_declaration_must_exist_when_the_catalog_lists_capacities() -> None:
+    report = check_capacities({"environments": [entry("PROD", capacity_id="cap-ghost")]})
+    assert [v.message for v in report.errors] == ["capacity 'cap-ghost' is not in the catalog"]
+    # A catalog that carries no capacities cannot say, so it does not guess.
+    assert check({"environments": [entry("PROD", capacity_id="cap-ghost")]}).errors == ()

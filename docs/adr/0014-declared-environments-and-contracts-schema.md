@@ -42,7 +42,8 @@ tenant, from the docs, one parameter file and a contracts file. Five things stoo
     those items; `capacity_id` declares a capacity; a deployment-pipeline stage takes the declared environment
     of its workspace (by id, or by pattern on the stage's `workspaceName`) and otherwise keeps its name- and
     position-based rule (first stage DEV, last PROD).
-  * **Downgrades are visible.** At startup every override that changes a classification is logged (WARNING
+  * **Downgrades are visible.** The first time a workspace, item or capacity is classified (at startup, and for any
+    discovered later) every override that changes the classification is logged (WARNING
     for a PROD downgrade) and written to the audit trail with the SHA-256 of the contracts file
     (`contracts.environment_override`, plus one `contracts.loaded` summary). `contracts validate` warns about
     each PROD downgrade (with a catalog) and about catch-all patterns such as `*`;

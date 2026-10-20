@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from orqentis.domain.common import Environment
-from orqentis.domain.estate import EnvironmentDeclaration
+from orqentis.domain.estate import Capacity, EnvironmentDeclaration, FabricItem, Workspace
 
 _PROD_TOKENS = frozenset({"prod", "production", "prd"})
 _TEST_TOKENS = frozenset({"test", "testing", "tst", "uat", "qa", "sit", "preprod", "staging", "stg"})
@@ -211,3 +211,57 @@ class EnvironmentResolver:
             EnvironmentSource.DRAFT_IGNORED if capacity_id in self._ignored_capacity_ids else EnvironmentSource.INFERRED
         )
         return ResolvedEnvironment(infer_environment(display_name), source)
+
+
+@dataclass(frozen=True)
+class EnvironmentChange:
+    """A declared environment that differs from what the name (or the workspace) would have given."""
+
+    kind: str  # "workspace" | "item" | "capacity"
+    node_id: str
+    display_name: str
+    inferred: Environment
+    resolved: Environment
+    source: str
+
+    @property
+    def downgrade(self) -> bool:
+        return is_downgrade(self.inferred, self.resolved)
+
+
+def _declared(metadata: dict[str, object], *sources: EnvironmentSource) -> bool:
+    return metadata.get("environment_source") in {s.value for s in sources}
+
+
+def workspace_change(workspace: Workspace) -> EnvironmentChange | None:
+    """The change a declaration made to ``workspace``'s classification, if it made one."""
+    inferred = infer_environment(workspace.display_name)
+    if (
+        _declared(workspace.metadata, EnvironmentSource.DECLARED_ID, EnvironmentSource.DECLARED_PATTERN)
+        and workspace.environment is not inferred
+    ):
+        return EnvironmentChange(
+            "workspace",
+            workspace.id,
+            workspace.display_name,
+            inferred,
+            workspace.environment,
+            str(workspace.metadata["environment_source"]),
+        )
+    return None
+
+
+def item_change(item: FabricItem, inherited: Environment) -> EnvironmentChange | None:
+    """The change an ``item_id`` declaration made relative to the item's workspace (``inherited``)."""
+    if _declared(item.metadata, EnvironmentSource.DECLARED_ITEM) and item.environment is not inherited:
+        return EnvironmentChange("item", item.id, item.display_name, inherited, item.environment, "declared_item")
+    return None
+
+
+def capacity_change(capacity: Capacity) -> EnvironmentChange | None:
+    inferred = infer_environment(capacity.display_name)
+    if _declared(capacity.metadata, EnvironmentSource.DECLARED_CAPACITY) and capacity.environment is not inferred:
+        return EnvironmentChange(
+            "capacity", capacity.id, capacity.display_name, inferred, capacity.environment, "declared_capacity"
+        )
+    return None
