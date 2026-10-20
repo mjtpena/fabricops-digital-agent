@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Approvals{% endblock %}
+{% block content %}
+<h1>Approvals</h1>
+<form class="filters" method="get" action="{{ paths.approvals_path() }}">
+  <label>Status
+    <select name="status">
+      <option value="">All</option>
+      {% for s in statuses %}<option value="{{ s }}"{% if s == selected_status %} selected{% endif %}>{{ s }}</option>{% endfor %}
+    </select>
+  </label>
+  <button type="submit" class="secondary">Filter</button>
+</form>
+<p class="muted">{{ total }} approval(s){% if total > limit %}; the first {{ limit }} are shown{% endif %}.</p>
+<table>
+  <thead><tr><th>Approval</th><th>Incident</th><th>Action</th><th>Target</th><th>Risk</th><th>Required role</th><th>Status</th><th>Requested</th><th>Expires</th></tr></thead>
+  <tbody>
+  {% for a in approvals %}
+    <tr>
+      <td><a href="{{ paths.approval_path(a.approval_id) }}">{{ a.approval_id }}</a></td>
+      <td><a href="{{ paths.incident_path(a.incident_id) }}">{{ a.incident_id }}</a></td>
+      <td>{{ a.proposed_action.action_type.value }}: {{ a.proposed_action.title }}</td>
+      <td>{{ a.proposed_action.target_display_name or a.proposed_action.target_item_id or "-" }}</td>
+      <td>{{ a.risk.value }}</td>
+      <td>{{ a.required_role or "-" }}</td>
+      <td><span class="badge st-{{ a.status.value }}">{{ a.status.value }}</span></td>
+      <td>{{ a.requested_at|dt }}</td>
+      <td>{{ a.expires_at|dt }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="9" class="muted">No approvals match.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

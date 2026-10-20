@@ -60,7 +60,8 @@ sequenceDiagram
 | `EvidenceStore` | `storage.evidence_store` | `LocalEvidenceStore` (filesystem, immutable) | OneLake (ADLS Gen2 API) | Local implemented |
 | `IncidentRepository` | `storage.incidents` | `SqliteIncidentRepository` | Eventhouse / Azure SQL (decision open, ADR-0003) | Local implemented |
 | `DependencyStore` | `topology.graph` | `SqliteDependencyStore`, `InMemoryDependencyStore` | relational tables | Implemented |
-| `ApprovalProvider` | `approvals.provider` | `LocalApprovalProvider` (SQLite, API-driven) | `TeamsApprovalProvider` (Adaptive Cards) | Local implemented; Teams is milestone 10 |
+| `ApprovalProvider` | `approvals.provider` | `LocalApprovalProvider` (SQLite, API-driven) | `TeamsApprovalProvider` (Adaptive Cards) | Local implemented; Teams card approvals are deferred (ADR-0010) |
+| `Notifier` (behind `NotificationSink` and the dispatcher) | `notifications.port` | `TeamsWorkflowsNotifier`, `GenericWebhookNotifier`, `NullNotifier` | the same, plus a durable outbox on the PostgreSQL storage | Implemented (ADR-0018) |
 | `AuditTrail` | `observability.audit` | `LocalAuditLog` (hash-chained JSONL) | append-only Eventhouse table / immutable storage | Local implemented |
 | `Reasoner` | `agents.reasoning` | `RuleBasedReasoner` | `AgentFrameworkReasoner` (Azure OpenAI or Foundry via Microsoft Agent Framework) | Both implemented |
 | `LeaderLease` | `runtime.lease` | `InProcessLeaderLease` (single replica) | database-backed lease (PostgreSQL system of record) | In-process implemented |
@@ -311,3 +312,51 @@ Fabric and Power BI call through `FabricHttp`, cap concurrency and request rate.
 nothing), an empty estate is refused, and the dictionaries of the live catalog are rebound, so a
 collector iterating them is unaffected. The diff (added, removed, changed ids per kind, including
 dependencies) is logged and audited.
+
+## 14. Human interface: notifications and the web UI
+
+Implements [ADR-0010](adr/0010-human-interface.md); the choices are in [ADR-0018](adr/0018-notifications-and-web-ui.md).
+
+```mermaid
+flowchart LR
+  IS[IncidentService<br/>create, raise_severity] --> SINK
+  AS[ApprovalService.request] --> SINK
+  GW[ActionGateway.execute] --> SINK
+  SINK[NotificationSink.publish<br/>sync, never raises] --> DISP[NotificationDispatcher<br/>dedupe, bounded outbox, retries]
+  DISP -->|clean, redact, bound| N{{Notifier port}}
+  N --> T[Teams Workflows webhook<br/>Adaptive Card, links only]
+  N --> W[Generic webhook<br/>JSON, HMAC optional]
+  N --> NUL[Null notifier]
+  T & W --> SSRF[WebhookPoster<br/>https, public addresses, pinned connect, no redirects]
+  DISP -.->|every attempt| AUD[(Audit trail)]
+  B[Browser<br/>Easy Auth session] --> MW[Cross-origin guard<br/>security headers]
+  MW --> UI[/ui routes<br/>Jinja2, no script/]
+  UI --> G[authz guards<br/>ReadPrincipal, DecidingPrincipal]
+  G --> SVC[Approval service, action gateway, incident and report services]
+```
+
+**Notifications** (`orqentis.notifications`). The domain publishes `NotificationEvent`s after the state change and its audit
+record; with no notifier configured the sink discards them. The `NotificationDispatcher` composes a clean message
+(`content.py`: sanitised, redacted, length-limited, deep link from `ORQENTIS_PUBLIC_BASE_URL`), de-duplicates by event id, queues it in a
+bounded outbox (oldest dropped when full) and one worker delivers it with retries (exponential, jittered, honouring `Retry-After`) and
+one audit record per attempt. Adapters implement `Notifier.send`: `TeamsWorkflowsNotifier` (an Adaptive Card with a single link and no
+action), `GenericWebhookNotifier` (JSON, `X-Orqentis-Signature`) and `NullNotifier`. Both HTTP adapters go through `WebhookPoster`, the
+only place that calls a webhook (SSRF guard). `Runtime` starts and stops the dispatcher with the scheduler.
+
+**Web UI** (`orqentis.ui`). `routes.py` holds the pages; each depends on the same guard as the corresponding API route and calls the
+same service. `render.py` renders Jinja2 templates with autoescape on and without `|safe`. `security.py` has the cross-origin guard
+(every state-changing request) and the response headers (everything under `/ui`); `csrf.py` signs the form tokens; `install.py` mounts the
+router, wraps the existing exception handlers so a `/ui` error is an HTML page with the API's status and code, and is called last in
+`create_app`. Errors outside `/ui` are unchanged.
+
+| Page | Route | Guard | Notes |
+|---|---|---|---|
+| Incident list | `GET /ui/incidents?status=&severity=` | `ReadPrincipal` | filters validated against the enums |
+| Incident | `GET /ui/incidents/{id}` | `ReadPrincipal` | root cause, approvals, timeline, evidence (payloads escaped) |
+| Report | `GET /ui/incidents/{id}/report` | `ReadPrincipal` | the API's report, every statement labelled |
+| Approvals | `GET /ui/approvals`, `/ui/approvals/{id}` | `ReadPrincipal` | decision forms only for a person who could use them |
+| Decide | `POST /ui/approvals/{id}/approve`, `/reject`, `/execute` | `DecidingPrincipal` | form token + cross-origin guard; `ApprovalService.decide` / `ActionGateway.execute` |
+| Audit | `GET /ui/audit` | `VerifyPrincipal` | hash-chain verification and the latest records |
+
+The structural route test (`tests/integration/test_api_identity.py`) walks every route of the live app, including routers that are not
+under `orqentis.api.routers`, and fails for a route without authentication, a role guard, or (for a mutation) the human-only guard.

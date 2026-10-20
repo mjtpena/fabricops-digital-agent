@@ -614,9 +614,8 @@ class PipelineFailureWorkflow:
             )
             st.a.sla_evidence_id = evidence.evidence_id
         if any(a.state is SLAState.BREACHED for a in assessments) and st.incident.severity is not Severity.CRITICAL:
-            st.incident.severity = Severity.CRITICAL
-            self._d.incidents.add_timeline(
-                st.incident, TimelineKind.NOTE, "Severity raised to CRITICAL: SLA breached", actor="workflow"
+            await self._d.incidents.raise_severity(
+                st.incident, Severity.CRITICAL, reason="SLA breached", actor="workflow"
             )
 
     async def _capacity(self, st: _State) -> None:

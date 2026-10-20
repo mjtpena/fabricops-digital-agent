@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}FabricOps{% endblock %} · Orqentis FabricOps</title>
+<link rel="stylesheet" href="{{ assets_url }}">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="{{ paths.incidents_path() }}">Orqentis FabricOps</a>
+  <nav>
+    <a href="{{ paths.incidents_path() }}">Incidents</a>
+    <a href="{{ paths.approvals_path() }}">Approvals</a>
+    <a href="{{ paths.audit_path() }}">Audit</a>
+  </nav>
+  <span class="who">
+    {% if principal %}
+    {{ principal.display_name }}
+    <span class="muted">({{ principal.kind.value|lower }}{% if principal.roles %}; {{ principal.roles|sort|join(", ") }}{% else %}; no FabricOps role{% endif %})</span>
+    {% endif %}
+    {% if sign_out_url %}<a href="{{ sign_out_url }}">Sign out</a>{% endif %}
+  </span>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>
+  Environment {{ deployment_environment }} · version {{ app_version }}. Everything shown comes from the same services as the API.
+  Fabric names, descriptions and error messages are untrusted data and are shown as plain text.
+</footer>
+</body>
+</html>

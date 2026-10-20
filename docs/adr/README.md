@@ -18,3 +18,4 @@
 | [0014](0014-declared-environments-and-contracts-schema.md) | Declared environment classification, the contracts schema and portable identity | Accepted |
 | [0015](0015-principal-classification-and-api-hardening.md) | Principal classification from token claims, Automation role and API hardening | Accepted |
 | [0016](0016-delivery-pipeline.md) | Delivery pipeline: build once, scan, promote by digest | Accepted |
+| [0018](0018-notifications-and-web-ui.md) | Notifications and the web UI: outbox, SSRF guard, CSRF, Easy Auth sign-in (implements ADR-0010) | Accepted |
