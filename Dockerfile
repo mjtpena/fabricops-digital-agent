@@ -58,6 +58,13 @@ RUN groupadd --gid "${APP_GID}" orqentis \
     && chown orqentis:orqentis /var/lib/orqentis
 
 COPY --from=builder /opt/venv /opt/venv
+# pip is build tooling and the runtime image never installs anything. Dropping the base image's pip and the
+# venv's copy removes the libraries pip vendors (urllib3, msgpack, ...) from the attack surface and from the
+# image scan in .github/workflows/cd.yml, which fails on fixable HIGH/CRITICAL findings.
+RUN rm -rf /usr/local/lib/python3.12/site-packages/pip /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
+           /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12 \
+           /opt/venv/lib/python3.12/site-packages/pip /opt/venv/lib/python3.12/site-packages/pip-*.dist-info \
+           /opt/venv/bin/pip /opt/venv/bin/pip3 /opt/venv/bin/pip3.12
 # Runbooks are the reviewed operational knowledge base; fixtures back the mock-mode demo estate.
 # Both are read-only at runtime and owned by root.
 COPY runbooks/ /app/runbooks/

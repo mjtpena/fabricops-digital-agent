@@ -1,0 +1,108 @@
+name: Bicep what-if
+
+# On pull requests that touch the infrastructure, show what deploying them to dev would change. READ-ONLY: it runs
+# `az deployment group what-if`, never `create`, and the identity behind it can only simulate deployments.
+#
+# The job signs in over OIDC with the pull request subject (repo:<owner>/<repo>:pull_request) as the identity in the
+# WHATIF_CLIENT_ID repository variable. It is skipped, not failed, when that variable is unset, when the pull request
+# comes from a fork (forks get no OIDC token), or when the target resource group does not exist yet.
+#
+# The artifact lists resources and property paths only. Property VALUES are deliberately left out: template functions
+# such as listKeys() put keys into what-if payloads, and the raw payload is never printed or uploaded.
+#
+# Repository variables (docs/delivery.md): AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_LOGIN_SERVER, ACR_RESOURCE_ID,
+# WHATIF_CLIENT_ID, WHATIF_RESOURCE_GROUP, WHATIF_ENTRA_API_CLIENT_ID.
+
+on:
+  pull_request:
+    paths:
+      - infra/**
+      - scripts/validate-bicep.sh
+      - .github/workflows/whatif.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: whatif-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  whatif:
+    name: What-if (dev)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    if: github.event.pull_request.head.repo.full_name == github.repository && vars.WHATIF_CLIENT_ID != ''
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RESOURCE_GROUP: ${{ vars.WHATIF_RESOURCE_GROUP }}
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      ACR_RESOURCE_ID: ${{ vars.ACR_RESOURCE_ID }}
+      ENTRA_API_CLIENT_ID: ${{ vars.WHATIF_ENTRA_API_CLIENT_ID }}
+    steps:
+      - name: Check configuration
+        env:
+          AZURE_TENANT_ID_VAR: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID_VAR: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          missing=()
+          for name in AZURE_TENANT_ID_VAR AZURE_SUBSCRIPTION_ID_VAR RESOURCE_GROUP ACR_LOGIN_SERVER ACR_RESOURCE_ID ENTRA_API_CLIENT_ID; do
+            [[ -n "${!name:-}" ]] || missing+=("${name%_VAR}")
+          done
+          if ((${#missing[@]} > 0)); then
+            echo "::error::Missing GitHub repository variables: ${missing[*]} (see docs/delivery.md)"
+            exit 1
+          fi
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Azure login (OIDC, pull request subject)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.WHATIF_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Check that the resource group exists
+        id: group
+        run: |
+          if [[ "$(az group exists --name "$RESOURCE_GROUP")" == "true" ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Resource group '${RESOURCE_GROUP}' does not exist yet, so there is nothing to compare against."
+            echo "### What-if skipped: resource group \`${RESOURCE_GROUP}\` does not exist yet" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Use the image that is running now, so the what-if shows only what this pull request changes. On a first
+      # deployment there is no app yet and a placeholder digest stands in.
+      - name: What-if
+        if: steps.group.outputs.exists == 'true'
+        run: |
+          current_image="$(az containerapp list --resource-group "$RESOURCE_GROUP" --query '[0].properties.template.containers[0].image' --output tsv 2>/dev/null || true)"
+          [[ "$current_image" == "None" ]] && current_image=""
+          export CONTAINER_IMAGE="${current_image:-${ACR_LOGIN_SERVER}/orqentis-fabricops@sha256:0000000000000000000000000000000000000000000000000000000000000000}"
+          raw="$RUNNER_TEMP/whatif-raw.json"
+          mkdir -p whatif-out
+          az deployment group what-if \
+            --resource-group "$RESOURCE_GROUP" \
+            --parameters infra/bicep/env/dev.bicepparam \
+            --result-format FullResourcePayloads \
+            --no-pretty-print \
+            --output json > "$raw"
+          python3 -I scripts/whatif_summary.py "$raw" > whatif-out/whatif-summary.md
+          cat whatif-out/whatif-summary.md >> "$GITHUB_STEP_SUMMARY"
+          rm -f "$raw"
+
+      - name: Upload what-if summary
+        if: steps.group.outputs.exists == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bicep-whatif-dev
+          path: whatif-out/whatif-summary.md
+          retention-days: 14

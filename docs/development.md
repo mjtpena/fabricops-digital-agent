@@ -97,11 +97,24 @@ Tool calls have a 30s timeout and the HTTP client retries up to `ORQENTIS_HTTP_M
 honouring `Retry-After` (capped at 60s). When the API is heavily throttled, lower the retries or
 raise the timeout so that retries are not cut off by the tool timeout.
 
+## Delivery pipeline
+
+`ci.yml` runs the gates above plus `actionlint`, `pip-audit`, the Bicep builds and a Trivy scan of the image; `cd.yml`
+builds the image once and promotes the same digest `dev` → `test` → `prod`; `release.yml` publishes version tags. Setup,
+operation, rollback and how to accept a scan finding are in [delivery.md](delivery.md) (design: ADR-0016). Useful
+locally:
+
+```bash
+bash scripts/validate-bicep.sh                                   # main.bicep + every .bicepparam, prod writes off
+ruff check scripts && ruff format --check scripts                # the delivery scripts
+docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 # lint the workflows
+```
+
 ## Testing
 
 | Suite | Contents |
 |---|---|
-| `tests/unit` | Dependency traversal and blast radius, classification and taxonomy extension, runbook loading and matching, confidence, policy decisions, approval enforcement, SLA, deployment comparison, audit chain, redaction and untrusted content, tool registry, detection, incident lifecycle |
+| `tests/unit` | Delivery pipeline invariants (pinned actions and runners, no secrets, digest promotion, prod writes off) and the dependency-audit gate, dependency traversal and blast radius, classification and taxonomy extension, runbook loading and matching, confidence, policy decisions, approval enforcement, SLA, deployment comparison, audit chain, redaction and untrusted content, tool registry, detection, incident lifecycle |
 | `tests/integration` | Storage adapters; REST API; Microsoft Agent Framework investigator with a scripted model (grounding, injection, fallback, budget); Fabric REST adapter against mocked HTTP (auth scopes, retries, pagination, error mapping, status mapping); REST-mode composition end to end |
 | `tests/scenarios` | Schema drift, authentication failure, capacity pressure, unknown failure; critical security boundary (`-m security`); CLI demo |
 

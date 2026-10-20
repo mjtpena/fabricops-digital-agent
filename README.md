@@ -233,6 +233,7 @@ infra/bicep/      Azure deployment (Container Apps, managed identities, App Insi
 * [Security](docs/security.md): identities, capability boundaries, approval, audit, prompt injection
 * [Threat model](docs/threat-model.md): STRIDE analysis and residual risks
 * [Development](docs/development.md): setup, configuration, extending runbooks, signatures, scenarios
+* [Delivery](docs/delivery.md): CI/CD pipeline, OIDC setup, environments, releases, rollback
 * [ADRs](docs/adr): recorded architecture decisions
 
 ## Licence

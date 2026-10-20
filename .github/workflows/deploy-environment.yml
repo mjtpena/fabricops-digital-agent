@@ -1,0 +1,138 @@
+name: Deploy environment
+
+# Called by cd.yml once per environment (dev, then test, then prod), so the three deployments run exactly the same
+# steps. It deploys one image, by digest, into rg-fabricops-<environment> with infra/bicep/env/<environment>.bicepparam
+# and then runs the smoke test. The GitHub environment named by `environment` supplies the approval gate (required
+# reviewers on test and prod), the OIDC subject (repo:<owner>/<repo>:environment:<environment>) and the variables.
+# Nothing here is a secret: client, tenant and subscription ids are identifiers, and Azure access is OIDC only.
+#
+# Environment variables (Settings > Environments > <environment> > Variables), see docs/delivery.md:
+#   AZURE_CLIENT_ID      client id of this environment's CI/CD identity (fabricops-cicd-<environment>)
+#   AZURE_RESOURCE_GROUP resource group to deploy into (rg-fabricops-<environment>)
+#   ENTRA_API_CLIENT_ID  client id of this environment's "Orqentis FabricOps API" app registration
+#   FABRIC_MODE          optional: overrides fabricMode for this environment ('mock' or 'rest')
+#   SMOKE_HEALTH_AUTHENTICATED  optional: 'true' when Container Apps authentication also covers /health
+# Repository variables: AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_LOGIN_SERVER, ACR_RESOURCE_ID.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub environment and deployment target (dev, test or prod).
+        type: string
+        required: true
+      image:
+        description: Image to deploy, by digest (<registry>/orqentis-fabricops@sha256:<digest>).
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: ${{ inputs.environment }}
+    # One deployment per environment at a time; a queued deployment waits instead of cancelling a running one.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
+      CONTAINER_IMAGE: ${{ inputs.image }}
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      ACR_RESOURCE_ID: ${{ vars.ACR_RESOURCE_ID }}
+      ENTRA_API_CLIENT_ID: ${{ vars.ENTRA_API_CLIENT_ID }}
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # FABRIC_MODE is read by the .bicepparam files only when set; an empty value must not shadow their default.
+      - name: Check inputs and configuration
+        env:
+          FABRIC_MODE_VAR: ${{ vars.FABRIC_MODE }}
+          AZURE_CLIENT_ID_VAR: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID_VAR: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID_VAR: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          case "$DEPLOY_ENVIRONMENT" in
+            dev | test | prod) ;;
+            *) echo "::error::Unknown environment '${DEPLOY_ENVIRONMENT}' (expected dev, test or prod)"; exit 1 ;;
+          esac
+          [[ -f "infra/bicep/env/${DEPLOY_ENVIRONMENT}.bicepparam" ]] || { echo "::error::infra/bicep/env/${DEPLOY_ENVIRONMENT}.bicepparam is missing"; exit 1; }
+
+          missing=()
+          for name in AZURE_CLIENT_ID_VAR AZURE_TENANT_ID_VAR AZURE_SUBSCRIPTION_ID_VAR ACR_LOGIN_SERVER ACR_RESOURCE_ID ENTRA_API_CLIENT_ID RESOURCE_GROUP; do
+            [[ -n "${!name:-}" ]] || missing+=("${name%_VAR}")
+          done
+          if ((${#missing[@]} > 0)); then
+            echo "::error::Missing GitHub variables for environment '${DEPLOY_ENVIRONMENT}': ${missing[*]} (see docs/delivery.md)"
+            exit 1
+          fi
+
+          # Only an image from our registry, by digest: never a tag, never another registry.
+          if [[ ! "$CONTAINER_IMAGE" =~ ^${ACR_LOGIN_SERVER//./\\.}/orqentis-fabricops@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Image must be ${ACR_LOGIN_SERVER}/orqentis-fabricops@sha256:<64 hex digits>, got '${CONTAINER_IMAGE}'"
+            exit 1
+          fi
+
+          if [[ -n "$FABRIC_MODE_VAR" ]]; then
+            echo "FABRIC_MODE=${FABRIC_MODE_VAR}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Azure login (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Check that the resource group exists
+        run: |
+          if [[ "$(az group exists --name "$RESOURCE_GROUP")" != "true" ]]; then
+            echo "::error::Resource group '${RESOURCE_GROUP}' does not exist. Create it first (docs/delivery.md, 'Environment resource groups')."
+            exit 1
+          fi
+
+      - name: Deploy (az deployment group create)
+        id: deploy
+        run: |
+          outputs="$(az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "fabricops-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --parameters "infra/bicep/env/${DEPLOY_ENVIRONMENT}.bicepparam" \
+            --query properties.outputs \
+            --output json)"
+          fqdn="$(printf '%s' "$outputs" | python3 -c 'import json, sys; print(json.load(sys.stdin)["containerAppFqdn"]["value"])')"
+          echo "fqdn=${fqdn}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Deployed ${DEPLOY_ENVIRONMENT}"
+            echo
+            echo "* Commit: \`${GITHUB_SHA}\`"
+            echo "* Image: \`${CONTAINER_IMAGE}\`"
+            echo "* Endpoint: https://${fqdn}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The federated token from the first login is short-lived and the deployment can take several minutes, so sign
+      # in again for a fresh one before the smoke test requests an API token with the az CLI.
+      - name: Azure login (OIDC, fresh token for the smoke test)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Smoke test
+        env:
+          SMOKE_BASE_URL: https://${{ steps.deploy.outputs.fqdn }}
+          SMOKE_TOKEN_RESOURCE: api://${{ vars.ENTRA_API_CLIENT_ID }}
+          SMOKE_HEALTH_AUTHENTICATED: ${{ vars.SMOKE_HEALTH_AUTHENTICATED || 'false' }}
+        run: bash scripts/smoke-test.sh

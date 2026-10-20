@@ -1,0 +1,251 @@
+name: CD
+
+# Continuous delivery for Orqentis FabricOps (docs/delivery.md, ADR-0016).
+#
+#   build      Build the image ONCE, push it to the shared registry by digest, generate the SBOM, scan it, and only
+#              if the scan passes tag it with the git SHA. The digest is the identity of the release from here on.
+#   deploy-dev Deploy that digest to dev and smoke-test it.
+#   promote-*  Deploy the SAME digest to test, then prod. The `test` and `prod` GitHub environments hold the required
+#              reviewers; the job waits for approval before it runs.
+#
+# Triggers:
+#   * push to main: build, scan, push, then deploy dev and promote (test and prod wait for approval).
+#   * push to a cd-dryrun/** branch: the dry run. It builds, scans and pushes, and skips every deployment. It exists
+#     because GitHub only runs workflow_dispatch for a workflow file that is already on the default branch, so a new
+#     or changed workflow cannot be exercised from a feature branch with a manual run. It stays inert until someone
+#     registers a federated credential for the branch (docs/delivery.md, 'Dry run on a branch').
+#   * manual run (workflow_dispatch): once this file is on main, run it on any branch. "deploy" unticked is the same
+#     dry run; ticked deploys, which the environments' main-only deployment rules refuse from a branch.
+#
+# No secrets are used. Azure access is OIDC only, and the ids below are repository variables (docs/delivery.md):
+#   AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_NAME, ACR_LOGIN_SERVER, ACR_RESOURCE_ID, ACR_PUSH_CLIENT_ID
+#
+# The build job declares no environment, so its OIDC subject is the ref that triggered the run:
+#   repo:<owner>/<repo>:ref:refs/heads/main               (push to main)
+#   repo:<owner>/<repo>:ref:refs/heads/cd-dryrun/<name>   (dry run)
+#   repo:<owner>/<repo>:ref:refs/heads/<branch>           (manual run on a branch)
+
+on:
+  push:
+    branches: [main, "cd-dryrun/**"]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy to dev and promote to test and prod after approval. Untick for a build, scan and push dry run.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# No workflow-level concurrency group: runs for different commits may overlap (one can be waiting for a prod approval
+# while the next builds). Deployments are serialised per environment in deploy-environment.yml instead.
+
+jobs:
+  build:
+    name: Build, scan and push image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.reference.outputs.image }}
+    env:
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      IMAGE_REPOSITORY: ${{ vars.ACR_LOGIN_SERVER }}/orqentis-fabricops
+    steps:
+      - name: Check configuration
+        env:
+          AZURE_TENANT_ID_VAR: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID_VAR: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ACR_PUSH_CLIENT_ID_VAR: ${{ vars.ACR_PUSH_CLIENT_ID }}
+        run: |
+          missing=()
+          for name in AZURE_TENANT_ID_VAR AZURE_SUBSCRIPTION_ID_VAR ACR_PUSH_CLIENT_ID_VAR ACR_NAME ACR_LOGIN_SERVER; do
+            [[ -n "${!name:-}" ]] || missing+=("${name%_VAR}")
+          done
+          if ((${#missing[@]} > 0)); then
+            echo "::error::Missing GitHub repository variables: ${missing[*]} (see docs/delivery.md)"
+            exit 1
+          fi
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Azure login (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.ACR_PUSH_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Writes a short-lived registry token to the Docker config. The identity holds AcrPush on the registry only.
+      - name: Registry login
+        run: az acr login --name "$ACR_NAME"
+
+      # BuildKit runs from Google's pull-through mirror of Docker Hub, pinned by digest, because anonymous Docker Hub
+      # pulls are rate limited on shared runners (the same reason the Dockerfile uses the ECR Public mirror).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:v0.34.0@sha256:b059f8d7226d0b326bc871af489a5dddf65e36af4d20d14251b072974d9ee87c
+
+      # Built exactly once. It is pushed by digest, with no tag, so nothing can deploy it before the scan has passed;
+      # SLSA provenance (mode=max) is attached as an attestation in the same image index.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          pull: true
+          provenance: mode=max
+          sbom: false
+          outputs: type=image,name=${{ env.IMAGE_REPOSITORY }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.sha }}
+
+      - name: Record the image reference
+        id: reference
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Build did not return an image digest ('${DIGEST}')"
+            exit 1
+          fi
+          echo "image=${IMAGE_REPOSITORY}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SBOM (SPDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.reference.outputs.image }}
+          format: spdx-json
+          output: sbom.spdx.json
+
+      # Everything HIGH/CRITICAL, fixable or not, for the record. Never fails the job.
+      - name: Scan report (all HIGH/CRITICAL findings)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.reference.outputs.image }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0"
+          trivyignores: .trivyignore.yaml
+          format: table
+          output: trivy-report.txt
+
+      # The gate: HIGH and CRITICAL findings that have a fix fail the build unless .trivyignore.yaml accepts them
+      # with a justification and an expiry (docs/delivery.md, 'Accepting a scan finding').
+      - name: Scan gate (fails on unaccepted fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.reference.outputs.image }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore.yaml
+          format: table
+
+      # Only an image that passed the gate gets the commit tag.
+      - name: Tag with the git SHA
+        env:
+          IMAGE: ${{ steps.reference.outputs.image }}
+        run: docker buildx imagetools create --tag "${IMAGE_REPOSITORY}:${GITHUB_SHA}" "$IMAGE"
+
+      - name: Write release evidence
+        if: always()
+        env:
+          IMAGE: ${{ steps.reference.outputs.image }}
+        run: |
+          mkdir -p evidence
+          if [[ -n "$IMAGE" ]]; then
+            printf '%s\n' "$IMAGE" > evidence/image-digest.txt
+          fi
+          [[ -f sbom.spdx.json ]] && cp sbom.spdx.json evidence/sbom.spdx.json
+          [[ -f trivy-report.txt ]] && cp trivy-report.txt evidence/trivy-report.txt
+          {
+            echo "### Image"
+            echo
+            echo "* Commit: \`${GITHUB_SHA}\`"
+            echo "* Image: \`${IMAGE:-not built}\`"
+            echo "* Tag: \`${IMAGE_REPOSITORY}:${GITHUB_SHA}\` (set only after the scan gate passed)"
+            if [[ -f trivy-report.txt ]]; then
+              echo
+              echo "<details><summary>All HIGH/CRITICAL findings, including those with no fix yet</summary>"
+              echo
+              echo '```text'
+              cat trivy-report.txt
+              echo '```'
+              echo
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload image digest
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-digest
+          path: evidence/image-digest.txt
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Upload SBOM
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: evidence/sbom.spdx.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Upload scan report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-report
+          path: evidence/trivy-report.txt
+          if-no-files-found: ignore
+          retention-days: 90
+
+  deploy-dev:
+    name: Deploy dev
+    needs: build
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.deploy)
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy-environment.yml
+    with:
+      environment: dev
+      image: ${{ needs.build.outputs.image }}
+
+  promote-test:
+    name: Promote to test
+    needs: [build, deploy-dev]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy-environment.yml
+    with:
+      environment: test
+      image: ${{ needs.build.outputs.image }}
+
+  promote-prod:
+    name: Promote to prod
+    needs: [build, promote-test]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy-environment.yml
+    with:
+      environment: prod
+      image: ${{ needs.build.outputs.image }}

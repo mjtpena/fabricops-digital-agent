@@ -1,0 +1,18 @@
+# Reviewed exceptions for the container image scan (Trivy), used by .github/workflows/ci.yml and cd.yml.
+#
+# The scan fails on HIGH and CRITICAL findings that have a fix available (unfixed findings are reported, not
+# gated: see docs/adr/0016-delivery-pipeline.md). Accept a finding here only when it cannot be fixed by updating
+# the base image or a dependency and the risk has been assessed. Trivy stops honouring an entry after expired_at, so
+# an exception cannot outlive its review. Keep expired_at at most 90 days ahead, put the owner in the statement, and
+# open the entry with a link to the tracking issue or the reasoning.
+#
+# vulnerabilities:
+#   - id: CVE-2026-0000
+#     purls:                         # optional: limit the exception to one package
+#       - pkg:deb/debian/example
+#     statement: >-
+#       Owner: github-handle. Why the vulnerable code path is not reachable in this image, and what removes the
+#       exception (for example: fixed in base image version X, tracked in #123).
+#     expired_at: 2026-12-31
+
+vulnerabilities: []
