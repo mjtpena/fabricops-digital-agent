@@ -1,5 +1,5 @@
 // Parameters for the PROD environment (resource group rg-fabricops-prod). Used by .github/workflows/cd.yml (after the
-// `prod` GitHub environment's required reviewers approve) and whatif.yml; see docs/delivery.md.
+// `prod` GitHub environment's required reviewers approve) and bicep-diff.yml; see docs/delivery.md.
 // Contains no secrets and must never contain any.
 //
 //   Values supplied by the pipeline (GitHub environment/repository variables, all identifiers, none secret):
@@ -87,6 +87,16 @@ param schedulerStartupDelaySeconds = 30
 
 // IANA time zone for time-of-day reasoning and report times.
 param defaultTimezone = 'Australia/Sydney'
+
+// Notifications and the web UI (WS8, ADR-0018). Nothing is sent unless a notifier is configured. Webhook URLs and the sign-in
+// client secret are Key Vault references (secret URIs, no version), never values: docs/teams-notifications.md.
+param notifierKind = 'null'
+param uiEnabled = true
+// param notifierKind = 'teams_workflows'
+// param notifyTeamsWebhookSecretUri = 'https://<vault>.vault.azure.net/secrets/teams-webhook-url'
+// param keyVaultResourceId = '/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/<vault>'
+// param publicBaseUrl = 'https://fabricops.example.com'   // default: derived from the Container Apps environment
+// param uiSignInClientSecretUri = 'https://<vault>.vault.azure.net/secrets/fabricops-ui-client-secret'   // browser sign-in
 
 param containerCpu = '0.5'
 param containerMemory = '1Gi'

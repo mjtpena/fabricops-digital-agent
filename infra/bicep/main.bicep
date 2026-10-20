@@ -18,6 +18,8 @@
 //     which only that front end can set. Exposure is chosen with ingressMode (default: external and
 //     authenticated; see README "Network exposure", including the safe first deployment).
 //   * Optional: Cognitive Services OpenAI User for the reader identity on an existing Azure OpenAI account.
+//   * Notifications (Teams Workflows or a generic webhook) and the server-rendered web UI under /ui, with optional
+//     interactive Easy Auth sign-in. Webhook URLs and the sign-in client secret are Key Vault references only.
 //
 // No credentials are written anywhere: identities are managed, PostgreSQL accepts Entra tokens only, storage Shared
 // Key access is off, and the Application Insights connection string is a Container App secret. (The Log Analytics
@@ -311,6 +313,40 @@ param fabricTenantId string = ''
 @minLength(1)
 param defaultTimezone string = 'Australia/Sydney'
 
+// ------------------------------------------------------------------------------------------------- notifications + web UI
+
+@description('ORQENTIS_NOTIFIER: where notifications go. "null": nowhere (default). "teams_workflows": a Microsoft Teams Workflows webhook (needs notifyTeamsWebhookSecretUri). "webhook": a generic JSON webhook (needs notifyWebhookSecretUri). The URLs are secrets and exist only as Key Vault references; there is deliberately no parameter that takes a URL itself.')
+@allowed([
+  'null'
+  'teams_workflows'
+  'webhook'
+])
+param notifierKind string = 'null'
+
+@description('notifierKind = teams_workflows: URI of the Key Vault SECRET that holds the Workflows webhook URL, for example https://<vault>.vault.azure.net/secrets/teams-webhook-url (no version, so a rotated URL is picked up). Resolved by Container Apps with the reader identity and exposed to the app as ORQENTIS_NOTIFY_TEAMS_WEBHOOK_URL. See docs/teams-notifications.md.')
+param notifyTeamsWebhookSecretUri string = ''
+
+@description('notifierKind = webhook: URI of the Key Vault secret that holds the webhook URL (ORQENTIS_NOTIFY_WEBHOOK_URL). Same rules as notifyTeamsWebhookSecretUri.')
+param notifyWebhookSecretUri string = ''
+
+@description('notifierKind = webhook, optional: URI of the Key Vault secret that holds the HMAC-SHA256 signing key (ORQENTIS_NOTIFY_WEBHOOK_SIGNING_SECRET). The receiver verifies X-Orqentis-Signature with it.')
+param notifyWebhookSigningSecretUri string = ''
+
+@description('ORQENTIS_NOTIFY_ALLOWED_HOSTS: comma-separated host patterns a webhook URL may use ("hooks.example.com", "*.logic.azure.com"). Empty: the Power Platform / Logic Apps hosts for teams_workflows, no restriction for webhook. Private, loopback, link-local and metadata addresses are refused after DNS resolution whatever this says.')
+param notifyAllowedHosts string = ''
+
+@description('ORQENTIS_PUBLIC_BASE_URL: the origin people use to reach the app, for example https://fabricops.example.com, without a path. Notification deep links are built from it and it is the second origin the CSRF check accepts. Empty: derived from the Container Apps environment (https://<app>.<environment domain>); set it when a custom domain or Front Door is in front.')
+param publicBaseUrl string = ''
+
+@description('ORQENTIS_UI_ENABLED: serve the server-rendered web UI under /ui (incidents, reports, approvals, audit verification). It uses the same authorisation guards and services as the API.')
+param uiEnabled bool = true
+
+@description('Interactive browser sign-in for the UI: URI of the Key Vault secret that holds the CLIENT SECRET of the Entra app registration (entraClientId). Empty (default): no interactive sign-in is configured, as before, and the UI is reachable only with a bearer token. When set, Easy Auth runs the authorization code flow at /.auth/login/aad and notification links go through it. Container Apps authentication does not support a managed-identity federated credential instead of the secret (infra/bicep/README.md, "Interactive sign-in for the UI").')
+param uiSignInClientSecretUri string = ''
+
+@description('ORQENTIS_UI_CSRF_SECRET: URI of the Key Vault secret that holds the HMAC key of the form tokens. Empty: a random key per process, which is correct for one replica. Required before running more than one replica, or a form rendered by one replica is refused by another.')
+param uiCsrfSecretUri string = ''
+
 // ------------------------------------------------------------------------------------------------- fabric identity
 
 @description('ORQENTIS_AUTH_MODE for the Fabric and Power BI APIs. managed_identity: the reader managed identity (the Fabric tenant is the Azure tenant). service_principal: an app registration in the Fabric tenant, for a Fabric tenant other than the one hosting this deployment (a managed identity cannot be granted access across tenants). The credential comes from Key Vault, never from the parameters.')
@@ -570,7 +606,8 @@ var certificateUriSegments = split(fabricServicePrincipalCertificateUri, '/')
 // The secrets (by name) the reader identity must read; the Key Vault role is assigned on these, not on the vault.
 var keyVaultSecretNames = concat(
   useClientSecret && length(secretUriSegments) > 4 ? [secretUriSegments[4]] : [],
-  useClientCertificate && length(certificateUriSegments) > 4 ? [certificateUriSegments[4]] : []
+  useClientCertificate && length(certificateUriSegments) > 4 ? [certificateUriSegments[4]] : [],
+  map(configuredVaultReferences, s => length(split(s.uri, '/')) > 4 ? split(s.uri, '/')[4] : '')
 )
 
 // service_principal inputs checked when the deployment runs (see modules/input-check.bicep): 'ok', or what is wrong.
@@ -620,6 +657,56 @@ var keyVaultSecrets = concat(
       ]
     : []
 )
+
+// Notifications and the web UI (ADR-0018). Every secret is a Key Vault reference that Container Apps resolves with the
+// reader identity; nothing secret is a parameter value or an output.
+var uiSignInSecretName = 'microsoft-provider-authentication-secret'
+var uiSignInEnabled = !empty(uiSignInClientSecretUri)
+var uiSignInPath = '/.auth/login/aad'
+var vaultReferences = [
+  { secretName: 'notify-teams-webhook-url', envName: 'ORQENTIS_NOTIFY_TEAMS_WEBHOOK_URL', uri: notifyTeamsWebhookSecretUri }
+  { secretName: 'notify-webhook-url', envName: 'ORQENTIS_NOTIFY_WEBHOOK_URL', uri: notifyWebhookSecretUri }
+  { secretName: 'notify-webhook-signing-secret', envName: 'ORQENTIS_NOTIFY_WEBHOOK_SIGNING_SECRET', uri: notifyWebhookSigningSecretUri }
+  { secretName: 'ui-csrf-secret', envName: 'ORQENTIS_UI_CSRF_SECRET', uri: uiCsrfSecretUri }
+  { secretName: uiSignInSecretName, envName: '', uri: uiSignInClientSecretUri }
+]
+var configuredVaultReferences = filter(vaultReferences, s => !empty(s.uri))
+var envVaultReferences = filter(configuredVaultReferences, s => !empty(s.envName))
+
+// The origin of the app: the parameter, else the default domain of the environment. An app with internal-only ingress
+// has ".internal" in its name.
+var publicBaseUrlEffective = empty(publicBaseUrl)
+  ? 'https://${containerAppName}.${effectiveIngressMode == 'internal' ? 'internal.' : ''}${managedEnvironment.properties.defaultDomain}'
+  : publicBaseUrl
+
+// The notification / sign-in inputs checked when the deployment runs (see modules/input-check.bicep): 'ok', or what is wrong.
+var misshapenVaultReferences = filter(
+  configuredVaultReferences,
+  s => !startsWith(s.uri, 'https://')
+    ? true
+    : length(split(s.uri, '/')) != 5
+        ? true
+        : split(s.uri, '/')[3] != 'secrets'
+            ? true
+            : empty(split(s.uri, '/')[4]) ? true : !contains(split(s.uri, '/')[2], '.') ? true : false
+)
+var foreignVaultReferences = empty(keyVaultResourceId)
+  ? []
+  : filter(
+      configuredVaultReferences,
+      s => length(split(s.uri, '/')) == 5 ? !startsWith(split(s.uri, '/')[2], '${keyVaultIdSegments[8]}.') : false
+    )
+var notificationCheck = !empty(misshapenVaultReferences)
+  ? 'the Key Vault URI for ${misshapenVaultReferences[0].secretName} must look like https://<vault-name>.<key-vault-dns-suffix>/secrets/<secret-name> (no version, no trailing slash): the secrets endpoint, not keys or certificates'
+  : !empty(foreignVaultReferences)
+      ? 'the Key Vault URI for ${foreignVaultReferences[0].secretName} is not in the vault named by keyVaultResourceId'
+      : (notifierKind == 'teams_workflows' && empty(notifyTeamsWebhookSecretUri))
+          ? 'notifierKind is teams_workflows, so notifyTeamsWebhookSecretUri (the Key Vault secret that holds the Workflows webhook URL) must be set'
+          : (notifierKind == 'webhook' && empty(notifyWebhookSecretUri))
+              ? 'notifierKind is webhook, so notifyWebhookSecretUri (the Key Vault secret that holds the webhook URL) must be set'
+              : (!empty(publicBaseUrl) && (!startsWith(publicBaseUrl, 'https://') || length(split(publicBaseUrl, '/')) != 3))
+                  ? 'publicBaseUrl must be an https origin such as https://fabricops.example.com (no path, no trailing slash)'
+                  : 'ok'
 
 // Ingress mode: ingressMode, or the deprecated externalIngress mapped to it, or the default.
 var legacyIngressMode = (externalIngress ?? false)
@@ -761,7 +848,16 @@ var appEnv = concat(
   useClientSecret ? [{ name: 'AZURE_CLIENT_SECRET', secretRef: fabricSpSecretName }] : [],
   useClientCertificate
     ? [{ name: 'AZURE_CLIENT_CERTIFICATE_PATH', value: '${fabricSpCertificateMountPath}/${fabricSpCertificateFile}' }]
-    : []
+    : [],
+  // Notifications and the web UI. The webhook URLs, the signing key and the CSRF key are secret references.
+  [
+    { name: 'ORQENTIS_NOTIFIER', value: notifierKind }
+    { name: 'ORQENTIS_PUBLIC_BASE_URL', value: publicBaseUrlEffective }
+    { name: 'ORQENTIS_UI_ENABLED', value: uiEnabled ? 'true' : 'false' }
+  ],
+  empty(notifyAllowedHosts) ? [] : [{ name: 'ORQENTIS_NOTIFY_ALLOWED_HOSTS', value: notifyAllowedHosts }],
+  uiSignInEnabled ? [{ name: 'ORQENTIS_UI_SIGN_IN_PATH', value: uiSignInPath }] : [],
+  map(envVaultReferences, s => { name: s.envName, secretRef: s.secretName })
 )
 
 // ================================================================================================= observability
@@ -859,7 +955,15 @@ module servicePrincipalInputCheck 'modules/input-check.bicep' = {
   }
 }
 
-module readerKeyVaultSecretsUser 'modules/keyvault-role.bicep' = if (!empty(keyVaultResourceId) && !empty(keyVaultSecretNames)) {
+// Same for the notification and web UI inputs (Key Vault URIs, the notifier's secret, the public base URL).
+module notificationInputCheck 'modules/input-check.bicep' = {
+  name: 'orqentis-check-notification-inputs'
+  params: {
+    result: any(notificationCheck) // a literal-typed parameter on purpose: ARM, not the compiler, rejects it
+  }
+}
+
+module readerKeyVaultSecretsUser 'modules/keyvault-role.bicep' = if (!empty(keyVaultResourceId) && !empty(keyVaultSecretNames) && notificationCheck == 'ok') {
   name: 'orqentis-keyvault-role-${uniqueString(keyVaultResourceId, readerIdentityName)}'
   scope: resourceGroup(keyVaultIdSegments[2], keyVaultIdSegments[4])
   params: {
@@ -1020,7 +1124,8 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             value: appInsights.properties.ConnectionString
           }
         ],
-        keyVaultSecrets
+        keyVaultSecrets,
+        map(configuredVaultReferences, s => { name: s.secretName, keyVaultUrl: s.uri, identity: readerIdentity.id })
       )
     }
     template: {
@@ -1115,6 +1220,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     readerKeyVaultSecretsUser
     servicePrincipalInputCheck
     storageInputCheck
+    notificationInputCheck
   ]
 }
 
@@ -1122,7 +1228,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 // authenticated requests reach the app with X-MS-CLIENT-PRINCIPAL (claims, including app roles). Easy Auth strips any
 // client-supplied copy of that header. The app classifies the caller from those claims (app-only tokens are services
 // and can never approve), which is why the app registration must emit the idtyp optional claim (README step 1).
-// No client secret: the API only validates bearer tokens, it never runs an interactive login flow.
+// No client secret unless uiSignInClientSecretUri is set: the API only validates bearer tokens. With it, the same
+// registration also signs people in for the web UI (authorization code flow at /.auth/login/aad; the cookie session
+// carries the ID token, which the app classifies as a person: ADR-0015 row 8). Requests without a token still get 401.
 // Authentication is required on every path except the anonymousPaths above (health only, when
 // anonymousHealthEndpoints is true). Container Apps has no separate "requireAuthentication" flag, unlike App Service.
 // Container health probes go straight to the container port and do not pass through this front end.
@@ -1140,22 +1248,45 @@ resource authConfig 'Microsoft.App/containerApps/authConfigs@2024-03-01' = {
     httpSettings: {
       requireHttps: true
     }
+    // Browser sessions: no token store (the app needs the ID token's claims only, not an access or refresh token), no
+    // redirect to any other site after sign-in, and an 8 hour session.
+    login: uiSignInEnabled
+      ? {
+          preserveUrlFragmentsForLogins: false
+          allowedExternalRedirectUrls: []
+          tokenStore: {
+            enabled: false
+          }
+          cookieExpiration: {
+            convention: 'FixedTime'
+            timeToExpiration: '08:00:00'
+          }
+          nonce: {
+            validateNonce: true
+          }
+        }
+      : null
     identityProviders: {
       azureActiveDirectory: {
         enabled: true
         registration: {
           clientId: entraClientId
           openIdIssuer: '${environment().authentication.loginEndpoint}${entraTenantId}/v2.0'
+          clientSecretSettingName: uiSignInEnabled ? uiSignInSecretName : null
         }
         validation: {
           allowedAudiences: [
             entraClientId
             'api://${entraClientId}'
           ]
+          // With interactive sign-in the registration itself is the client of the browser session, so its own id must be
+          // allowed whenever the list is used at all.
           defaultAuthorizationPolicy: empty(allowedClientApplications)
             ? null
             : {
-                allowedApplications: allowedClientApplications
+                allowedApplications: uiSignInEnabled
+                  ? union(allowedClientApplications, [entraClientId])
+                  : allowedClientApplications
               }
         }
       }
@@ -1173,6 +1304,15 @@ output ingressModeEffective string = effectiveIngressMode
 
 @description('Ingress FQDN of the Container App (reachable as described by ingressModeEffective).')
 output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
+
+@description('The origin used for notification deep links and the CSRF check (publicBaseUrl, else derived from the environment).')
+output publicBaseUrlEffective string = publicBaseUrlEffective
+
+@description('Redirect URI to register on the Entra app registration (type Web) for interactive sign-in. Empty when uiSignInClientSecretUri is not set.')
+output entraRedirectUri string = uiSignInEnabled ? '${publicBaseUrlEffective}/.auth/login/aad/callback' : ''
+
+@description('Where the web UI is: <origin>/ui when uiEnabled.')
+output uiUrl string = uiEnabled ? '${publicBaseUrlEffective}/ui' : ''
 
 @description('Reader (READ) identity: grant Fabric workspace Viewer to this principal id (see README).')
 output readerIdentityPrincipalId string = readerIdentity.properties.principalId

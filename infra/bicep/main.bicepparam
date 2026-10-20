@@ -89,6 +89,16 @@ param infrastructureSubnetId = ''
 // param allowedIpRanges = ['203.0.113.0/24']   // optional address allow list in front of authentication
 param anonymousHealthEndpoints = true           // /health and /health/ready answer without a token
 
+// Notifications and the web UI (WS8, ADR-0018). Nothing is sent unless a notifier is configured. Webhook URLs and the sign-in
+// client secret are Key Vault references (secret URIs, no version), never values: docs/teams-notifications.md.
+param notifierKind = 'null'
+param uiEnabled = true
+// param notifierKind = 'teams_workflows'
+// param notifyTeamsWebhookSecretUri = 'https://<vault>.vault.azure.net/secrets/teams-webhook-url'
+// param keyVaultResourceId = '/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/<vault>'
+// param publicBaseUrl = 'https://fabricops.example.com'   // default: derived from the Container Apps environment
+// param uiSignInClientSecretUri = 'https://<vault>.vault.azure.net/secrets/fabricops-ui-client-secret'   // browser sign-in
+
 param logRetentionInDays = 30
 
 // Scale: the app is stateless (the database serialises the audit chain, the lease and approvals), so two replicas

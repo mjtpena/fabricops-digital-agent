@@ -77,6 +77,7 @@ class Runtime:
         await container.replica_sync.stop()
         await container.scheduler.stop()
         await container.investigation_jobs.shutdown()
+        await container.notifications.stop()  # last: the jobs above may still publish while they wind down
         if self._injected is None:
             await container.aclose()
 
@@ -100,6 +101,7 @@ class Runtime:
         self._container = container
         # Every replica works on queued investigations (a shared job store), whether or not it runs the scheduler.
         await container.investigation_jobs.start()
+        await container.notifications.start()
         if self._settings.scheduler_enabled:
             await container.scheduler.start()
             if self._settings.scheduler_catalog_refresh_enabled:

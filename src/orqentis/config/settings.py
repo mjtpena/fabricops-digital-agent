@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from orqentis.notifications.urlcheck import UnsafeDestinationError, check_webhook_url
+
 # Token scopes of the public cloud. Sovereign clouds use other resources (see docs/development.md).
 PUBLIC_FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 PUBLIC_POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
@@ -69,6 +71,27 @@ class ClockMode(StrEnum):
     SCENARIO = "scenario"  # freeze time at the synthetic scenario's "now" (mock mode only)
 
 
+class NotifierKind(StrEnum):
+    """Where notifications go (ADR-0010, ADR-0018)."""
+
+    NULL = "null"  # nowhere: local development, the offline demo and tests
+    TEAMS_WORKFLOWS = "teams_workflows"  # Microsoft Teams Workflows webhook, an Adaptive Card with links only
+    WEBHOOK = "webhook"  # generic JSON webhook, optionally signed with HMAC-SHA256
+
+
+# Hosts a Power Automate / Workflows webhook URL can have (public and sovereign clouds). Used when the Teams notifier
+# is selected and ORQENTIS_NOTIFY_ALLOWED_HOSTS is empty. ``*.`` matches any number of labels below the suffix.
+DEFAULT_TEAMS_WEBHOOK_HOSTS: tuple[str, ...] = (
+    "*.logic.azure.com",
+    "*.logic.azure.us",
+    "*.logic.azure.cn",
+    "*.api.powerplatform.com",
+    "*.api.gov.powerplatform.microsoft.us",
+    "*.api.high.powerplatform.microsoft.us",
+    "*.api.powerplatform.partner.microsoftonline.cn",
+)
+
+
 def _is_loopback(host: str) -> bool:
     if host.lower() == "localhost":
         return True
@@ -79,7 +102,12 @@ def _is_loopback(host: str) -> bool:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ORQENTIS_", env_file=".env", extra="ignore")
+    # hide_input_in_errors: a validation error must never print the raw settings it was given. Without it pydantic shows
+    # ``input_value`` (a truncated copy of every variable read), so a start-up failure would put webhook URLs, the
+    # signing key and the CSRF key into a traceback and from there into the logs.
+    model_config = SettingsConfigDict(
+        env_prefix="ORQENTIS_", env_file=".env", extra="ignore", hide_input_in_errors=True
+    )
 
     deployment_environment: Literal["local", "dev", "test", "prod"] = "local"
     tenant_id: str = "tenant-contoso"
@@ -219,6 +247,31 @@ class Settings(BaseSettings):
     api_rate_limit_mutating_per_minute: int = Field(default=30, ge=1, le=10_000)
     api_rate_limit_expensive_per_minute: int = Field(default=6, ge=1, le=10_000)
 
+    # Human interface (ADR-0010, ADR-0018): notifications and the server-rendered web UI under /ui.
+    # The origin people reach the UI at (https://<fqdn>); deep links in notifications are built from it.
+    public_base_url: str | None = None
+    notifier: NotifierKind = NotifierKind.NULL
+    # Webhook URLs are secrets (the Teams URL carries its signature in the query string). In Azure they are Container
+    # App secrets that reference Key Vault. They are never logged, audited or echoed in an error.
+    notify_teams_webhook_url: SecretStr | None = None
+    notify_webhook_url: SecretStr | None = None
+    notify_webhook_signing_secret: SecretStr | None = None  # generic webhook: HMAC-SHA256 key (optional)
+    # Comma-separated host patterns a webhook URL may point to (exact name, or "*.suffix"). Empty: the Power Platform
+    # hosts for the Teams notifier, no host restriction for the generic webhook (the address checks always apply).
+    notify_allowed_hosts: str = ""
+    notify_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    notify_max_attempts: int = Field(default=5, ge=1, le=10)
+    notify_backoff_base_seconds: float = Field(default=2.0, gt=0, le=300)
+    notify_backoff_max_seconds: float = Field(default=60.0, gt=0, le=3600)
+    notify_outbox_size: int = Field(default=200, ge=1, le=10_000)
+    ui_enabled: bool = True
+    # Path of the Easy Auth sign-in endpoint (for example /.auth/login/aad). When set, deep links in notifications go
+    # through it: a person without a session is sent to Entra ID and then on to the page.
+    ui_sign_in_path: str | None = None
+    # HMAC key of the CSRF tokens in the UI forms. Unset: a random key per process, enough for one replica. With several
+    # replicas set it (a Key Vault secret), or a form rendered by one replica is refused by another.
+    ui_csrf_secret: SecretStr | None = None
+
     # Observability
     log_level: str = "INFO"
     log_format: Literal["json", "console"] = "json"
@@ -250,6 +303,37 @@ class Settings(BaseSettings):
         if parts.scheme != "https" or not parts.hostname or parts.path.strip("/") or parts.query or parts.fragment:
             raise ValueError("must be an https host such as https://login.microsoftonline.us (no path or query)")
         return f"https://{parts.netloc}"
+
+    @field_validator("public_base_url")
+    @classmethod
+    def _valid_public_base_url(cls, value: str | None) -> str | None:
+        """The origin of the UI: https (http only for a loopback host), no path, query, fragment or credentials."""
+        if value is None or not value.strip():
+            return None
+        parts = urlsplit(value.strip())
+        problem = (
+            "must be an origin such as https://fabricops.example.com (no path, query or credentials)"
+            if parts.path.strip("/") or parts.query or parts.fragment or parts.username or parts.password
+            else None
+        )
+        host = parts.hostname
+        if problem is None and (host is None or parts.scheme not in {"https", "http"}):
+            problem = "must be an https origin such as https://fabricops.example.com"
+        if problem is None and parts.scheme == "http" and not (host and _is_loopback(host)):
+            problem = "must use https (http is accepted for localhost only)"
+        if problem is not None:
+            raise ValueError(problem)
+        return f"{parts.scheme}://{parts.netloc.lower()}"
+
+    @field_validator("ui_sign_in_path")
+    @classmethod
+    def _valid_sign_in_path(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        path = value.strip()
+        if not path.startswith("/") or path.startswith("//") or "\\" in path or "?" in path or "#" in path:
+            raise ValueError("must be an absolute path on this host such as /.auth/login/aad")
+        return path
 
     @field_validator("fabric_scope", "powerbi_scope")
     @classmethod
@@ -301,6 +385,7 @@ class Settings(BaseSettings):
             )
         if self.storage_backend is StorageBackend.POSTGRES:
             self._check_postgres()
+        self._check_notifications()
         if self.reasoner is ReasonerKind.AGENT_FRAMEWORK:
             if self.llm_provider is LlmProvider.AZURE_OPENAI and not (
                 self.azure_openai_endpoint and self.azure_openai_deployment
@@ -353,6 +438,39 @@ class Settings(BaseSettings):
                 f"ORQENTIS_DEPLOYMENT_ENVIRONMENT={self.deployment_environment} requires "
                 "ORQENTIS_STORAGE_BACKEND=postgres: local SQLite and file storage are for development only"
             )
+
+    def _check_notifications(self) -> None:
+        """A notifier needs its secret URL and a public base URL; messages never contain the URL itself."""
+        if self.notify_backoff_max_seconds < self.notify_backoff_base_seconds:
+            raise ValueError("ORQENTIS_NOTIFY_BACKOFF_MAX_SECONDS must be >= ORQENTIS_NOTIFY_BACKOFF_BASE_SECONDS")
+        if self.notifier is NotifierKind.NULL:
+            return
+        variable, secret = (
+            ("ORQENTIS_NOTIFY_TEAMS_WEBHOOK_URL", self.notify_teams_webhook_url)
+            if self.notifier is NotifierKind.TEAMS_WORKFLOWS
+            else ("ORQENTIS_NOTIFY_WEBHOOK_URL", self.notify_webhook_url)
+        )
+        raw = secret.get_secret_value().strip() if secret is not None else ""
+        if not raw:
+            raise ValueError(f"ORQENTIS_NOTIFIER={self.notifier.value} requires {variable} (a secret, never a setting)")
+        try:
+            check_webhook_url(raw, allowed_hosts=self.notify_allowed_host_patterns)
+        except UnsafeDestinationError as exc:
+            # The reason never contains the URL: it is a secret.
+            raise ValueError(f"{variable} is not acceptable: {exc.reason}") from None
+        if self.public_base_url is None:
+            raise ValueError(
+                f"ORQENTIS_NOTIFIER={self.notifier.value} requires ORQENTIS_PUBLIC_BASE_URL (the deep links in "
+                "notifications are built from it)"
+            )
+
+    @property
+    def notify_allowed_host_patterns(self) -> tuple[str, ...]:
+        """Host patterns a webhook URL may use: the configured list, else the Power Platform hosts for Teams."""
+        configured = tuple(p.strip().lower() for p in self.notify_allowed_hosts.split(",") if p.strip())
+        if configured:
+            return configured
+        return DEFAULT_TEAMS_WEBHOOK_HOSTS if self.notifier is NotifierKind.TEAMS_WORKFLOWS else ()
 
     def check_bind_host(self, host: str) -> None:
         """Refuse to serve ``dev_headers`` (self-asserted identities and roles) on a non-loopback address."""

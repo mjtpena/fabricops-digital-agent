@@ -29,7 +29,7 @@ def _steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
 
 def test_workflows_exist() -> None:
     names = {path.name for path in WORKFLOW_FILES}
-    assert {"ci.yml", "cd.yml", "release.yml", "whatif.yml", "deploy-environment.yml"} <= names
+    assert {"ci.yml", "cd.yml", "release.yml", "bicep-diff.yml", "deploy-environment.yml"} <= names
 
 
 @pytest.mark.parametrize("path", WORKFLOW_FILES, ids=lambda p: p.name)
@@ -142,14 +142,79 @@ def test_deploy_workflow_uses_the_environment_it_is_given() -> None:
     assert job["environment"] == "${{ inputs.environment }}"
     text = (WORKFLOWS / "deploy-environment.yml").read_text(encoding="utf-8")
     assert "az deployment group create" in text
-    assert "what-if" not in text
 
 
-def test_whatif_workflow_never_deploys() -> None:
-    text = (WORKFLOWS / "whatif.yml").read_text(encoding="utf-8")
-    assert "az deployment group what-if" in text
-    assert "deployment group create" not in text
-    assert "environment:" not in text.split("jobs:", 1)[1], "the what-if job must present the pull_request subject"
+def test_the_real_what_if_runs_in_the_deploy_job_right_before_the_deployment() -> None:
+    steps = _load(WORKFLOWS / "deploy-environment.yml")["jobs"]["deploy"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    login = next(i for i, n in enumerate(names) if n.startswith("Azure login (OIDC)"))
+    group_check = next(i for i, n in enumerate(names) if n.startswith("Check that the resource group exists"))
+    whatif = next(i for i, n in enumerate(names) if n.startswith("What-if (record of the change)"))
+    deploy = next(i for i, n in enumerate(names) if n.startswith("Deploy (az deployment group create)"))
+    assert login < group_check < whatif < deploy
+    assert whatif < names.index("Upload the what-if summary") < deploy, "the record is published before the deployment"
+    step = steps[whatif]
+    assert "az deployment group what-if" in step["run"]
+    assert "deployment group create" not in step["run"]
+    assert step["continue-on-error"] is True, "a failing preview is reported but must not stop a verified deployment"
+    assert "scripts/whatif_summary.py" in step["run"], "only paths and change types are published, never values"
+    assert "trap 'rm -f \"$raw\"' EXIT" in step["run"], "the raw payload (which can hold keys) never outlives the step"
+    upload = steps[names.index("Upload the what-if summary")]
+    assert upload["with"]["name"] == "bicep-whatif-${{ inputs.environment }}"
+
+
+def _triggers(workflow: dict[str, Any]) -> set[str]:
+    return set(workflow[True])  # YAML parses the key `on` as True
+
+
+def test_no_pull_request_workflow_has_any_azure_access() -> None:
+    """ARM what-if needs write rights, so pull requests run offline: no login, no id-token, no Azure variable."""
+    pull_request_workflows = [path for path in WORKFLOW_FILES if "pull_request" in _triggers(_load(path))]
+    assert {path.name for path in pull_request_workflows} >= {"ci.yml", "bicep-diff.yml"}
+    for path in pull_request_workflows:
+        workflow = _load(path)
+        text = path.read_text(encoding="utf-8")
+        granted = [workflow.get("permissions", {}), *(job.get("permissions", {}) for job in workflow["jobs"].values())]
+        assert not any("id-token" in (g if isinstance(g, dict) else {}) for g in granted), (
+            f"{path.name} runs on pull requests and must not request an OIDC token"
+        )
+        assert not any(str(step.get("uses", "")).startswith("azure/login@") for step in _steps(workflow)), path.name
+        assert "WHATIF_" not in text, path.name
+        for variable in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID", "ACR_PUSH_CLIENT_ID"):
+            assert f"vars.{variable}" not in text, f"{path.name} reads vars.{variable}"
+        assert "az deployment" not in text.replace("az deployment group ", "x"), path.name
+
+
+def test_no_workflow_or_doc_references_the_retired_what_if_variables_or_identity_role() -> None:
+    for relative in (*[f".github/workflows/{p.name}" for p in WORKFLOW_FILES], "docs/delivery.md"):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        assert "WHATIF_" not in text, relative
+        assert "gh-pull-request" not in text, relative
+        assert "new_identity fabricops-whatif" not in text, relative
+    assert not (WORKFLOWS / "whatif.yml").exists()
+
+
+def test_bicep_diff_workflow_is_offline_and_pinned() -> None:
+    path = WORKFLOWS / "bicep-diff.yml"
+    workflow = _load(path)
+    assert workflow["permissions"] == {"contents": "read"}
+    assert _triggers(workflow) == {"pull_request"}
+    text = path.read_text(encoding="utf-8")
+    assert "scripts/bicep-snapshot.sh" in text
+    assert "scripts/bicep_snapshot_diff.py" in text
+    assert "BICEP_VERSION: v0.45.15" in text, "snapshot needs a recent Bicep CLI; the version is pinned"
+    assert "BICEP_VERSION: v0.45.15" in (WORKFLOWS / "ci.yml").read_text(encoding="utf-8"), "CI uses the same pin"
+    assert "vars." not in text
+
+
+def test_the_snapshot_script_uses_only_fixed_placeholders() -> None:
+    text = (ROOT / "scripts" / "bicep-snapshot.sh").read_text(encoding="utf-8")
+    for name in ("CONTAINER_IMAGE", "ACR_LOGIN_SERVER", "ACR_RESOURCE_ID", "ENTRA_API_CLIENT_ID"):
+        assert re.search(rf'^export {name}="[^$]', text, re.MULTILINE), (
+            f"{name} must be a fixed placeholder, not inherited"
+        )
+    assert "az login" not in text
+    assert ".invalid" in text
 
 
 def test_release_workflow_triggers_on_version_tags_only() -> None:
@@ -313,13 +378,6 @@ def test_release_has_its_own_environment_and_takes_only_successful_main_runs() -
     assert "--name image-digest --name sbom" not in text
 
 
-def test_whatif_has_no_access_to_the_shared_registry_resource_group() -> None:
-    text = (WORKFLOWS / "whatif.yml").read_text(encoding="utf-8")
-    assert 'ACR_RESOURCE_ID: ""' in text
-    assert "vars.ACR_RESOURCE_ID" not in text
-    assert "containerapp" not in text.replace("Microsoft.App/containerApps", ""), "no CLI extension needed"
-
-
 def test_smoke_test_checks_the_deployed_revision() -> None:
     env = next(s for s in _steps(_load(WORKFLOWS / "deploy-environment.yml")) if s.get("name") == "Smoke test")["env"]
     assert env["SMOKE_EXPECTED_IMAGE"] == "${{ inputs.image }}"
@@ -366,7 +424,7 @@ SUBJECT_FILES = (
     "docs/adr/0016-delivery-pipeline.md",
     ".github/workflows/cd.yml",
     ".github/workflows/deploy-environment.yml",
-    ".github/workflows/whatif.yml",
+    ".github/workflows/bicep-diff.yml",
     ".github/workflows/release.yml",
 )
 
@@ -394,10 +452,12 @@ def test_documented_subjects_use_the_immutable_prefix_and_cover_every_credential
         ":environment:test",
         ":environment:prod",
         ":environment:release",
-        ":pull_request",
         ":ref:refs/heads/cd-dryrun/ws4",
     ):
         assert suffix in documented, f"docs/delivery.md does not document the subject ending {suffix}"
+    assert ":pull_request" not in documented, (
+        "no federated credential exists for pull requests: they use no Azure identity"
+    )
     # The prefix is read from GitHub, not typed, and the docs say how and why.
     assert "sub_claim_prefix" in text
     assert "oidc/customization/sub" in text

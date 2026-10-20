@@ -262,7 +262,7 @@ def test_the_estate_contracts_file_is_a_blob_not_a_secret_a_volume_or_a_share() 
         assert removed not in main, f"main.bicep still mentions {removed}"
         for path in MODULES:
             assert removed not in _code(path.read_text(encoding="utf-8")), f"{path.name} still mentions {removed}"
-    for name in ("deploy-environment.yml", "whatif.yml", "cd.yml", "ci.yml"):
+    for name in ("deploy-environment.yml", "bicep-diff.yml", "cd.yml", "ci.yml"):
         text = (WORKFLOWS / name).read_text(encoding="utf-8")
         assert "CONTRACTS_JSON" not in text, f"{name} still passes the contracts text"
         assert "contractsContent" not in text
@@ -383,19 +383,17 @@ def test_every_variable_an_environment_file_requires_is_supplied_by_the_pipeline
         required |= set(re.findall(r"readEnvironmentVariable\('([A-Z_]+)'\)", text))
     assert {"POSTGRES_ENTRA_ADMIN_OBJECT_ID", "POSTGRES_ENTRA_ADMIN_NAME", "CONTAINER_IMAGE"} <= required
     deploy = (WORKFLOWS / "deploy-environment.yml").read_text(encoding="utf-8")
-    whatif = (WORKFLOWS / "whatif.yml").read_text(encoding="utf-8")
     validate = (REPO / "scripts" / "validate-bicep.sh").read_text(encoding="utf-8")
+    snapshot = (REPO / "scripts" / "bicep-snapshot.sh").read_text(encoding="utf-8")  # the pull-request Bicep diff
     for name in sorted(required):
         assert f"export {name}=" in validate, f"scripts/validate-bicep.sh has no placeholder for {name}"
+        assert f"export {name}=" in snapshot, f"scripts/bicep-snapshot.sh has no placeholder for {name}"
         assert name in deploy, f"deploy-environment.yml does not supply {name}"
-        assert name in whatif, f"whatif.yml does not supply {name}"
     # Identifiers come from GitHub variables, never from secrets.
     assert "POSTGRES_ENTRA_ADMIN_OBJECT_ID: ${{ vars.POSTGRES_ENTRA_ADMIN_OBJECT_ID }}" in deploy
     assert "POSTGRES_ENTRA_ADMIN_NAME: ${{ vars.POSTGRES_ENTRA_ADMIN_NAME }}" in deploy
     assert "CONTRACTS_JSON" not in deploy
-    assert "CONTRACTS_JSON" not in whatif
     assert not re.search(r"secrets\.\w", deploy)
-    assert not re.search(r"secrets\.\w", whatif)
 
 
 def test_the_deploy_identity_may_assign_the_storage_role_the_template_grants() -> None:

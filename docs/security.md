@@ -92,8 +92,8 @@ roles only to people. Both are enforced by the checks above even when Entra is m
 third-party applications acting for a consenting user also classify `HUMAN`. Do not assign approver roles to
 non-interactive accounts, and list the allowed client applications (`allowedClientApplications`). Exactly one
 `X-MS-CLIENT-PRINCIPAL` header is accepted (several: 401), the header is strictly base64, capped in size, and the
-payload cannot relabel claims as roles. Cookie sessions (WS8) additionally need CSRF protection (JSON-only
-state-changing routes plus an `Origin` check); ADR-0015 records the requirement.
+payload cannot relabel claims as roles. Cookie sessions of the web UI are protected against cross-site requests
+(section 12): the API stays JSON-only and every state-changing request passes an `Origin` / `Sec-Fetch-Site` check.
 
 `orqentis serve` refuses `dev_headers` on a non-loopback address unless `ORQENTIS_DEV_HEADERS_ALLOW_REMOTE=true`
 is set, and the container image defaults to `easy_auth`, so an unconfigured `docker run` is not an open API.
@@ -269,6 +269,9 @@ to keep these defences under test.
   and synthetic principals. They have not been checked against a live tenant (ADR-0015).
 * No REST write adapter is shipped. Enabling writes against a real tenant first requires
   implementing and reviewing one.
+* The notification outbox is in memory: a notification waiting when the app crashes is lost (the incident, the
+  approval and the UI are not). The UI's CSRF key is per process unless `ORQENTIS_UI_CSRF_SECRET` is set, so
+  it must be shared before more than one replica runs (ADR-0018).
 
 ## 10. Autonomous operation
 
@@ -397,7 +400,51 @@ refreshes.
 * A notebook that raises surfaces as pipeline error code 2451 with the exception name and text nested in the
   message; a timed-out activity surfaces as pipeline error code 500 "InternalServerError executing request".
 
-## 12. Storage identities, encryption and network
+## 12. Web UI and notifications
+
+Added by [ADR-0018](adr/0018-notifications-and-web-ui.md). Both are new ways in and out of the system, so they get their own controls.
+
+**The UI holds no privilege of its own.** Every `/ui` route depends on the guard of the API route that does the same thing and calls the same
+service, so the role, human-only, requester-is-not-approver, expiry, fingerprint, single-use, policy and write-capability checks are the API's.
+
+| Caller | Pages | Decision forms | `POST` approve / reject / execute |
+|---|---|---|---|
+| No FabricOps role | 403 | none | 403 `ROLE_REQUIRED` |
+| `FabricOps.Reader` | all | none | 403 `ROLE_REQUIRED` |
+| `FabricOps.Automation` or any app-only token, whatever its roles | all (reads) | none | 403 `PRINCIPAL_NOT_HUMAN` / `AUTOMATION_ROLE_CANNOT_DECIDE` |
+| `FabricOps.Operator` / `PlatformAdmin` (a person; delegated token or ID-token session) | all | when the role the approval needs is held and they are not its requester | allowed by the service when its checks pass |
+| Ambiguous claims | 403 `PRINCIPAL_AMBIGUOUS` | none | 403 |
+
+**Cross-site request forgery (ledger R6).** An ID-token browser session is a person (ADR-0015, row 8), so a page on another site could make a
+signed-in browser send a state-changing request. Two independent layers stop it. (1) The *cross-origin guard* runs on every `POST`/`PUT`/`PATCH`/`DELETE`
+(API and UI) before authentication and before the body is read: `Sec-Fetch-Site` must be `same-origin` or `none`; `Origin`, when present (browsers send it on
+every cross-site `POST`), must be this application (the `Host` or `X-Forwarded-Host` it arrived with, scheme from `X-Forwarded-Proto`, or `ORQENTIS_PUBLIC_BASE_URL`), `null`
+included; on `/ui` one of `Origin` / `Referer` must be present and match; on the API a request with no browser headers is a script and passes. The API also
+stays **JSON-only**: a non-JSON body is `415`, so a plain HTML form cannot reach it. (2) Every state-changing UI form carries a *token*
+(`v1.<expiry>.<nonce>.<HMAC-SHA256>`) bound to the signed-in principal's object id, valid four hours and different on every page; a missing, wrong, expired,
+tampered or another person's token is `403 CSRF_TOKEN_INVALID` and is audited against the signed-in person with the same bounded sampling as other refusals.
+The key is `ORQENTIS_UI_CSRF_SECRET` (Key Vault) or a random per-process key (one replica). The cookie's own attributes belong to Easy Auth and are not relied upon. The guard also applies to **reads that spend a rate budget** (`GET /ui/*`, `GET /audit/verify`): a foreign page could load `<img src="/ui/audit">` with the person's cookie and use up the shared "expensive" budget, so the person's own `POST /incidents/{id}/investigate` would answer 429. A request marked `cross-site` or `same-site` is refused unless it is a top-level navigation (`Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`): following a link in a card still works.
+
+**Script injection.** Fabric names, descriptions, error messages, evidence payloads, comments and display names are untrusted. They reach a page only through
+Jinja2 `{{ }}` with autoescape on (a test renders a pipeline whose description is `<script>...`, and every other untrusted field, and finds only escaped text; another test
+refuses `|safe`, inline scripts, inline styles and event-handler attributes in the templates). There is no JavaScript at all. Every `/ui` response, errors included, carries
+`Content-Security-Policy: default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`, `X-Frame-Options: DENY`,
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, `Cache-Control: no-store`, cross-origin opener / resource policies and, over https, HSTS.
+
+**Sign-in.** Browser sign-in is Easy Auth's authorization code flow with a client secret held only in Key Vault (a managed-identity federated credential is not
+supported for Container Apps; ADR-0018 has the evidence), no token store, an 8 hour session, no redirect to another site, and `Return401` for everything without a session.
+
+**Start-up errors do not print secrets.** `Settings` sets `hide_input_in_errors`; without it a validation error shows `input_value`, a truncated copy of the raw environment, and a failing start would put the end of a signing key, a webhook signature or the CSRF key into a traceback and the logs. All secret settings are `SecretStr`.
+
+**Notifications are an outbound channel.** Content: every string is sanitised, secrets are redacted, fields are length-limited, and in Teams cards Markdown links
+and tags in Fabric names are defused; the card has no buttons and one link built from the configured base URL. Destination: a webhook URL is a secret (Key Vault reference,
+never a parameter, log, audit field or error message), https only, a DNS name on an allow list, resolved by the application, every address public (private, loopback, link-local,
+multicast, reserved, CGNAT, the Azure host and cloud metadata addresses and IPv4-embedding IPv6 are refused), the request goes to the validated address (no DNS-rebinding window),
+redirects are never followed, proxies are ignored; the HTTP client's loggers are pinned to WARNING so a raised log level cannot write the URL (which holds the secret) into a log. Delivery: bounded outbox, dropped-oldest, retries with back-off, one audit record per attempt. What a notification discloses
+(incident title, item and workspace names, severity, action, target, requester) goes to the chat or endpoint the operator configured: choose a private channel, and prefer
+a webhook receiver you control for anything beyond that.
+
+## 13. Storage identities, encryption and network
 
 | Resource | Who can do what | Notes |
 |---|---|---|
@@ -410,4 +457,3 @@ anchors make the audit trail verifiable even against someone with full rights on
 who can change the immutability policy of the storage account before it is locked: keep the account's own RBAC small and
 lock the policy in production. Credentials for these services never appear in the repository, in settings or in
 CI: the only secrets in the picture are Container App secrets that Bicep fills from Key Vault references.
-

@@ -11,6 +11,8 @@ from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.events import EventSeverity, EventType, OperationalEvent
 from orqentis.domain.incidents import Incident, IncidentStatus, Symptom, TimelineEntry, TimelineKind
 from orqentis.domain.taxonomy import CategoryName, Severity
+from orqentis.notifications import events as notification_events
+from orqentis.notifications.sink import NOOP_SINK, NotificationSink
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
 from orqentis.storage.event_store import EventStore
@@ -52,12 +54,18 @@ class IncidentCandidate(BaseModel):
 
 class IncidentService:
     def __init__(
-        self, repository: IncidentRepository, event_store: EventStore, audit: AuditTrail, clock: Clock
+        self,
+        repository: IncidentRepository,
+        event_store: EventStore,
+        audit: AuditTrail,
+        clock: Clock,
+        notifications: NotificationSink = NOOP_SINK,
     ) -> None:
         self._repo = repository
         self._events = event_store
         self._audit = audit
         self._clock = clock
+        self._notifications = notifications
 
     @property
     def repository(self) -> IncidentRepository:
@@ -113,7 +121,24 @@ class IncidentService:
             },
         )
         _log.info("incident created", extra={"incident_id": incident_id, "category": incident.category})
+        self._notifications.publish(notification_events.incident_opened(incident, occurred_at=now))
         return incident
+
+    async def raise_severity(self, incident: Incident, severity: Severity, *, reason: str, actor: str) -> None:
+        """Escalate an incident that is being investigated: timeline entry, saved, and only then announced.
+
+        Announcing before the change is stored could tell people about a severity that a failing investigation then
+        never persists (and the UI they are sent to would show the old one). One notification per incident and severity.
+        """
+        previous = incident.severity
+        incident.severity = severity
+        self.add_timeline(incident, TimelineKind.NOTE, f"Severity raised to {severity.value}: {reason}", actor=actor)
+        await self.save(incident)
+        self._notifications.publish(
+            notification_events.incident_escalated(
+                incident, previous=previous, reason=reason, occurred_at=self._clock.now()
+            )
+        )
 
     def add_timeline(
         self,

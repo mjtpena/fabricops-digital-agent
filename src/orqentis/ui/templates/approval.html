@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Approval {{ approval.approval_id }}{% endblock %}
+{% block content %}
+<h1>Approval {{ approval.approval_id }}</h1>
+{% if flash %}<p class="notice">{{ flash }}</p>{% endif %}
+<p>
+  <span class="badge st-{{ approval.status.value }}">{{ approval.status.value }}</span>
+  · incident <a href="{{ paths.incident_path(approval.incident_id) }}">{{ approval.incident_id }}</a>{% if incident %}: {{ incident.title }}{% endif %}
+  · <a href="{{ paths.approvals_path() }}">All approvals</a>
+</p>
+<dl class="facts">
+  <dt>Action</dt><dd>{{ action.action_type.value }}: {{ action.title }}</dd>
+  {% if action.description %}<dt>Description</dt><dd>{{ action.description }}</dd>{% endif %}
+  <dt>Target</dt><dd>{{ action.target_display_name or action.target_item_id or "-" }} <span class="muted">({{ action.target_item_id or "-" }})</span></dd>
+  <dt>Environment</dt><dd>{{ action.environment.value }}</dd>
+  <dt>Risk</dt><dd>{{ approval.risk.value }}</dd>
+  <dt>Why approval is needed</dt><dd>{{ approval.reason }}</dd>
+  <dt>Required role</dt><dd>{{ approval.required_role or "-" }}</dd>
+  <dt>Requested by</dt><dd>{{ approval.requested_by }} at {{ approval.requested_at|dt }}</dd>
+  <dt>Expires</dt><dd>{{ approval.expires_at|dt }}</dd>
+  <dt>Parameters</dt><dd><pre>{{ action.parameters|pretty_json }}</pre></dd>
+  <dt>Action fingerprint</dt><dd><code>{{ approval.action_fingerprint }}</code> <span class="muted">(the approval is bound to exactly this action)</span></dd>
+  {% if approval.approved_by %}<dt>Approved by</dt><dd>{{ approval.approved_by }} at {{ approval.approved_at|dt }}</dd>{% endif %}
+  {% if approval.rejected_by %}<dt>Rejected by</dt><dd>{{ approval.rejected_by }} at {{ approval.rejected_at|dt }}</dd>{% endif %}
+  {% if approval.decision_comment %}<dt>Comment</dt><dd>{{ approval.decision_comment }}</dd>{% endif %}
+  <dt>Action status</dt><dd><span class="badge st-{{ action.status.value }}">{{ action.status.value }}</span>{% if action.executed_at %} at {{ action.executed_at|dt }}{% endif %}</dd>
+  {% if action.result %}<dt>Result</dt><dd><pre>{{ action.result|pretty_json }}</pre></dd>{% endif %}
+</dl>
+
+{% if approval.status.value == "PENDING" %}
+  {% if offer_decision %}
+  <div class="decision">
+    <h2>Decision</h2>
+    <p class="muted">You are {{ principal.display_name }}. Your decision is recorded against your identity in the audit trail.</p>
+    <form method="post" action="{{ paths.approval_path(approval.approval_id) }}/approve">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label for="comment">Comment (optional, 1000 characters at most)</label>
+      <textarea id="comment" name="comment" maxlength="1000"></textarea>
+      <div class="actions">
+        <button type="submit">Approve</button>
+        <button type="submit" class="danger" formaction="{{ paths.approval_path(approval.approval_id) }}/reject">Reject</button>
+      </div>
+    </form>
+  </div>
+  {% elif is_requester %}
+  <p class="warning">You requested this approval, so you cannot decide it. A different person with the role {{ approval.required_role or "required" }} must.</p>
+  {% elif not is_decider %}
+  <p class="warning">Only a person who holds an approver role (FabricOps.Operator or FabricOps.PlatformAdmin) can approve or reject. You can read this request.</p>
+  {% elif not holds_role %}
+  <p class="warning">This request needs the role {{ approval.required_role }}, which you do not hold.</p>
+  {% endif %}
+{% elif approval.status.value == "APPROVED" %}
+  {% if offer_execute %}
+  <div class="decision">
+    <h2>Execute</h2>
+    <p>Execution re-checks the approval, its expiry, the action fingerprint, your role, single use, the current policy and the write capability.</p>
+    <form method="post" action="{{ paths.approval_path(approval.approval_id) }}/execute">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="actions"><button type="submit" class="danger">Execute the approved action</button></div>
+    </form>
+  </div>
+  {% elif not write_enabled %}
+  <p class="warning">Executing is disabled in this deployment (the write capability is off), so nothing can be changed.</p>
+  {% elif action.status.value != "APPROVED" %}
+  <p class="muted">The action has already been used ({{ action.status.value }}); an approval is single use.</p>
+  {% elif not is_decider or not holds_role %}
+  <p class="warning">Only a person with the role {{ approval.required_role or "required" }} can execute this action.</p>
+  {% endif %}
+{% endif %}
+{% endblock %}

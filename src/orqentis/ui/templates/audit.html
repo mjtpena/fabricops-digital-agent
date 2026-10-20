@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Audit{% endblock %}
+{% block content %}
+<h1>Audit trail</h1>
+{% if verification.valid %}
+<p class="notice"><span class="badge st-VALID">VALID</span> The hash chain of {{ verification.records }} record(s) verifies: no record was edited, removed or reordered.</p>
+{% else %}
+<p class="error"><span class="badge st-INVALID">INVALID</span> The audit trail does not verify: {{ verification.reason }}{% if verification.first_invalid_sequence %}, first at record {{ verification.first_invalid_sequence }}{% endif %}. Treat the log as tampered with until it is explained.</p>
+{% endif %}
+<h2>Most recent records</h2>
+<table>
+  <thead><tr><th>#</th><th>Time</th><th>Actor</th><th>Action</th><th>Outcome</th><th>Incident</th></tr></thead>
+  <tbody>
+  {% for r in records %}
+    <tr>
+      <td>{{ r.sequence }}</td><td>{{ r.timestamp|dt }}</td><td>{{ r.actor }}</td><td>{{ r.action }}</td>
+      <td>{{ r.outcome }}</td>
+      <td>{% if r.incident_id %}<a href="{{ paths.incident_path(r.incident_id) }}">{{ r.incident_id }}</a>{% else %}-{% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="muted">The audit trail is empty.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

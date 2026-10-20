@@ -26,6 +26,7 @@ from orqentis.incidents.investigation import InvestigationNotPossibleError
 from orqentis.incidents.service import IncidentNotFoundError, InvalidTransitionError
 from orqentis.runtime.investigations import InvestigationJobNotFoundError
 from orqentis.runtime.service import Runtime
+from orqentis.ui.install import install_cross_origin_guard, install_ui
 
 _APPROVAL_STATUS = {
     ApprovalNotFoundError: status.HTTP_404_NOT_FOUND,
@@ -114,5 +115,9 @@ def create_app(
         approvals.router,
     ):
         app.include_router(router)
+    # Added first, so it sits inside the body size limit: an oversized body is still answered 413 before anything else.
+    install_cross_origin_guard(app, settings)
     install_api_hardening(app, settings)
+    if settings.ui_enabled:
+        install_ui(app, settings)  # after the handlers above: it wraps them to answer /ui with HTML pages
     return app
