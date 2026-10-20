@@ -29,6 +29,18 @@ def test_the_scheduler_is_off_locally_and_on_when_deployed() -> None:
         assert deployed.scheduler_enabled is True, environment
 
 
+def test_the_scheduler_waits_before_starting_when_deployed_so_a_draining_revision_can_finish() -> None:
+    assert settings().scheduler_startup_delay_seconds == 0  # local and tests start at once
+    for environment in ("dev", "test", "prod"):
+        deployed = settings(deployment_environment=environment, api_auth_mode=ApiAuthMode.EASY_AUTH)
+        assert deployed.scheduler_startup_delay_seconds == 120, environment
+    explicit = settings(
+        deployment_environment="prod", api_auth_mode=ApiAuthMode.EASY_AUTH, scheduler_startup_delay_seconds=0
+    )
+    assert explicit.scheduler_startup_delay_seconds == 0
+    assert settings(scheduler_startup_delay_seconds=30).scheduler_startup_delay_seconds == 30
+
+
 def test_an_explicit_choice_always_wins() -> None:
     assert settings(scheduler_enabled=True).scheduler_enabled is True
     off = settings(deployment_environment="prod", api_auth_mode=ApiAuthMode.EASY_AUTH, scheduler_enabled=False)
@@ -63,6 +75,8 @@ def test_defaults_are_conservative() -> None:
         {"investigation_timeout_seconds": 5},
         {"build_retry_initial_seconds": 10, "build_retry_max_seconds": 5},
         {"scheduler_tick_seconds": 30, "scheduler_lease_ttl_seconds": 40},  # the lease would lapse between ticks
+        {"scheduler_tick_seconds": 20, "scheduler_lease_ttl_seconds": 59},  # needs at least three ticks per TTL
+        {"scheduler_startup_delay_seconds": -1},
     ],
 )
 def test_nonsensical_values_are_rejected(bad: dict[str, object]) -> None:

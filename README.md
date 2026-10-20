@@ -125,7 +125,7 @@ On a machine where `python3` is older than 3.12, use `make demo PYTHON=python3.1
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Liveness (cheap, no dependencies) and mode |
-| GET | `/health/ready` | Readiness: `503` with a redacted reason until the container is built and the estate catalog is loaded |
+| GET | `/health/ready` | Readiness: `503` (fixed reason code and exception type, never a message) until the container is built and the estate catalog is loaded |
 | GET | `/incidents` | List incidents (`?status=`) |
 | GET | `/incidents/{id}` | Full incident: evidence, findings, root causes, blast radius, timeline |
 | POST | `/incidents/{id}/investigate` | Queue the investigation workflow: `202` with a job (idempotent per incident) |
@@ -155,7 +155,9 @@ watermarks), investigates new incidents as background jobs, records SLA state ch
 reloads the estate catalog hourly, applying and auditing what changed. All Fabric calls share one
 concurrency and rate budget. Locally it is off unless you set `ORQENTIS_SCHEDULER_ENABLED=true`.
 Automation stops at the approval boundary: it can investigate and *request* approval, never approve
-or execute. See [ADR-0013](docs/adr/0013-scheduler-lease-and-async-investigation-jobs.md) and
+or execute. Scheduler and leader lease are in-process, so run **one replica**; two revisions writing the same files during a
+deploy are only made safe by the PostgreSQL system of record, until then deploy with the scheduler off or accept that risk
+(see [infra/bicep/README.md](infra/bicep/README.md)). See [ADR-0013](docs/adr/0013-scheduler-lease-and-async-investigation-jobs.md) and
 [docs/architecture.md](docs/architecture.md#13-autonomous-runtime).
 
 ### Using the LLM investigator

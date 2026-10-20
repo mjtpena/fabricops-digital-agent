@@ -5,6 +5,10 @@
 * A job never overlaps with itself: a run that is still going when its next slot arrives makes that slot be
   skipped (and counted), it is never stacked or queued. Slots missed while the process was busy collapse into one.
 * A failing job is logged (and audited when its health changes) and never stops the scheduler or the other jobs.
+* ``start_delay`` keeps a freshly started process from acquiring the lease or running anything for a while. Container
+  Apps runs the old and the new revision side by side during a deploy; the delay lets the old one drain first.
+* Every job receives a :class:`JobContext` with the lease holder and its fencing token, so a store that supports
+  fenced writes can reject a deposed leader's late write.
 * Time is read from the injected :class:`~orqentis.config.clock.Clock`, so tests drive the scheduler by advancing a
   fake clock and calling :meth:`Scheduler.tick`; :meth:`Scheduler.start` merely calls ``tick`` every few seconds.
 """
@@ -27,7 +31,19 @@ from orqentis.runtime.lease import LeaderLease, Lease
 
 _log = get_logger(__name__)
 
-JobFunction = Callable[[], Awaitable[None]]
+
+@dataclass(frozen=True)
+class JobContext:
+    """What a running job may know about the tenure it runs under."""
+
+    job_name: str
+    holder_id: str
+    # Increases with every change of leader; a write guarded by it cannot be applied by a deposed leader.
+    fencing_token: int
+    started_at: datetime
+
+
+JobFunction = Callable[[JobContext], Awaitable[None]]
 Sleep = Callable[[float], Awaitable[None]]
 
 DEFAULT_LEASE_NAME = "orqentis-scheduler"
@@ -117,6 +133,7 @@ class Scheduler:
         lease_name: str = DEFAULT_LEASE_NAME,
         lease_ttl: timedelta = timedelta(seconds=60),
         tick_interval: timedelta = timedelta(seconds=5),
+        start_delay: timedelta = timedelta(0),
         default_job_timeout: timedelta | None = timedelta(minutes=30),
         audit: AuditTrail | None = None,
         sleep: Sleep = asyncio.sleep,
@@ -124,12 +141,16 @@ class Scheduler:
         names = [j.name for j in jobs]
         if len(set(names)) != len(names):
             raise ValueError("job names must be unique")
+        if lease_ttl < tick_interval * 3:
+            # The lease is renewed once a third of it is left; it must survive two missed ticks.
+            raise ValueError("lease_ttl must be at least three times tick_interval")
         self._states = {j.name: _JobState(j) for j in jobs}
         self._lease_port = lease
         self._clock = clock
         self._lease_name = lease_name
         self._lease_ttl = lease_ttl
         self._tick_interval = tick_interval
+        self._start_delay = start_delay
         self._default_timeout = default_job_timeout
         self._audit = audit
         self._sleep = sleep
@@ -169,6 +190,12 @@ class Scheduler:
         _log.info("scheduler stopped")
 
     async def _loop(self) -> None:
+        if self._start_delay > timedelta(0):
+            _log.info(
+                "scheduler waiting before it takes the lease",
+                extra={"delay_seconds": self._start_delay.total_seconds()},
+            )
+            await self._sleep(self._start_delay.total_seconds())
         while True:
             try:
                 await self.tick()
@@ -203,7 +230,9 @@ class Scheduler:
                     )
                     continue
                 state.advance_past(now)
-                state.task = asyncio.create_task(self._run(state), name=f"job:{spec.name}")
+                assert self._lease is not None
+                context = JobContext(spec.name, self._lease.holder_id, self._lease.fencing_token, now)
+                state.task = asyncio.create_task(self._run(state, context), name=f"job:{spec.name}")
                 started.append(spec.name)
             return started
 
@@ -250,7 +279,7 @@ class Scheduler:
                 self._lease = lease
                 await self._record_leadership("ACQUIRED", lease)
                 return True
-            if self._lease.expires_at - now <= self._lease_ttl / 2:
+            if self._lease.expires_at - now <= self._lease_ttl / 3:
                 renewed = await self._lease_port.renew(self._lease, self._lease_ttl)
                 if renewed is None:
                     await self._lose_leadership("lease was not renewable")
@@ -279,17 +308,18 @@ class Scheduler:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _record_leadership(self, outcome: str, lease: Lease, *, reason: str | None = None) -> None:
+        # Not "fencing_token": any key containing "token" is blanked by the redaction that guards logs and audit.
         _log.info(
             "scheduler leadership",
-            extra={"outcome": outcome, "holder_id": lease.holder_id, "fencing_token": lease.fencing_token},
+            extra={"outcome": outcome, "holder_id": lease.holder_id, "lease_generation": lease.fencing_token},
         )
-        details: dict[str, object] = {"holder_id": lease.holder_id, "fencing_token": lease.fencing_token}
+        details: dict[str, object] = {"holder_id": lease.holder_id, "lease_generation": lease.fencing_token}
         if reason:
             details["reason"] = reason
         await self._audit_safely("scheduler.leadership", outcome, details)
 
     # ------------------------------------------------------------------------------------------------- jobs
-    async def _run(self, state: _JobState) -> None:
+    async def _run(self, state: _JobState, context: JobContext) -> None:
         spec = state.spec
         state.last_started_at = self._clock.now()
         state.run_count += 1
@@ -299,7 +329,7 @@ class Scheduler:
         budget = asyncio.timeout(timeout.total_seconds() if timeout else None)
         try:
             async with budget:
-                await spec.run()
+                await spec.run(context)
         except asyncio.CancelledError:
             outcome = "cancelled"
             _log.info("scheduled job cancelled", extra={"job": spec.name})

@@ -55,7 +55,7 @@ class Runtime:
 
     @property
     def status(self) -> BuildStatus:
-        return BuildStatus(True, 0, None, None) if self._injected is not None else self._supervisor.status
+        return BuildStatus(True, 0, None, None, None) if self._injected is not None else self._supervisor.status
 
     # ------------------------------------------------------------------------------------------ lifecycle
     async def start(self) -> None:

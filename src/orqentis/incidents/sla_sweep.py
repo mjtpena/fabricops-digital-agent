@@ -14,7 +14,7 @@ from orqentis.domain.common import Environment
 from orqentis.domain.events import EventSeverity, EventType, OperationalEvent
 from orqentis.domain.incidents import Incident, IncidentStatus
 from orqentis.domain.sla import SLA, SLAAssessment, SLAState
-from orqentis.incidents.detection import DetectionEngine
+from orqentis.incidents.detection_runner import DetectionRunner
 from orqentis.incidents.sla import SLAEvaluator
 from orqentis.observability.logging import get_logger
 from orqentis.storage.event_store import EventStore
@@ -64,7 +64,7 @@ class SLASweeper:
         graph: DependencyGraph,
         repository: IncidentRepository,
         event_store: EventStore,
-        detection: DetectionEngine,
+        detection: DetectionRunner,
         clock: Clock,
     ) -> None:
         self._catalog = catalog
@@ -102,7 +102,7 @@ class SLASweeper:
                 continue  # nothing to observe today
             events.append(sla_event(sla, assessment, catalog=self._catalog))
         new_events = await self._events.append(events)
-        created = await self._detection.process(new_events)
+        created = await self._detection.run()  # reads the new events (and anything else pending) from the cursor
         _log.info(
             "sla sweep",
             extra={

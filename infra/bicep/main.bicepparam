@@ -42,10 +42,17 @@ param azureOpenAiResourceId = ''
 // Autonomous runtime: the app collects, detects, investigates, sweeps SLAs and refreshes its catalog by itself.
 // Every value below is the default; set schedulerEnabled = false to run the app API-driven only.
 param schedulerEnabled = true
+// Seconds before the scheduler takes the lease after start, so the previous revision can drain during a deploy.
+param schedulerStartupDelaySeconds = 120
+param schedulerTickSeconds = 5
+param schedulerLeaseTtlSeconds = 60       // at least 3x the tick
+param schedulerJobTimeoutMinutes = 30
 param collectEnabled = true
 param collectIntervalMinutes = 5
 param autoInvestigateEnabled = true
 param autoInvestigateIntervalMinutes = 1
+param autoInvestigateBatchSize = 5
+param autoInvestigateMaxAttempts = 3
 param slaSweepEnabled = true
 param slaSweepIntervalMinutes = 15
 param catalogRefreshEnabled = true
@@ -56,8 +63,13 @@ param investigationTimeoutSeconds = 600
 param fabricMaxConcurrency = 4
 param fabricRatePerSecond = 5
 param fabricRateBurst = 10
+param fabricJobInstancesMaxPages = 10
 param collectionMaxLookbackHours = 168
 param collectionOverlapMinutes = 15
+// The container is built in the background: wait at most this long for the first attempt, then retry with backoff.
+param startupGraceSeconds = 10
+param buildRetryInitialSeconds = 2
+param buildRetryMaxSeconds = 60
 
 // Environment-internal ingress by default. For VNet-only access set infrastructureSubnetId and externalIngress = true.
 param externalIngress = false

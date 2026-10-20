@@ -33,6 +33,7 @@ from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
 from orqentis.observability.redaction import redact_text
 from orqentis.storage.incidents import IncidentQuery
+from orqentis.topology.catalog import EstateCatalog
 
 _log = get_logger(__name__)
 
@@ -140,7 +141,10 @@ class InvestigationJobRunner:
         return set(self._active)
 
     def failed_attempts(self, incident_id: str) -> int:
-        """Investigations of this incident that failed since it last succeeded (this process only)."""
+        """Investigations of this incident that actually failed since it last succeeded (this process only).
+
+        An investigation that was cancelled because the service is shutting down is not a failed attempt.
+        """
         return self._failures.get(incident_id, 0)
 
     # -------------------------------------------------------------------------------------------- commands
@@ -200,6 +204,13 @@ class InvestigationJobRunner:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        # A task cancelled before its first step never ran any of its own code, so it could not mark its job.
+        for job in list(self._active.values()):
+            job.status = InvestigationJobStatus.FAILED
+            job.error = "Cancelled: the service is shutting down"
+            job.finished_at = self._clock.now()
+            del self._active[job.incident_id]
+            self._remember_finished(job)
 
     async def reset_stale(self, incident_id: str, *, reason: str) -> bool:
         """Put an incident stuck in ``INVESTIGATING`` back to ``DETECTED`` (no live job of ours is working on it)."""
@@ -209,11 +220,14 @@ class InvestigationJobRunner:
 
     # ----------------------------------------------------------------------------------------------- internals
     async def _run(self, job: InvestigationJob, actor: Principal) -> None:
-        budget = asyncio.timeout(self._timeout.total_seconds())
+        budget: asyncio.Timeout | None = None
         try:
             async with self._slots:
                 job.status = InvestigationJobStatus.RUNNING
                 job.started_at = self._clock.now()
+                # The timeout bounds the investigation, not the wait for a slot: starting the clock any earlier would
+                # let jobs queued behind a busy slot expire without ever having run (an incident storm).
+                budget = asyncio.timeout(self._timeout.total_seconds())
                 async with budget:
                     incident, trace = await self._service.investigate(job.incident_id, actor=actor)
                 job.result = InvestigationOutcome(
@@ -229,11 +243,12 @@ class InvestigationJobRunner:
                 job.status = InvestigationJobStatus.SUCCEEDED
                 self._failures.pop(job.incident_id, None)
         except asyncio.CancelledError:
-            await self._fail(job, "Cancelled: the service is shutting down", reset=True)
+            # Being stopped by a deploy says nothing about the incident, so it does not use up a retry.
+            await self._fail(job, "Cancelled: the service is shutting down", reset=True, counts=False)
             raise
         except TimeoutError as exc:
-            if budget.expired():
-                await self._fail(job, f"Timed out after {self._timeout.total_seconds():.0f}s", reset=True)
+            if budget is not None and budget.expired():
+                await self._fail(job, f"Timed out after {self._timeout.total_seconds():g}s", reset=True)
             else:
                 await self._fail(job, f"{type(exc).__name__}: {redact_text(str(exc))}"[:_MAX_ERROR_TEXT], reset=True)
         except Exception as exc:
@@ -245,10 +260,11 @@ class InvestigationJobRunner:
                 del self._active[job.incident_id]
             self._remember_finished(job)
 
-    async def _fail(self, job: InvestigationJob, error: str, *, reset: bool) -> None:
+    async def _fail(self, job: InvestigationJob, error: str, *, reset: bool, counts: bool = True) -> None:
         job.status = InvestigationJobStatus.FAILED
         job.error = error
-        self._failures[job.incident_id] = self._failures.get(job.incident_id, 0) + 1
+        if counts:
+            self._failures[job.incident_id] = self._failures.get(job.incident_id, 0) + 1
         _log.warning(
             "investigation job failed", extra={"job_id": job.job_id, "incident_id": job.incident_id, "error": error}
         )
@@ -302,6 +318,7 @@ class AutoInvestigationTask:
         runner: InvestigationJobRunner,
         clock: Clock,
         *,
+        catalog: EstateCatalog | None = None,
         batch_size: int = 5,
         max_attempts: int = 3,
         orphan_after: timedelta = timedelta(minutes=15),
@@ -309,6 +326,7 @@ class AutoInvestigationTask:
         self._incidents = incidents
         self._runner = runner
         self._clock = clock
+        self._catalog = catalog
         self._batch_size = batch_size
         self._max_attempts = max_attempts
         self._orphan_after = orphan_after
@@ -323,6 +341,10 @@ class AutoInvestigationTask:
             if submitted >= self._batch_size:
                 break
             if self._runner.is_active(incident.incident_id):
+                continue
+            if self._catalog is not None and self._catalog.node(incident.primary_item_id) is None:
+                # Its item left the estate (the catalog refresh noted that on the incident): nothing to investigate.
+                _log.debug("auto-investigation skipped: item gone", extra={"incident_id": incident.incident_id})
                 continue
             if self._runner.failed_attempts(incident.incident_id) >= self._max_attempts:
                 continue  # give up quietly; a human can still investigate it via the API

@@ -36,6 +36,7 @@ policy and approval, local stores), deployed as a single Container App with a ma
 | Disclosure to the LLM provider | Fabric metadata sent to Azure OpenAI | Azure OpenAI in the customer tenant through Entra ID; prompt content not recorded in telemetry; the rule-based reasoner is available for no-LLM operation | Data residency depends on the Azure OpenAI deployment region. |
 | **Denial of service** through agent loops | Model calls tools endlessly | Per-investigation tool budget (reserved before awaits), Agent Framework iteration and call limits, per-tool timeouts | Low |
 | DoS against Fabric APIs | Aggressive polling | Bounded collectors, incremental windows (watermark + overlap), a global concurrency and rate budget, retry with backoff and `Retry-After` (a `429` pauses every caller), a single replica | Low-Medium: the budget defaults are conservative guesses, because Fabric's per-endpoint quotas are not published |
+| Two writers on one volume during a deploy | The old and the new Container App revision both run schedulers and append to the same audit file and SQLite stores | Scheduler start delay, shutdown releases the lease, audit log re-reads its chain head before appending (best effort), `maxReplicas = 1` | **Medium until the PostgreSQL system of record (database lease, serialised audit chain).** Deploy with the scheduler off or accept the risk |
 | Runaway automation | A failing investigation is retried forever, or a flood of incidents triggers a flood of LLM calls | Per-incident attempt limit, batch size and concurrency limit for investigations, investigation timeout, jobs that never overlap | Low |
 | Silent loss of monitoring | A glitch makes Fabric return an empty estate, or a job fails every run | Catalog refresh refuses an empty estate and audits every diff; job health changes are audited; `Scheduler.status()` shows the last outcome | A failing job is visible in logs and status only; alerting arrives with the metrics workstream |
 | **Elevation of privilege** | Agent requests `DELETE_ITEM` or a permission change | Policy DENY; the read client has no mutation methods; the write client is held only by the gateway and disabled by default | Low |
@@ -54,5 +55,5 @@ policy and approval, local stores), deployed as a single Container App with a ma
 * Expired, double-decided and self-approved approvals are refused.
 * Audit tampering and deletion are detected.
 * A secret in a Fabric error never reaches evidence or the report.
-* A job or build failure with a secret in its message is redacted in logs, status, audit and the readiness reason.
+* A job or build failure with a secret in its message is redacted in logs, status and audit, and the unauthenticated readiness probe shows no exception message at all (fixed code and exception type only).
 * An automatic investigation requests approvals but cannot approve or execute them.

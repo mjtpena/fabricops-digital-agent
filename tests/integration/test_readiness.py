@@ -14,7 +14,6 @@ from orqentis import bootstrap
 from orqentis.api.app import create_app
 from orqentis.bootstrap import Container, build_container
 from orqentis.config.settings import Settings
-from orqentis.runtime.supervisor import describe_failure
 from orqentis.storage.sqlite import SqliteDatabase
 from tests.conftest import make_settings
 from tests.support.polling import wait_until
@@ -59,8 +58,10 @@ async def test_a_failing_build_keeps_the_process_alive_reports_a_redacted_reason
         not_ready = await http.get("/health/ready")
         assert not_ready.status_code == 503
         body = not_ready.json()
-        assert body["status"] == "not_ready" and body["reason"].startswith("ValueError: contracts file")
-        assert "hunter2" not in not_ready.text and body["attempts"] >= 1
+        # A fixed reason code and the exception type: never the message, which may hold paths or secrets.
+        assert body["status"] == "not_ready" and body["reason"] == "build_failed"
+        assert body["error_type"] == "ValueError" and body["attempts"] >= 1
+        assert "hunter2" not in not_ready.text and "estate.json" not in not_ready.text
         # ...and requests that need the container get a clear, retryable 503 instead of a 500.
         blocked = await http.get("/incidents", headers=VIEWER)
         assert blocked.status_code == 503 and blocked.json()["error"] == "NOT_READY"
@@ -86,7 +87,8 @@ async def test_readiness_is_503_while_the_build_is_still_pending_and_200_after(t
     async with app.router.lifespan_context(app), client_for(app) as http:
         assert (await http.get("/health")).status_code == 200
         pending = await http.get("/health/ready")
-        assert pending.status_code == 503 and pending.json()["reason"] == "starting"
+        assert pending.status_code == 503
+        assert pending.json()["reason"] == "starting" and pending.json()["error_type"] is None
         gate.set()
         await wait_until(lambda: app.state.runtime.ready)
         assert (await http.get("/health/ready")).status_code == 200
@@ -128,7 +130,8 @@ async def test_a_real_build_failure_in_the_composition_root_does_not_crash_or_le
         await wait_until(lambda: app.state.runtime.status.attempts >= 3)
         assert (await http.get("/health")).status_code == 200
         ready = await http.get("/health/ready")
-        assert ready.status_code == 503 and ready.json()["reason"].startswith("FileNotFoundError")
+        assert ready.status_code == 503
+        assert ready.json()["reason"] == "build_failed" and ready.json()["error_type"] == "FileNotFoundError"
     assert len(opened) >= 6  # state + events database for each attempt
     # Every database opened by a failed attempt was closed again (a closed connection refuses to run anything).
     for db in opened:
@@ -136,8 +139,14 @@ async def test_a_real_build_failure_in_the_composition_root_does_not_crash_or_le
             db._conn.execute("SELECT 1")
 
 
-def test_failure_descriptions_are_one_redacted_line() -> None:
-    text = describe_failure(RuntimeError("first line token=abc123\nsecond line with detail\nthird"))
-    assert text == "RuntimeError: first line token=[REDACTED]"
-    assert describe_failure(KeyError()) == "KeyError"
-    assert len(describe_failure(ValueError("x" * 5000))) < 260
+def test_the_readiness_models_reject_unknown_fields() -> None:
+    from pydantic import ValidationError
+
+    from orqentis.api.schemas import Health, NotReady, Ready
+
+    with pytest.raises(ValidationError):
+        Ready(scheduler="leader", surprise=1)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        NotReady(reason="starting", attempts=0, detail="/etc/passwd")  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        Health.model_validate({"status": "ok", "extra": 1})

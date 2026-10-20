@@ -10,7 +10,7 @@ import pytest
 
 from orqentis.config.clock import FixedClock
 from orqentis.runtime.lease import InProcessLeaderLease, Lease, LeaseTable
-from orqentis.runtime.scheduler import JobSpec, Scheduler
+from orqentis.runtime.scheduler import JobContext, JobSpec, Scheduler
 from tests.support.polling import wait_until
 
 T0 = datetime(2026, 10, 20, 8, 0, tzinfo=UTC)
@@ -27,7 +27,7 @@ class Counter:
         self.max_active = 0
         self.gate: asyncio.Event | None = None
 
-    async def __call__(self) -> None:
+    async def __call__(self, ctx: JobContext) -> None:
         self.runs += 1
         self.active += 1
         self.max_active = max(self.max_active, self.active)
@@ -184,7 +184,7 @@ async def test_a_failing_job_is_isolated_audited_once_and_does_not_stop_the_sche
     healthy = Counter()
     attempts = 0
 
-    async def flaky() -> None:
+    async def flaky(ctx: JobContext) -> None:
         nonlocal attempts
         attempts += 1
         if attempts <= 3:
@@ -208,7 +208,7 @@ async def test_a_failing_job_is_isolated_audited_once_and_does_not_stop_the_sche
 async def test_failure_details_exposed_on_status_are_redacted() -> None:
     clock = FixedClock(T0)
 
-    async def boom() -> None:
+    async def boom(ctx: JobContext) -> None:
         raise ValueError("call failed with token=abc123secret")
 
     sched = scheduler([JobSpec("boom", MINUTE, boom)], clock)
@@ -222,7 +222,7 @@ async def test_a_job_that_runs_too_long_is_cancelled_and_reported() -> None:
     clock = FixedClock(T0)
     other = Counter()
 
-    async def hang() -> None:
+    async def hang(ctx: JobContext) -> None:
         await asyncio.sleep(30)
 
     sched = scheduler(
@@ -282,3 +282,79 @@ def test_duplicate_job_names_and_non_positive_intervals_are_rejected() -> None:
         Scheduler([JobSpec("a", MINUTE, job), JobSpec("a", MINUTE, job)], lease, clock)
     with pytest.raises(ValueError, match="interval"):
         JobSpec("a", timedelta(0), job)
+
+
+# ------------------------------------------------------------------------------ review minors 5, 6 and finding 4
+async def test_every_job_receives_the_lease_holder_and_fencing_token_of_its_tenure() -> None:
+    clock = FixedClock(T0)
+    table = LeaseTable()
+    seen: list[JobContext] = []
+
+    async def record(ctx: JobContext) -> None:
+        seen.append(ctx)
+
+    first = scheduler([JobSpec("work", MINUTE, record)], clock, holder="replica-a", table=table)
+    await step(first, clock)
+    assert seen[-1] == JobContext("work", "replica-a", 1, T0)
+
+    await first.stop()  # a new tenure under another holder gets a larger token a deposed leader cannot reuse
+    second = scheduler([JobSpec("work", MINUTE, record)], clock, holder="replica-b", table=table)
+    await step(second, clock, MINUTE)
+    assert (seen[-1].holder_id, seen[-1].fencing_token) == ("replica-b", 2)
+
+
+class CountingLease(InProcessLeaderLease):
+    renewals = 0
+
+    async def renew(self, lease: Lease, ttl: timedelta) -> Lease | None:
+        self.renewals += 1
+        return await super().renew(lease, ttl)
+
+
+async def test_the_lease_is_renewed_when_a_third_of_it_is_left() -> None:
+    clock = FixedClock(T0)
+    lease = CountingLease(clock, holder_id="replica-a", table=LeaseTable())
+    sched = Scheduler([JobSpec("hourly", 60 * MINUTE, Counter())], lease, clock, lease_ttl=timedelta(seconds=90))
+    await sched.tick()  # acquires: 90 s left
+    clock.advance(timedelta(seconds=59))
+    await sched.tick()  # 31 s left: more than a third
+    assert lease.renewals == 0
+    clock.advance(timedelta(seconds=1))
+    await sched.tick()  # 30 s left: a third
+    assert lease.renewals == 1
+
+
+def test_a_lease_that_could_lapse_between_two_ticks_is_rejected() -> None:
+    clock = FixedClock(T0)
+    with pytest.raises(ValueError, match="three times"):
+        Scheduler(
+            [], InProcessLeaderLease(clock), clock, lease_ttl=timedelta(seconds=10), tick_interval=timedelta(seconds=5)
+        )
+
+
+async def test_the_start_delay_keeps_a_new_process_from_taking_the_lease_or_running_jobs() -> None:
+    """During a deploy the previous revision is still draining: wait before taking over."""
+    clock = FixedClock(T0)
+    table = LeaseTable()
+    job = Counter()
+    gate = asyncio.Event()
+    sleeps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 1:
+            await gate.wait()  # the start delay
+        else:
+            await asyncio.sleep(0.005)
+
+    sched = scheduler(
+        [JobSpec("work", MINUTE, job)], clock, table=table, start_delay=timedelta(seconds=120), sleep=sleep
+    )
+    await sched.start()
+    await wait_until(lambda: sleeps == [120.0])
+    assert not sched.is_leader and job.runs == 0
+    # Nobody else may be locked out either: the lease is still free for the draining revision.
+    assert await InProcessLeaderLease(clock, holder_id="old-revision", table=table).acquire(
+        "orqentis-scheduler", LONG_TTL
+    )
+    await sched.stop()

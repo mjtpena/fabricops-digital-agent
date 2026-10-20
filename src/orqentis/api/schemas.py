@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.incidents import ApprovalState, BlastRadius, Incident, IncidentStatus
@@ -16,6 +16,8 @@ from orqentis.runtime.investigations import InvestigationJob
 class Health(BaseModel):
     """Liveness: the process is up. Says nothing about whether the estate has been loaded (see ``Ready``)."""
 
+    model_config = ConfigDict(extra="forbid")
+
     status: str
     version: str
     fabric_mode: str
@@ -25,14 +27,21 @@ class Health(BaseModel):
 
 
 class Ready(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: Literal["ready"] = "ready"
     scheduler: Literal["disabled", "standby", "leader"]
 
 
 class NotReady(BaseModel):
+    """``503`` body of the unauthenticated readiness probe: a fixed code and an exception type, never a message."""
+
+    model_config = ConfigDict(extra="forbid")
+
     status: Literal["not_ready"] = "not_ready"
-    # Exception type plus a redacted first line of its message; the full detail is in the (redacted) logs.
-    reason: str
+    reason: Literal["starting", "build_failed"]
+    # Class name of the last build failure (for example ``FileNotFoundError``); the detail is in the logs only.
+    error_type: str | None = None
     attempts: int
     retry_in_seconds: float | None = None
 

@@ -9,4 +9,4 @@
 | [0005](0005-deterministic-confidence.md) | Deterministic, explainable confidence | Accepted |
 | [0006](0006-policy-approval-and-capability-boundaries.md) | Policy engine, approval binding and separate read/write capabilities | Accepted |
 | [0007](0007-grounding-validation.md) | Accept agent output only when grounded in evidence | Accepted |
-| [0013](0013-scheduler-lease-and-async-investigation-jobs.md) | In-process scheduler behind a leader lease, asynchronous investigation jobs, incremental collection | Accepted |
+| [0013](0013-scheduler-lease-and-async-investigation-jobs.md) | In-process scheduler behind a leader lease, asynchronous investigation jobs, durable detection, incremental collection | Accepted |

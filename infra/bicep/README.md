@@ -32,12 +32,17 @@ The app runs with these settings (see `src/orqentis/config/settings.py`):
 | `ORQENTIS_DATA_DIR` | `/var/lib/orqentis` (Azure Files mount) |
 | `ORQENTIS_LOG_FORMAT` | `json` |
 | `ORQENTIS_SCHEDULER_ENABLED` | `schedulerEnabled` (default `true`) |
+| `ORQENTIS_SCHEDULER_STARTUP_DELAY_SECONDS` | `schedulerStartupDelaySeconds` (default `120`) |
+| `ORQENTIS_SCHEDULER_TICK_SECONDS` / `_LEASE_TTL_SECONDS` / `_JOB_TIMEOUT_MINUTES` | `schedulerTickSeconds` / `schedulerLeaseTtlSeconds` / `schedulerJobTimeoutMinutes` (default `5` / `60` / `30`; the TTL must be at least three times the tick) |
 | `ORQENTIS_SCHEDULER_COLLECT_ENABLED` / `_INTERVAL_MINUTES` | `collectEnabled` / `collectIntervalMinutes` (default `true` / `5`) |
 | `ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_ENABLED` / `_INTERVAL_MINUTES` | `autoInvestigateEnabled` / `autoInvestigateIntervalMinutes` (default `true` / `1`) |
+| `ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_BATCH_SIZE` / `_MAX_ATTEMPTS` | `autoInvestigateBatchSize` / `autoInvestigateMaxAttempts` (default `5` / `3`) |
 | `ORQENTIS_SCHEDULER_SLA_SWEEP_ENABLED` / `_INTERVAL_MINUTES` | `slaSweepEnabled` / `slaSweepIntervalMinutes` (default `true` / `15`) |
 | `ORQENTIS_SCHEDULER_CATALOG_REFRESH_ENABLED` / `_INTERVAL_MINUTES` | `catalogRefreshEnabled` / `catalogRefreshIntervalMinutes` (default `true` / `60`) |
 | `ORQENTIS_INVESTIGATION_MAX_CONCURRENCY` / `_TIMEOUT_SECONDS` | `investigationMaxConcurrency` / `investigationTimeoutSeconds` (default `2` / `600`) |
 | `ORQENTIS_FABRIC_MAX_CONCURRENCY` / `_RATE_PER_SECOND` / `_RATE_BURST` | `fabricMaxConcurrency` / `fabricRatePerSecond` / `fabricRateBurst` (default `4` / `5` / `10`) |
+| `ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES` | `fabricJobInstancesMaxPages` (default `10`) |
+| `ORQENTIS_STARTUP_GRACE_SECONDS` / `ORQENTIS_BUILD_RETRY_INITIAL_SECONDS` / `_MAX_SECONDS` | `startupGraceSeconds` / `buildRetryInitialSeconds` / `buildRetryMaxSeconds` (default `10` / `2` / `60`) |
 | `ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS` / `_OVERLAP_MINUTES` | `collectionMaxLookbackHours` / `collectionOverlapMinutes` (default `168` / `15`) |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | Container App **secret** reference |
 
@@ -49,9 +54,19 @@ The Container App has three probes (see the `probes` block of `main.bicep`):
 |---|---|---|
 | Startup | `/health` | The process is listening. It does not wait for the estate to be read: that happens in the background after the port opens, so a large tenant cannot fail the startup probe. |
 | Liveness | `/health` | The process is alive. It is dependency-free and answers `200` while the container is still being built and while a failed build is being retried, so a bad contracts file or a Fabric outage never causes a restart loop. |
-| Readiness | `/health/ready` | `503` (with a redacted reason) until the container is built and the first catalog load finished, `200` afterwards. A failing build is retried with exponential backoff (`ORQENTIS_BUILD_RETRY_*`). |
+| Readiness | `/health/ready` | `503` (a fixed reason code and the exception type, never its message) until the container is built and the first catalog load finished, `200` afterwards. A failing build is retried with exponential backoff (`ORQENTIS_BUILD_RETRY_*`). |
 
 With `schedulerEnabled = true` (the default) the app runs a small in-process scheduler: collect + detect every `collectIntervalMinutes`, automatic investigation of new incidents (as background jobs, at most `investigationMaxConcurrency` at a time), an SLA sweep, and a catalog refresh that applies workspace / item / dependency changes without a restart. Only the holder of an in-process leader lease runs the jobs. That is correct for the single replica this template deploys; the lease moves to the database with the PostgreSQL system of record, which is what allows more than one replica. All Fabric and Power BI calls share one concurrency and rate budget (`fabricMaxConcurrency`, `fabricRatePerSecond`, `fabricRateBurst`), and a `429` / `Retry-After` pauses every caller. Defaults are deliberately conservative; the real Fabric throttling quotas are not published per endpoint, so tune them from the `fabric http request` log lines (`status_code: 429`).
+
+### Deploying an update: two revisions share the volume
+
+Container Apps in `Single` revision mode runs the **old and the new revision side by side** while an update rolls out. They mount the same Azure Files share, each with its own in-process scheduler lease, and the local stores (SQLite, the hash-chained audit file) are single-writer. The template and the app reduce the risk, they cannot remove it:
+
+* `schedulerStartupDelaySeconds` (default `120`) makes a new process wait before it takes the lease or runs any job, so the old revision drains first. The revision being replaced stops its scheduler and releases the lease when it receives the shutdown signal.
+* The audit log re-reads its chain head before appending whenever the file grew since it last wrote, so appends from both revisions chain instead of forking. This is best effort (SMB has no byte-range locks).
+* **Real multi-writer safety needs the PostgreSQL system of record** (database-backed lease, database-serialised audit chain). Until it exists, deploy with `schedulerEnabled = false`, or accept the risk and verify the chain afterwards with `GET /audit/verify` / `orqentis audit`. Nothing is deployed before that work.
+
+Settings that fail validation (for example a missing `ORQENTIS_TENANT_ID` in rest mode, or a lease TTL shorter than three scheduler ticks) stop the app at start by design: that is deploy-time misconfiguration, and the first failed startup probe is the signal, not something to retry.
 
 ## Deploy
 

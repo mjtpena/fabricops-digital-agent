@@ -10,6 +10,7 @@ from orqentis.domain.events import EventSeverity, EventType, OperationalEvent
 from orqentis.domain.sla import SLAState
 from orqentis.domain.taxonomy import IncidentCategory, Severity
 from orqentis.incidents.detection import DetectionEngine
+from orqentis.incidents.detection_runner import DetectionRunner
 from orqentis.incidents.service import IncidentCandidate
 from orqentis.incidents.sla import SLAEvaluator
 from orqentis.incidents.sla_sweep import SLASweeper
@@ -94,7 +95,11 @@ async def test_a_detection_rule_can_open_incidents_from_the_recorded_sla_events(
         container.graph,
         container.incidents.repository,
         container.event_store,
-        DetectionEngine(container.incidents, clock, rules=[SlaBreachRule()]),
+        DetectionRunner(
+            container.event_store,
+            DetectionEngine(container.incidents, clock, rules=[SlaBreachRule()]),
+            consumer="sla-rule-test",
+        ),
         clock,
     )
     _, created = await sweeper.sweep()

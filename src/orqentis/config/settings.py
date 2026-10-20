@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = False
     scheduler_tick_seconds: float = Field(default=5.0, gt=0, le=60)
     scheduler_lease_ttl_seconds: float = Field(default=60.0, ge=5, le=3600)
+    # Wait this long after start before taking the lease or running a job, so the previous revision can drain during a
+    # deploy (Container Apps runs both on the same volume). Unset: 120 outside ``local``, 0 in ``local`` (see below).
+    scheduler_startup_delay_seconds: float = Field(default=0.0, ge=0, le=900)
     scheduler_job_timeout_minutes: int = Field(default=30, ge=1, le=24 * 60)
     scheduler_collect_enabled: bool = True
     scheduler_collect_interval_minutes: int = Field(default=5, ge=1, le=24 * 60)
@@ -142,12 +145,14 @@ class Settings(BaseSettings):
         if "scheduler_enabled" not in self.model_fields_set:
             # Deployed environments run autonomously; a developer laptop only does so when asked.
             self.scheduler_enabled = self.deployment_environment != "local"
+        if "scheduler_startup_delay_seconds" not in self.model_fields_set and self.deployment_environment != "local":
+            self.scheduler_startup_delay_seconds = 120.0
         if self.build_retry_max_seconds < self.build_retry_initial_seconds:
             raise ValueError("ORQENTIS_BUILD_RETRY_MAX_SECONDS must be >= ORQENTIS_BUILD_RETRY_INITIAL_SECONDS")
-        if self.scheduler_tick_seconds * 2 > self.scheduler_lease_ttl_seconds:
-            # The lease is renewed once less than half its TTL is left; a slower tick would let it lapse between ticks.
+        if self.scheduler_tick_seconds * 3 > self.scheduler_lease_ttl_seconds:
+            # The lease is renewed once a third of its TTL is left; it must survive two missed ticks.
             raise ValueError(
-                "ORQENTIS_SCHEDULER_LEASE_TTL_SECONDS must be at least twice ORQENTIS_SCHEDULER_TICK_SECONDS"
+                "ORQENTIS_SCHEDULER_LEASE_TTL_SECONDS must be at least three times ORQENTIS_SCHEDULER_TICK_SECONDS"
             )
         if self.reasoner is ReasonerKind.AGENT_FRAMEWORK:
             if self.llm_provider is LlmProvider.AZURE_OPENAI and not (

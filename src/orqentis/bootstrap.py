@@ -36,6 +36,7 @@ from orqentis.fabric.write import DisabledFabricWriteClient, MockFabricWriteClie
 from orqentis.incidents.classification import ErrorClassifier
 from orqentis.incidents.confidence import ConfidenceCalculator
 from orqentis.incidents.detection import DetectionEngine
+from orqentis.incidents.detection_runner import DetectionRunner
 from orqentis.incidents.history import IncidentHistory
 from orqentis.incidents.investigation import InvestigationService
 from orqentis.incidents.service import IncidentService
@@ -51,7 +52,7 @@ from orqentis.runbooks.catalog import RunbookCatalog
 from orqentis.runtime.collection import CollectionService
 from orqentis.runtime.investigations import AutoInvestigationTask, InvestigationJobRunner
 from orqentis.runtime.lease import InProcessLeaderLease, LeaderLease
-from orqentis.runtime.scheduler import JobSpec, Scheduler
+from orqentis.runtime.scheduler import JobContext, JobSpec, Scheduler
 from orqentis.storage.dependency_store import SqliteDependencyStore
 from orqentis.storage.event_store import LocalEventStore
 from orqentis.storage.evidence_store import LocalEvidenceStore
@@ -328,10 +329,11 @@ async def _build_container(
     detection = DetectionEngine(incidents, clock)
 
     # Autonomous runtime: the scheduler is built here but started by the API lifespan (see runtime/service.py).
-    collection = CollectionService(ingestor, detection)
-    catalog_refresher = CatalogRefresher(fabric, contracts, catalog, graph, dependency_store, audit, clock)
+    detection_runner = DetectionRunner(event_store, detection)
+    collection = CollectionService(ingestor, detection_runner)
+    catalog_refresher = CatalogRefresher(fabric, contracts, catalog, graph, dependency_store, incidents, audit, clock)
     sla_sweeper = SLASweeper(
-        catalog, SLAEvaluator(event_store, clock), graph, repository, event_store, detection, clock
+        catalog, SLAEvaluator(event_store, clock), graph, repository, event_store, detection_runner, clock
     )
     investigation_timeout = timedelta(seconds=settings.investigation_timeout_seconds)
     investigation_jobs = InvestigationJobRunner(
@@ -346,18 +348,24 @@ async def _build_container(
         incidents,
         investigation_jobs,
         clock,
+        catalog=catalog,
         batch_size=settings.scheduler_auto_investigate_batch_size,
         max_attempts=settings.scheduler_auto_investigate_max_attempts,
         orphan_after=investigation_timeout + timedelta(minutes=5),
     )
 
-    async def collect_job() -> None:
+    # Jobs receive a JobContext (lease holder + fencing token). Nothing here writes through a fenced store yet; the
+    # PostgreSQL work will pass it down so a deposed leader's late write is rejected.
+    async def collect_job(ctx: JobContext) -> None:
         await collection.run()
 
-    async def sla_sweep_job() -> None:
+    async def auto_investigate_job(ctx: JobContext) -> None:
+        await auto_investigation.run()
+
+    async def sla_sweep_job(ctx: JobContext) -> None:
         await sla_sweeper.sweep()
 
-    async def catalog_refresh_job() -> None:
+    async def catalog_refresh_job(ctx: JobContext) -> None:
         await catalog_refresher.refresh()
 
     lease = InProcessLeaderLease(clock)
@@ -372,7 +380,7 @@ async def _build_container(
             JobSpec(
                 "auto-investigate",
                 timedelta(minutes=settings.scheduler_auto_investigate_interval_minutes),
-                auto_investigation.run,
+                auto_investigate_job,
                 enabled=settings.scheduler_auto_investigate_enabled,
             ),
             # The next two start one interval after the scheduler: the first collection must have run before SLAs
@@ -396,6 +404,7 @@ async def _build_container(
         clock,
         lease_ttl=timedelta(seconds=settings.scheduler_lease_ttl_seconds),
         tick_interval=timedelta(seconds=settings.scheduler_tick_seconds),
+        start_delay=timedelta(seconds=settings.scheduler_startup_delay_seconds),
         default_job_timeout=timedelta(minutes=settings.scheduler_job_timeout_minutes),
         audit=audit,
     )

@@ -41,7 +41,10 @@ async def ready(request: Request, response: Response) -> Ready | JSONResponse:
     if container is None:
         build = runtime.status
         body = NotReady(
-            reason=build.reason or "starting", attempts=build.attempts, retry_in_seconds=build.retry_in_seconds
+            reason="build_failed" if build.reason == "build_failed" else "starting",
+            error_type=build.error_type,
+            attempts=build.attempts,
+            retry_in_seconds=build.retry_in_seconds,
         )
         return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=body.model_dump())
     settings: Settings = request.app.state.settings

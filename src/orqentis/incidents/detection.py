@@ -13,6 +13,7 @@ from orqentis.domain.incidents import Incident, Symptom, TimelineKind
 from orqentis.domain.taxonomy import IncidentCategory, Severity
 from orqentis.incidents.service import IncidentCandidate, IncidentService
 from orqentis.observability.logging import get_logger
+from orqentis.storage.incidents import IncidentQuery
 
 _log = get_logger(__name__)
 
@@ -103,7 +104,7 @@ class DetectionEngine:
                         candidate.primary_item_id, candidate.correlation_id
                     )
                     if candidate.correlation_id
-                    else None
+                    else await self._opened_by(candidate)
                 )
                 if existing is not None:
                     _log.info(
@@ -116,6 +117,15 @@ class DetectionEngine:
             if event.event_type is EventType.ACTIVITY_RUN_FAILED:
                 await self._attach_symptom(event)
         return [await self._incidents.repository.get(i.incident_id) or i for i in created]
+
+    async def _opened_by(self, candidate: IncidentCandidate) -> Incident | None:
+        """The incident an earlier pass already opened for this very event (candidates without a correlation id).
+
+        Detection is fed from a durable cursor, so after an interruption the same events are processed again; this
+        keeps that harmless for rules that have no correlation id to de-duplicate on.
+        """
+        recent = await self._incidents.repository.list(IncidentQuery(primary_item_id=candidate.primary_item_id))
+        return next((i for i in recent if i.metadata.get("trigger_event_id") == candidate.trigger_event_id), None)
 
     async def _attach_symptom(self, event: OperationalEvent) -> None:
         if not event.item_id or not event.correlation_id:

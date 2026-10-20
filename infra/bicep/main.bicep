@@ -109,6 +109,26 @@ param azureOpenAiResourceId string = ''
 @description('ORQENTIS_SCHEDULER_ENABLED. true: the app collects, detects, investigates, sweeps SLAs and refreshes its catalog on a schedule. false: it only acts when called through the API.')
 param schedulerEnabled bool = true
 
+@description('Seconds the scheduler waits after the app starts before it takes the leader lease or runs a job (ORQENTIS_SCHEDULER_STARTUP_DELAY_SECONDS). Container Apps runs the old and the new revision side by side during a deploy on the same Azure Files volume; the delay lets the old one drain first. Not a substitute for the database-backed lease: until then deploy with schedulerEnabled = false or accept the risk.')
+@minValue(0)
+@maxValue(900)
+param schedulerStartupDelaySeconds int = 120
+
+@description('Seconds between scheduler ticks, i.e. how often due jobs are started and the lease is renewed (ORQENTIS_SCHEDULER_TICK_SECONDS).')
+@minValue(1)
+@maxValue(60)
+param schedulerTickSeconds int = 5
+
+@description('Leader lease TTL in seconds (ORQENTIS_SCHEDULER_LEASE_TTL_SECONDS). Must be at least three times schedulerTickSeconds, or the app refuses to start.')
+@minValue(5)
+@maxValue(3600)
+param schedulerLeaseTtlSeconds int = 60
+
+@description('Minutes after which a running scheduled job is cancelled (ORQENTIS_SCHEDULER_JOB_TIMEOUT_MINUTES).')
+@minValue(1)
+@maxValue(1440)
+param schedulerJobTimeoutMinutes int = 30
+
 @description('Run the collect + detect job (ORQENTIS_SCHEDULER_COLLECT_ENABLED).')
 param collectEnabled bool = true
 
@@ -124,6 +144,16 @@ param autoInvestigateEnabled bool = true
 @minValue(1)
 @maxValue(1440)
 param autoInvestigateIntervalMinutes int = 1
+
+@description('New investigations queued per auto-investigation run (ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_BATCH_SIZE).')
+@minValue(1)
+@maxValue(50)
+param autoInvestigateBatchSize int = 5
+
+@description('Failed investigation attempts after which an incident is left to a human (ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_MAX_ATTEMPTS).')
+@minValue(1)
+@maxValue(20)
+param autoInvestigateMaxAttempts int = 3
 
 @description('Run the SLA sweep that records SLA state changes as events (ORQENTIS_SCHEDULER_SLA_SWEEP_ENABLED).')
 param slaSweepEnabled bool = true
@@ -166,6 +196,11 @@ param fabricRatePerSecond int = 5
 @maxValue(1000)
 param fabricRateBurst int = 10
 
+@description('Most pages read per job-instance listing; Fabric documents no result order, so listings are filtered, not stopped early (ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES).')
+@minValue(1)
+@maxValue(1000)
+param fabricJobInstancesMaxPages int = 10
+
 @description('Hours of history read the first time a collector runs, and the most a collector ever re-reads after downtime (ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS).')
 @minValue(1)
 @maxValue(2160)
@@ -175,6 +210,21 @@ param collectionMaxLookbackHours int = 168
 @minValue(0)
 @maxValue(1440)
 param collectionOverlapMinutes int = 15
+
+@description('Longest the lifespan waits for the first container build attempt before the port opens (ORQENTIS_STARTUP_GRACE_SECONDS). A slow build continues in the background; /health/ready is 503 until it is done.')
+@minValue(0)
+@maxValue(60)
+param startupGraceSeconds int = 10
+
+@description('Seconds before the first retry of a failed container build (ORQENTIS_BUILD_RETRY_INITIAL_SECONDS); the delay doubles up to buildRetryMaxSeconds.')
+@minValue(1)
+@maxValue(600)
+param buildRetryInitialSeconds int = 2
+
+@description('Longest delay between container build retries (ORQENTIS_BUILD_RETRY_MAX_SECONDS); must be at least buildRetryInitialSeconds.')
+@minValue(1)
+@maxValue(3600)
+param buildRetryMaxSeconds int = 60
 
 // ------------------------------------------------------------------------------------------------- network + auth
 
@@ -261,10 +311,16 @@ var appEnv = concat(
     { name: 'ORQENTIS_DATA_DIR', value: dataMountPath }
     { name: 'ORQENTIS_LOG_FORMAT', value: 'json' }
     { name: 'ORQENTIS_SCHEDULER_ENABLED', value: schedulerEnabled ? 'true' : 'false' }
+    { name: 'ORQENTIS_SCHEDULER_STARTUP_DELAY_SECONDS', value: string(schedulerStartupDelaySeconds) }
+    { name: 'ORQENTIS_SCHEDULER_TICK_SECONDS', value: string(schedulerTickSeconds) }
+    { name: 'ORQENTIS_SCHEDULER_LEASE_TTL_SECONDS', value: string(schedulerLeaseTtlSeconds) }
+    { name: 'ORQENTIS_SCHEDULER_JOB_TIMEOUT_MINUTES', value: string(schedulerJobTimeoutMinutes) }
     { name: 'ORQENTIS_SCHEDULER_COLLECT_ENABLED', value: collectEnabled ? 'true' : 'false' }
     { name: 'ORQENTIS_SCHEDULER_COLLECT_INTERVAL_MINUTES', value: string(collectIntervalMinutes) }
     { name: 'ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_ENABLED', value: autoInvestigateEnabled ? 'true' : 'false' }
     { name: 'ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_INTERVAL_MINUTES', value: string(autoInvestigateIntervalMinutes) }
+    { name: 'ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_BATCH_SIZE', value: string(autoInvestigateBatchSize) }
+    { name: 'ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_MAX_ATTEMPTS', value: string(autoInvestigateMaxAttempts) }
     { name: 'ORQENTIS_SCHEDULER_SLA_SWEEP_ENABLED', value: slaSweepEnabled ? 'true' : 'false' }
     { name: 'ORQENTIS_SCHEDULER_SLA_SWEEP_INTERVAL_MINUTES', value: string(slaSweepIntervalMinutes) }
     { name: 'ORQENTIS_SCHEDULER_CATALOG_REFRESH_ENABLED', value: catalogRefreshEnabled ? 'true' : 'false' }
@@ -274,8 +330,12 @@ var appEnv = concat(
     { name: 'ORQENTIS_FABRIC_MAX_CONCURRENCY', value: string(fabricMaxConcurrency) }
     { name: 'ORQENTIS_FABRIC_RATE_PER_SECOND', value: string(fabricRatePerSecond) }
     { name: 'ORQENTIS_FABRIC_RATE_BURST', value: string(fabricRateBurst) }
+    { name: 'ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES', value: string(fabricJobInstancesMaxPages) }
     { name: 'ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS', value: string(collectionMaxLookbackHours) }
     { name: 'ORQENTIS_COLLECTION_OVERLAP_MINUTES', value: string(collectionOverlapMinutes) }
+    { name: 'ORQENTIS_STARTUP_GRACE_SECONDS', value: string(startupGraceSeconds) }
+    { name: 'ORQENTIS_BUILD_RETRY_INITIAL_SECONDS', value: string(buildRetryInitialSeconds) }
+    { name: 'ORQENTIS_BUILD_RETRY_MAX_SECONDS', value: string(buildRetryMaxSeconds) }
     { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: appInsightsSecretName }
   ],
   empty(azureOpenAiEndpoint) ? [] : [{ name: 'ORQENTIS_AZURE_OPENAI_ENDPOINT', value: azureOpenAiEndpoint }],

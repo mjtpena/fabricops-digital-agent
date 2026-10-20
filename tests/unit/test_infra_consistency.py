@@ -23,11 +23,23 @@ def test_every_autonomous_runtime_parameter_reaches_the_app_and_is_documented() 
     section = re.search(r"-+ autonomous runtime\n(.*?)\n// -+ network \+ auth", BICEP, re.S)
     assert section is not None, "the autonomous runtime parameter section is missing from main.bicep"
     params = re.findall(r"^param (\w+) ", section.group(1), re.M)
-    assert len(params) >= 15
+    assert len(params) >= 25
     for param in params:
         # Booleans are passed as `param ? 'true' : 'false'`, numbers as `string(param)`.
         assert f"{param} ? " in BICEP or f"string({param})" in BICEP, f"{param} is declared but never passed to the app"
         assert f"`{param}`" in BICEP_README, f"{param} is not documented in infra/bicep/README.md"
+
+
+def test_every_runtime_setting_an_operator_may_need_to_tune_has_a_bicep_parameter() -> None:
+    wanted = {
+        name
+        for name in Settings.model_fields
+        if name.startswith(("scheduler_", "investigation_", "collection_", "build_retry_"))
+        or name in {"startup_grace_seconds", "fabric_max_concurrency", "fabric_rate_per_second", "fabric_rate_burst"}
+        or name == "fabric_job_instances_max_pages"
+    }
+    missing = sorted(f"ORQENTIS_{name.upper()}" for name in wanted if f"name: 'ORQENTIS_{name.upper()}'" not in BICEP)
+    assert missing == [], f"main.bicep has no parameter for: {missing}"
 
 
 def test_the_probes_separate_liveness_from_readiness() -> None:

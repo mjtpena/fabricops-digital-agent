@@ -8,11 +8,14 @@ collectors, tools and the dependency graph until the next restart. A refresh bui
 from __future__ import annotations
 
 from orqentis.config.clock import Clock
+from orqentis.domain.incidents import IncidentStatus, TimelineKind
 from orqentis.domain.principals import SYSTEM_PRINCIPAL
 from orqentis.fabric.fixtures import EstateContracts
 from orqentis.fabric.ports import FabricClient
+from orqentis.incidents.service import IncidentService
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
+from orqentis.storage.incidents import IncidentQuery
 from orqentis.topology.catalog import CatalogDiff, EstateCatalog, diff_entities
 from orqentis.topology.graph import DependencyGraph, DependencyStore
 
@@ -31,6 +34,7 @@ class CatalogRefresher:
         catalog: EstateCatalog,
         graph: DependencyGraph,
         dependency_store: DependencyStore,
+        incidents: IncidentService,
         audit: AuditTrail,
         clock: Clock,
     ) -> None:
@@ -39,6 +43,7 @@ class CatalogRefresher:
         self._catalog = catalog
         self._graph = graph
         self._store = dependency_store
+        self._incidents = incidents
         self._audit = audit
         self._clock = clock
 
@@ -70,4 +75,30 @@ class CatalogRefresher:
             outcome="CHANGED",
             details={"at": self._clock.now().isoformat(), "diff": diff.summary()},
         )
+        await self._annotate_incidents_of_removed_items(diff.items.removed)
         return diff
+
+    async def _annotate_incidents_of_removed_items(self, item_ids: list[str]) -> None:
+        """Tell the open incidents of an item that left the estate, once, on their timeline.
+
+        Nothing else changes: whether to close such an incident is a human decision. The automatic investigation
+        skips them (it cannot resolve the item any more) instead of failing repeatedly.
+        """
+        open_statuses = [s for s in IncidentStatus if s.is_open]
+        for item_id in item_ids:
+            try:
+                for incident in await self._incidents.repository.list(
+                    IncidentQuery(primary_item_id=item_id, statuses=open_statuses)
+                ):
+                    self._incidents.add_timeline(
+                        incident,
+                        TimelineKind.NOTE,
+                        f"Item {item_id} was removed from the estate (seen by the catalog refresh); "
+                        "automatic investigation is skipped for this incident",
+                        actor=SYSTEM_PRINCIPAL.id,
+                    )
+                    await self._incidents.save(incident)
+            except Exception:
+                _log.warning(
+                    "could not annotate incidents of a removed item", extra={"item_id": item_id}, exc_info=True
+                )

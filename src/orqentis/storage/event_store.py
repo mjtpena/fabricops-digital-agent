@@ -6,7 +6,8 @@ SQLite development adapter; both satisfy :class:`EventStore`.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -27,6 +28,18 @@ class EventQuery(BaseModel):
     newest_first: bool = False
 
 
+# Scope of a watermark that belongs to a whole collector rather than to one item it covers.
+COLLECTOR_SCOPE = ""
+
+
+@dataclass(frozen=True)
+class SequencedEvent:
+    """An event with its position in the store's total order of insertion."""
+
+    sequence: int
+    event: OperationalEvent
+
+
 class EventStore(Protocol):
     async def append(self, events: Sequence[OperationalEvent]) -> list[OperationalEvent]:
         """Append events, ignoring duplicates by ``dedupe_key``. Returns the newly stored events."""
@@ -38,12 +51,32 @@ class EventStore(Protocol):
 
     async def count(self) -> int: ...
 
-    async def get_watermark(self, collector: str) -> datetime | None:
-        """Everything the collector observed up to this instant has been appended (``None``: never collected)."""
+    # ---- incremental collection -------------------------------------------------------------------------
+    async def get_watermarks(self, collector: str) -> dict[str, datetime]:
+        """Per scope (an item id, or ``COLLECTOR_SCOPE``): everything observed up to this instant was appended.
+
+        A scope that has no entry was never collected.
+        """
         ...
 
-    async def advance_watermark(self, collector: str, watermark: datetime) -> datetime:
-        """Move the collector's watermark forward. It never moves backwards. Returns the stored value."""
+    async def advance_watermarks(self, collector: str, updates: Mapping[str, datetime], *, force: bool = False) -> None:
+        """Move watermarks forward; a value older than the stored one is ignored unless ``force`` (clock repair)."""
+        ...
+
+    # ---- durable consumption ----------------------------------------------------------------------------
+    async def read_after(self, position: int, *, limit: int = 500) -> list[SequencedEvent]:
+        """Events inserted after ``position`` (0 = from the start), in insertion order, at most ``limit``.
+
+        ``sequence`` increases with every inserted event and is never reused (a PostgreSQL ``bigserial`` fits).
+        """
+        ...
+
+    async def get_cursor(self, consumer: str) -> int:
+        """The last sequence the named consumer has fully processed (0 if it has not consumed anything)."""
+        ...
+
+    async def advance_cursor(self, consumer: str, position: int) -> int:
+        """Record that ``consumer`` processed everything up to ``position``. Never moves backwards."""
         ...
 
 
@@ -61,11 +94,28 @@ _SCHEMA = (
     )""",
     "CREATE INDEX IF NOT EXISTS ix_events_item_ts ON operational_events(item_id, ts)",
     "CREATE INDEX IF NOT EXISTS ix_events_type_ts ON operational_events(event_type, ts)",
-    # One row per collector: how far its observations are complete (incremental collection).
-    """CREATE TABLE IF NOT EXISTS collector_watermarks (
-        collector TEXT PRIMARY KEY,
-        watermark REAL NOT NULL
+    # How far each collector's observations are complete, per scope (an item id; '' for the whole collector).
+    """CREATE TABLE IF NOT EXISTS watermarks (
+        collector TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        watermark REAL NOT NULL,
+        PRIMARY KEY (collector, scope)
     )""",
+    # How far each consumer (e.g. detection) has processed the event sequence.
+    """CREATE TABLE IF NOT EXISTS consumer_cursors (
+        consumer TEXT PRIMARY KEY,
+        position INTEGER NOT NULL
+    )""",
+)
+
+
+_ADVANCE_WATERMARK = (
+    "INSERT INTO watermarks (collector, scope, watermark) VALUES (?, ?, ?) "
+    "ON CONFLICT(collector, scope) DO UPDATE SET watermark = MAX(watermark, excluded.watermark)"
+)
+_FORCE_WATERMARK = (
+    "INSERT INTO watermarks (collector, scope, watermark) VALUES (?, ?, ?) "
+    "ON CONFLICT(collector, scope) DO UPDATE SET watermark = excluded.watermark"
 )
 
 
@@ -143,16 +193,37 @@ class LocalEventStore:
         row = await self._db.fetchone("SELECT COUNT(*) AS n FROM operational_events")
         return int(row["n"]) if row else 0
 
-    async def get_watermark(self, collector: str) -> datetime | None:
-        row = await self._db.fetchone("SELECT watermark FROM collector_watermarks WHERE collector = ?", (collector,))
-        return datetime.fromtimestamp(float(row["watermark"]), UTC) if row else None
+    # ---- incremental collection -------------------------------------------------------------------------
+    async def get_watermarks(self, collector: str) -> dict[str, datetime]:
+        rows = await self._db.fetchall("SELECT scope, watermark FROM watermarks WHERE collector = ?", (collector,))
+        return {str(r["scope"]): datetime.fromtimestamp(float(r["watermark"]), UTC) for r in rows}
 
-    async def advance_watermark(self, collector: str, watermark: datetime) -> datetime:
-        await self._db.execute(
-            "INSERT INTO collector_watermarks (collector, watermark) VALUES (?, ?) "
-            "ON CONFLICT(collector) DO UPDATE SET watermark = MAX(watermark, excluded.watermark)",
-            (collector, watermark.timestamp()),
+    async def advance_watermarks(self, collector: str, updates: Mapping[str, datetime], *, force: bool = False) -> None:
+        if not updates:
+            return
+        await self._db.executemany(
+            _FORCE_WATERMARK if force else _ADVANCE_WATERMARK,
+            [(collector, scope, value.timestamp()) for scope, value in updates.items()],
         )
-        stored = await self.get_watermark(collector)
-        assert stored is not None
-        return stored
+
+    # ---- durable consumption ----------------------------------------------------------------------------
+    async def read_after(self, position: int, *, limit: int = 500) -> list[SequencedEvent]:
+        # rowid grows with every insert and is never reused while rows are only ever appended (never VACUUM this table
+        # into a different order); INSERT OR IGNORE of a duplicate consumes none.
+        rows = await self._db.fetchall(
+            "SELECT rowid AS seq, body FROM operational_events WHERE rowid > ? ORDER BY rowid LIMIT ?",
+            (position, limit),
+        )
+        return [SequencedEvent(int(r["seq"]), OperationalEvent.model_validate_json(r["body"])) for r in rows]
+
+    async def get_cursor(self, consumer: str) -> int:
+        row = await self._db.fetchone("SELECT position FROM consumer_cursors WHERE consumer = ?", (consumer,))
+        return int(row["position"]) if row else 0
+
+    async def advance_cursor(self, consumer: str, position: int) -> int:
+        await self._db.execute(
+            "INSERT INTO consumer_cursors (consumer, position) VALUES (?, ?) "
+            "ON CONFLICT(consumer) DO UPDATE SET position = MAX(position, excluded.position)",
+            (consumer, position),
+        )
+        return await self.get_cursor(consumer)

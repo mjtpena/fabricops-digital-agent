@@ -237,15 +237,16 @@ FabricOps works without being called. Everything below lives in `orqentis.runtim
 **Process lifecycle** (`api/app.py`, `runtime/service.py`). The FastAPI lifespan starts a `Runtime`
 that builds the container in the background and returns within `ORQENTIS_STARTUP_GRACE_SECONDS`, so
 the port opens even when reading the estate takes minutes. `GET /health` is liveness (no
-dependencies, always `200` while the process runs). `GET /health/ready` is `503` with a redacted
-one-line reason until the container is built and the first catalog load finished. If the build
+dependencies, always `200` while the process runs). `GET /health/ready` is `503` with a fixed
+reason code and the exception type (never its message: the probe is unauthenticated) until the container is built and the first catalog load finished. If the build
 raises (invalid contracts, Fabric unreachable, anything), the exception is logged, the process
 stays up, and the build is retried with exponential backoff (`ORQENTIS_BUILD_RETRY_*`); resources
 opened by a failed attempt are closed. Other endpoints answer `503 NOT_READY` meanwhile.
 
 **Scheduler** (`runtime/scheduler.py`). Jobs are `JobSpec(name, interval, async function)`. Every
-tick (`ORQENTIS_SCHEDULER_TICK_SECONDS`) the scheduler acquires or renews a `LeaderLease`; only the
-holder starts jobs, and a holder that loses the lease cancels its running jobs. A job never
+tick (`ORQENTIS_SCHEDULER_TICK_SECONDS`) the scheduler acquires or, once a third of the TTL is left,
+renews a `LeaderLease` (TTL >= 3 x tick); only the holder starts jobs, each with a `JobContext` (holder
+and fencing token), and a holder that loses the lease cancels its running jobs. A job never
 overlaps with itself: a run that outlasts its interval makes the next slot be skipped (counted),
 not queued, and missed slots collapse into one run. A job that raises or times out is logged and
 recorded in `Scheduler.status()`; it is audited when its health *changes* (first failure,
@@ -268,13 +269,26 @@ up on an incident after `ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_MAX_ATTEMPTS` failu
 still investigate it) and resets incidents orphaned in `INVESTIGATING` by a crashed process.
 Automation acts as `system:orqentis`; the agent still cannot approve or execute.
 
-**Incremental collection** (`telemetry/collectors.py`, `storage/event_store.py`). Each collector has
-a watermark in the event store. A run reads `[watermark - overlap, now]`, never further back than
-`ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS`; the watermark advances only after the events were stored,
-so a failed collector retries the same window. The overlap is safe because events are
-de-duplicated by `dedupe_key`. Fabric documents no ordering for "List Item Job Instances", so job
+**Incremental collection** (`telemetry/collectors.py`, `storage/event_store.py`). Watermarks live in
+the event store, one per collector and, for collectors over many independent things (pipelines,
+semantic models, capacities), one per **scope** (the item id). A scope reads
+`[watermark - overlap, now]`, never further back than `ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS`; a
+scope with no watermark (a pipeline that appeared through a catalog refresh) reads the full maximum
+lookback, so it is not blind before the collector's overall progress, even after a restart. The
+watermark advances only after the events were stored, so a failed scope retries the same window and
+does not hold back the others. A watermark ahead of the clock is not trusted: it is logged, the
+maximum lookback is re-read once and the watermark is corrected. The overlap is safe because events
+are de-duplicated by `dedupe_key`. Fabric documents no ordering for "List Item Job Instances", so job
 listings filter by the watermark without stopping early and are capped at
 `ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES` pages.
+
+**Durable detection** (`incidents/detection_runner.py`). Storing events and detecting from them are
+separate steps, and a run can be cut short between them. The event store numbers every inserted
+event and keeps a cursor per consumer; `DetectionRunner` reads the events after its cursor, runs the
+detection engine and advances the cursor only after the engine returned. `CollectionService` runs it
+after collecting and also when collecting is interrupted or fails; the SLA sweep uses the same
+runner. Re-reading after an interruption is harmless because the engine de-duplicates by item and
+correlation (or by the triggering event).
 
 **Fabric call budget** (`fabric/rest/budget.py`). One semaphore and one token bucket, shared by every
 Fabric and Power BI call through `FabricHttp`, cap concurrency and request rate. A `429` or any
