@@ -1,0 +1,505 @@
+{
+  "description": "Responses of the Fabric REST API and the Power BI admin Scanner API for a small synthetic estate, authored from the documented response shapes (no tenant was contacted). Replayed by tests/support/recorded_transport.py: requests are matched on method and path; several interactions with the same method and path are served in order, the last one repeating.",
+  "interactions": [
+    {
+      "method": "GET",
+      "path": "/v1/workspaces",
+      "status": 200,
+      "body": {
+        "value": [
+          {
+            "id": "ws-sales",
+            "displayName": "Sales Analytics [PROD]",
+            "capacityId": "cap-1",
+            "type": "Workspace"
+          },
+          {
+            "id": "ws-fin",
+            "displayName": "Finance [DEV]",
+            "capacityId": "cap-1",
+            "type": "Workspace"
+          },
+          {
+            "id": "ws-shared",
+            "displayName": "Shared Services",
+            "capacityId": "cap-1",
+            "type": "Workspace"
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/ws-sales/items",
+      "status": 200,
+      "body": {
+        "value": [
+          {
+            "id": "pl-sales",
+            "displayName": "ingest_sales",
+            "type": "DataPipeline",
+            "workspaceId": "ws-sales"
+          },
+          {
+            "id": "nb-sales",
+            "displayName": "transform_sales",
+            "type": "Notebook",
+            "workspaceId": "ws-sales"
+          },
+          {
+            "id": "lh-sales",
+            "displayName": "SalesGold",
+            "type": "Lakehouse",
+            "workspaceId": "ws-sales"
+          }
+        ],
+        "continuationToken": "page-2"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/ws-sales/items",
+      "status": 200,
+      "body": {
+        "value": [
+          {
+            "id": "sm-sales",
+            "displayName": "SalesModel",
+            "type": "SemanticModel",
+            "workspaceId": "ws-sales"
+          },
+          {
+            "id": "rp-sales",
+            "displayName": "SalesReport",
+            "type": "Report",
+            "workspaceId": "ws-sales"
+          },
+          {
+            "id": "es-sales",
+            "displayName": "SalesStream",
+            "type": "Eventstream",
+            "workspaceId": "ws-sales"
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/ws-fin/items",
+      "status": 200,
+      "body": {
+        "value": [
+          {
+            "id": "pl-fin",
+            "displayName": "ingest_finance",
+            "type": "DataPipeline",
+            "workspaceId": "ws-fin"
+          },
+          {
+            "id": "nb-fin",
+            "displayName": "transform_finance",
+            "type": "Notebook",
+            "workspaceId": "ws-fin"
+          },
+          {
+            "id": "sm-fin",
+            "displayName": "FinanceModel",
+            "type": "SemanticModel",
+            "workspaceId": "ws-fin"
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/ws-shared/items",
+      "status": 200,
+      "body": {
+        "value": [
+          {
+            "id": "lh-shared",
+            "displayName": "SharedLake",
+            "type": "Lakehouse",
+            "workspaceId": "ws-shared"
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/ws-sales/items/pl-sales/jobs/instances",
+      "status": 200,
+      "body": {
+        "value": [
+          {
+            "id": "run-s-2",
+            "itemId": "pl-sales",
+            "jobType": "Pipeline",
+            "invokeType": "Scheduled",
+            "status": "Completed",
+            "rootActivityId": "root-run-s-2",
+            "startTimeUtc": "2026-10-08T06:00:00Z",
+            "endTimeUtc": "2026-10-08T06:05:00Z"
+          },
+          {
+            "id": "run-s-1",
+            "itemId": "pl-sales",
+            "jobType": "Pipeline",
+            "invokeType": "Scheduled",
+            "status": "Completed",
+            "rootActivityId": "root-run-s-1",
+            "startTimeUtc": "2026-10-07T06:00:00Z",
+            "endTimeUtc": "2026-10-07T06:05:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/ws-sales/items/pl-sales/jobs/instances/run-s-2",
+      "status": 200,
+      "body": {
+        "id": "run-s-2",
+        "itemId": "pl-sales",
+        "jobType": "Pipeline",
+        "invokeType": "Scheduled",
+        "status": "Completed",
+        "rootActivityId": "root-run-s-2",
+        "startTimeUtc": "2026-10-08T06:00:00Z",
+        "endTimeUtc": "2026-10-08T06:05:00Z"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/ws-sales/items/pl-sales/jobs/instances/run-s-1",
+      "status": 200,
+      "body": {
+        "id": "run-s-1",
+        "itemId": "pl-sales",
+        "jobType": "Pipeline",
+        "invokeType": "Scheduled",
+        "status": "Completed",
+        "rootActivityId": "root-run-s-1",
+        "startTimeUtc": "2026-10-07T06:00:00Z",
+        "endTimeUtc": "2026-10-07T06:05:00Z"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/ws-sales/datapipelines/pipelineruns/run-s-2/queryactivityruns",
+      "status": 200,
+      "body": {
+        "value": [
+          {
+            "activityName": "copy_crm",
+            "activityType": "Copy",
+            "activityRunId": "run-s-2:copy_crm",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-08T06:00:10Z",
+            "activityRunEnd": "2026-10-08T06:01:00Z",
+            "input": {
+              "source": {
+                "type": "Dynamics"
+              },
+              "sink": {
+                "artifactId": "lh-sales"
+              }
+            }
+          },
+          {
+            "activityName": "transform_sales",
+            "activityType": "TridentNotebook",
+            "activityRunId": "run-s-2:transform_sales",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-08T06:00:10Z",
+            "activityRunEnd": "2026-10-08T06:01:00Z",
+            "input": {
+              "notebookId": "nb-sales"
+            }
+          },
+          {
+            "activityName": "refresh_model",
+            "activityType": "PBISemanticModelRefresh",
+            "activityRunId": "run-s-2:refresh_model",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-08T06:00:10Z",
+            "activityRunEnd": "2026-10-08T06:01:00Z",
+            "input": {
+              "semanticModelId": "sm-sales"
+            }
+          },
+          {
+            "activityName": "run_finance",
+            "activityType": "ExecutePipeline",
+            "activityRunId": "run-s-2:run_finance",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-08T06:00:10Z",
+            "activityRunEnd": "2026-10-08T06:01:00Z",
+            "input": {
+              "pipelineId": "pl-fin"
+            }
+          },
+          {
+            "activityName": "pause",
+            "activityType": "Wait",
+            "activityRunId": "run-s-2:pause",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-08T06:00:10Z",
+            "activityRunEnd": "2026-10-08T06:01:00Z",
+            "input": {
+              "waitTimeInSeconds": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/ws-sales/datapipelines/pipelineruns/run-s-1/queryactivityruns",
+      "status": 200,
+      "body": {
+        "value": [
+          {
+            "activityName": "copy_crm",
+            "activityType": "Copy",
+            "activityRunId": "run-s-1:copy_crm",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-07T06:00:10Z",
+            "activityRunEnd": "2026-10-07T06:01:00Z",
+            "input": {
+              "source": {
+                "type": "Dynamics"
+              },
+              "sink": {
+                "artifactId": "lh-sales"
+              }
+            }
+          },
+          {
+            "activityName": "transform_sales",
+            "activityType": "TridentNotebook",
+            "activityRunId": "run-s-1:transform_sales",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-07T06:00:10Z",
+            "activityRunEnd": "2026-10-07T06:01:00Z",
+            "input": {
+              "notebookId": "nb-sales"
+            }
+          },
+          {
+            "activityName": "refresh_model",
+            "activityType": "PBISemanticModelRefresh",
+            "activityRunId": "run-s-1:refresh_model",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-07T06:00:10Z",
+            "activityRunEnd": "2026-10-07T06:01:00Z",
+            "input": {
+              "semanticModelId": "sm-sales"
+            }
+          },
+          {
+            "activityName": "run_finance",
+            "activityType": "ExecutePipeline",
+            "activityRunId": "run-s-1:run_finance",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-07T06:00:10Z",
+            "activityRunEnd": "2026-10-07T06:01:00Z",
+            "input": {
+              "pipelineId": "pl-fin"
+            }
+          },
+          {
+            "activityName": "pause",
+            "activityType": "Wait",
+            "activityRunId": "run-s-1:pause",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-07T06:00:10Z",
+            "activityRunEnd": "2026-10-07T06:01:00Z",
+            "input": {
+              "waitTimeInSeconds": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/ws-fin/items/pl-fin/jobs/instances",
+      "status": 200,
+      "body": {
+        "value": [
+          {
+            "id": "run-f-1",
+            "itemId": "pl-fin",
+            "jobType": "Pipeline",
+            "invokeType": "Scheduled",
+            "status": "Completed",
+            "rootActivityId": "root-run-f-1",
+            "startTimeUtc": "2026-10-08T05:00:00Z",
+            "endTimeUtc": "2026-10-08T05:02:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/ws-fin/items/pl-fin/jobs/instances/run-f-1",
+      "status": 200,
+      "body": {
+        "id": "run-f-1",
+        "itemId": "pl-fin",
+        "jobType": "Pipeline",
+        "invokeType": "Scheduled",
+        "status": "Completed",
+        "rootActivityId": "root-run-f-1",
+        "startTimeUtc": "2026-10-08T05:00:00Z",
+        "endTimeUtc": "2026-10-08T05:02:00Z"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/ws-fin/datapipelines/pipelineruns/run-f-1/queryactivityruns",
+      "status": 200,
+      "body": {
+        "value": [
+          {
+            "activityName": "transform_finance",
+            "activityType": "TridentNotebook",
+            "activityRunId": "run-f-1:transform_finance",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-08T06:00:10Z",
+            "activityRunEnd": "2026-10-08T06:01:00Z",
+            "input": {
+              "typeProperties": {
+                "notebookId": "nb-fin"
+              }
+            }
+          },
+          {
+            "activityName": "legacy_step",
+            "activityType": "TridentNotebook",
+            "activityRunId": "run-f-1:legacy_step",
+            "status": "Succeeded",
+            "activityRunStart": "2026-10-08T06:00:10Z",
+            "activityRunEnd": "2026-10-08T06:01:00Z",
+            "input": {
+              "notebookId": "nb-ghost"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1.0/myorg/admin/workspaces/getInfo",
+      "status": 202,
+      "body": {
+        "id": "scan-1",
+        "createdDateTime": "2026-10-09T00:00:00Z",
+        "status": "NotStarted"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1.0/myorg/admin/workspaces/scanStatus/scan-1",
+      "status": 200,
+      "body": {
+        "id": "scan-1",
+        "status": "Running"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1.0/myorg/admin/workspaces/scanStatus/scan-1",
+      "status": 200,
+      "body": {
+        "id": "scan-1",
+        "status": "Succeeded"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1.0/myorg/admin/workspaces/scanResult/scan-1",
+      "status": 200,
+      "body": {
+        "workspaces": [
+          {
+            "id": "ws-sales",
+            "name": "Sales Analytics [PROD]",
+            "state": "Active",
+            "type": "Workspace",
+            "reports": [
+              {
+                "id": "rp-sales",
+                "name": "SalesReport",
+                "datasetId": "sm-sales"
+              }
+            ],
+            "datasets": [
+              {
+                "id": "sm-sales",
+                "name": "SalesModel",
+                "upstreamDatasets": [
+                  {
+                    "targetDatasetId": "sm-fin",
+                    "groupId": "ws-fin"
+                  }
+                ],
+                "datasourceUsages": [
+                  {
+                    "datasourceInstanceId": "ds-sql"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "ws-fin",
+            "name": "Finance [DEV]",
+            "state": "Active",
+            "type": "Workspace",
+            "reports": [],
+            "datasets": [
+              {
+                "id": "sm-fin",
+                "name": "FinanceModel",
+                "datasourceUsages": [
+                  {
+                    "datasourceInstanceId": "ds-web"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "ws-shared",
+            "name": "Shared Services",
+            "state": "Active",
+            "type": "Workspace",
+            "reports": [],
+            "datasets": []
+          }
+        ],
+        "datasourceInstances": [
+          {
+            "datasourceType": "Sql",
+            "connectionDetails": {
+              "server": "sql-prod.contoso.com",
+              "database": "CRM"
+            },
+            "datasourceId": "ds-sql",
+            "gatewayId": null
+          },
+          {
+            "datasourceType": "Web",
+            "connectionDetails": {
+              "url": "https://svc-user:Pa55w0rd-do-not-leak@api.contoso.com/v2/orders?sig=abcdef0123456789&x=1"
+            },
+            "datasourceId": "ds-web"
+          }
+        ],
+        "misconfiguredDatasourceInstances": []
+      }
+    }
+  ]
+}

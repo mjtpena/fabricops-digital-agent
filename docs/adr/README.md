@@ -9,3 +9,4 @@
 | [0005](0005-deterministic-confidence.md) | Deterministic, explainable confidence | Accepted |
 | [0006](0006-policy-approval-and-capability-boundaries.md) | Policy engine, approval binding and separate read/write capabilities | Accepted |
 | [0007](0007-grounding-validation.md) | Accept agent output only when grounded in evidence | Accepted |
+| [0014](0014-declared-environments-and-contracts-schema.md) | Declared environment classification, the contracts schema and portable identity | Accepted |

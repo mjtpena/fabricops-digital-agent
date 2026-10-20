@@ -5,9 +5,15 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
-from pydantic import AliasChoices, Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Token scopes of the public cloud. Sovereign clouds use other resources (see docs/development.md).
+PUBLIC_FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
+PUBLIC_POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
 
 
 class FabricMode(StrEnum):
@@ -65,6 +71,14 @@ class Settings(BaseSettings):
     powerbi_api_base_url: str = "https://api.powerbi.com/v1.0/myorg"
     auth_mode: AuthMode = AuthMode.DEFAULT
     managed_identity_client_id: str | None = None
+    # Sovereign clouds: the Entra ID authority host and the token scopes of the Fabric and Power BI APIs.
+    # Unset authority_host leaves azure-identity's own default (public cloud, or AZURE_AUTHORITY_HOST).
+    authority_host: str | None = None
+    fabric_scope: str = PUBLIC_FABRIC_SCOPE
+    powerbi_scope: str = PUBLIC_POWERBI_SCOPE
+    # Credential type for non-Fabric Azure calls (the LLM). Unset follows auth_mode. Set managed_identity when
+    # auth_mode=service_principal targets a Fabric tenant other than the one that hosts Azure OpenAI.
+    llm_auth_mode: AuthMode | None = None
     http_timeout_seconds: float = 30.0
     http_max_retries: int = Field(default=4, ge=0, le=10)
 
@@ -96,6 +110,38 @@ class Settings(BaseSettings):
             "ORQENTIS_APPLICATIONINSIGHTS_CONNECTION_STRING", "APPLICATIONINSIGHTS_CONNECTION_STRING"
         ),
     )
+
+    @field_validator("default_timezone")
+    @classmethod
+    def _valid_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (KeyError, ValueError, OSError):  # unknown key, malformed key, or a directory name
+            raise ValueError(f"{value!r} is not a valid IANA time zone (for example Australia/Sydney)") from None
+        return value
+
+    @field_validator("authority_host")
+    @classmethod
+    def _valid_authority_host(cls, value: str | None) -> str | None:
+        """An https host such as ``https://login.microsoftonline.us`` (a bare host name gets ``https://``)."""
+        if value is None or not value.strip():
+            return None
+        raw = value.strip()
+        parts = urlsplit(raw if "://" in raw else f"https://{raw}")
+        if parts.scheme != "https" or not parts.hostname or parts.path.strip("/") or parts.query or parts.fragment:
+            raise ValueError("must be an https host such as https://login.microsoftonline.us (no path or query)")
+        return f"https://{parts.netloc}"
+
+    @field_validator("fabric_scope", "powerbi_scope")
+    @classmethod
+    def _valid_scope(cls, value: str) -> str:
+        scope = value.strip()
+        resource, _, suffix = scope.rpartition("/")
+        if suffix != ".default" or urlsplit(resource).scheme not in ("https", "api") or not urlsplit(resource).netloc:
+            raise ValueError(
+                "must be a resource URI ending in /.default, e.g. https://api.fabric.microsoft.com/.default"
+            )
+        return scope
 
     @model_validator(mode="after")
     def _guard_rails(self) -> Settings:

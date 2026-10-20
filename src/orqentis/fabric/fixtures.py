@@ -2,31 +2,20 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
+from orqentis.contracts.model import EstateContracts
 from orqentis.domain.deployment import DeploymentState
-from orqentis.domain.estate import Capacity, DataProduct, ExternalSource, FabricItem, Tenant, Workspace
+from orqentis.domain.estate import Capacity, FabricItem, Tenant, Workspace
 from orqentis.domain.events import OperationalEvent
 from orqentis.domain.incidents import Incident
 from orqentis.domain.runs import ActivityRun, CapacitySnapshot, PipelineRun, Refresh
-from orqentis.domain.sla import SLA
-from orqentis.domain.topology import Dependency
 
 
 class _Fixture(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-class EstateContracts(_Fixture):
-    """What platform teams declare (version-controlled): sources, topology, data products and SLAs."""
-
-    external_sources: list[ExternalSource] = Field(default_factory=list)
-    data_products: list[DataProduct] = Field(default_factory=list)
-    dependencies: list[Dependency] = Field(default_factory=list)
-    slas: list[SLA] = Field(default_factory=list)
 
 
 class EstateFixture(EstateContracts):
@@ -70,14 +59,6 @@ def _read(path: Path) -> str:
 
 def load_estate(fixtures_dir: Path) -> EstateFixture:
     return EstateFixture.model_validate_json(_read(fixtures_dir / "fabric" / "estate.json"))
-
-
-def load_contracts(path: Path) -> EstateContracts:
-    """Load declared contracts. Accepts a full estate file or a contracts-only file."""
-    raw = json.loads(_read(path))
-    return EstateContracts.model_validate(
-        {k: raw.get(k, []) for k in ("external_sources", "data_products", "dependencies", "slas")}
-    )
 
 
 def load_scenario(fixtures_dir: Path, name: str) -> ScenarioFixture:

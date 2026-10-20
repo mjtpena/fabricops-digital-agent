@@ -16,9 +16,9 @@ import pytest
 from orqentis.bootstrap import build_container
 from orqentis.config.clock import FixedClock
 from orqentis.config.settings import FabricMode, Settings
+from orqentis.contracts import EstateContracts
 from orqentis.domain.confidence import ConfidenceLevel
 from orqentis.domain.incidents import IncidentStatus
-from orqentis.fabric.fixtures import EstateContracts
 from orqentis.fabric.rest.auth import FABRIC_SCOPE
 from orqentis.fabric.rest.client import RestFabricClient
 from tests.conftest import OPERATOR, REPO

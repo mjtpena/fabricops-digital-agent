@@ -40,10 +40,24 @@ grants and for checking them with `POST /telemetry/collect` (`collector_errors` 
   * `managed_identity`: `ManagedIdentityCredential` (optionally a specific client id).
   * `workload_identity`: `WorkloadIdentityCredential` (AKS / federated credentials).
   * `service_principal`: `EnvironmentCredential`, which reads `AZURE_CLIENT_*` from the runtime
-    environment or a secret store. Never put these in the repo.
+    environment or a secret store. Never put these in the repo. This mode exists for a Fabric tenant that
+    is a different Entra tenant from the Azure tenant (a managed identity cannot be granted access
+    there). In Azure the secret or the PEM certificate is a **Key Vault reference** that Container Apps
+    resolves with the reader managed identity (`infra/bicep`, ADR-0014): it is never a Bicep parameter,
+    output or CI variable, and a certificate's private key is mounted as a read-only secret file, not on
+    the data share. The app refuses to start, naming the missing variable names (never values), if the
+    inputs are incomplete or ambiguous. The LLM credential stays a managed identity
+    (`ORQENTIS_LLM_AUTH_MODE=managed_identity`), so the foreign-tenant service principal never signs
+    Azure OpenAI calls. Grant that service principal workspace **Viewer** only, like the reader identity.
 * Fabric scope `https://api.fabric.microsoft.com/.default`; Power BI scope
-  `https://analysis.windows.net/powerbi/api/.default`. Tokens are cached in memory until five
-  minutes before expiry and are never logged.
+  `https://analysis.windows.net/powerbi/api/.default` (public cloud). Sovereign clouds replace them with
+  `ORQENTIS_FABRIC_SCOPE` / `ORQENTIS_POWERBI_SCOPE` and set the Entra authority with
+  `ORQENTIS_AUTHORITY_HOST` (an https host; passed to every credential that talks to Entra ID). Tokens are
+  cached in memory until five minutes before expiry and are never logged.
+* **Interactive administrator sign-in** exists in exactly one place: `orqentis contracts scaffold --scanner`
+  (a person at a terminal reads Power BI admin Scanner metadata to draft lineage). It is not an auth mode, it
+  is not reachable from the application, it refuses non-interactive use, and a test checks that the API
+  application never imports it. The application's own identities never hold Fabric admin rights.
 * The API authenticates callers with Container Apps / App Service built-in authentication
   (`ORQENTIS_API_AUTH_MODE=easy_auth`), which reads the `X-MS-CLIENT-PRINCIPAL` header. The
   container must only be reachable through that front end (internal ingress plus auth config in
@@ -56,6 +70,14 @@ grants and for checking them with `POST /telemetry/collect` (`collector_errors` 
   `.env.example` contains no secrets.
 * The Application Insights connection string is a Container App secret.
 * The LLM uses Entra ID, not API keys.
+* The contracts file holds declarations, not credentials. Its validation and loading errors name
+  paths, ids and positions and never echo values from the file. `contracts scaffold` redacts and
+  sanitises what it reads from Fabric (names, data source descriptions) and drops credentials, user info
+  and query strings from data source URLs.
+* **A declared environment is a trust decision.** Declaring a PROD workspace as DEV lowers incident
+  severity and stops production-only policy rules (`POL-002`, `POL-020`) from matching it. Review changes to
+  `environments` like code, and use `orqentis contracts validate --strict` in CI. The code-level invariant is
+  unaffected: no mutation is ever auto-allowed in any environment.
 
 ## 4. Redaction
 

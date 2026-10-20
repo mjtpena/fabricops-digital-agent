@@ -164,9 +164,19 @@ deterministic reasoner takes over, and the decision records the fallback.
 
 ```bash
 ORQENTIS_FABRIC_MODE=rest
-ORQENTIS_CONTRACTS_PATH=contracts/estate.json   # declared sources, dependencies, data products, SLAs
+ORQENTIS_CONTRACTS_PATH=contracts/estate.json   # environments, sources, dependencies, data products, SLAs
 ORQENTIS_AUTH_MODE=managed_identity             # or default / workload_identity / service_principal
 ```
+
+The contracts file is drafted, checked and reviewed with tools, not written from scratch:
+`orqentis contracts scaffold` drafts it from a read-only listing (environments inferred from names and marked
+for review, `TRIGGERS` edges from observed pipeline runs, placeholders for owners and SLAs),
+`orqentis contracts validate` checks it (schema, references, time zones, with line numbers), and
+`schemas/contracts.schema.json` gives editors completion. A workspace's **environment** can be declared by id
+or name pattern and then overrides the name-based guess, which drives incident severity and policy. A Fabric
+tenant in another Entra tenant is reached with a service principal whose secret is a Key Vault reference,
+and sovereign clouds are configuration (`ORQENTIS_AUTHORITY_HOST` and the token scopes). See
+[Development](docs/development.md#contracts-workflow) and the [Bicep guide](infra/bicep/README.md).
 
 The operating identity needs read permissions only (see [docs/security.md](docs/security.md)).
 Fabric has no public API for capacity utilisation or Delta schema history, so those signals arrive
@@ -223,7 +233,9 @@ runbooks/         version-controlled Markdown/YAML runbooks
 fixtures/         synthetic estate, scenario telemetry, incident history
 tests/            unit, integration, scenarios (incl. critical security tests)
 docs/             architecture, security, product, threat model, development, ADRs
-infra/bicep/      Azure deployment (Container Apps, managed identities, App Insights)
+infra/bicep/      Azure deployment (Container Apps, managed identities, App Insights, Key Vault references)
+contracts/        example contracts file and catalog (orqentis contracts validate)
+schemas/          JSON Schema of the contracts file (generated from the model)
 ```
 
 ## Documentation

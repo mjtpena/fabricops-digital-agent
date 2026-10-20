@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, JsonValue, model_validator
 
 from orqentis.domain.common import DomainModel, Environment, ItemType, Metadata
 
@@ -126,3 +126,42 @@ class DataProduct(DomainModel):
     item_type: Literal[ItemType.DATA_PRODUCT] = ItemType.DATA_PRODUCT
     source: str = "declared"
     metadata: Metadata = Field(default_factory=dict)
+
+
+_ENVIRONMENT_SELECTOR_SCHEMA: dict[str, JsonValue] = {
+    # Exactly one selector is present (a null value does not count as present).
+    "oneOf": [
+        {"required": [key], "properties": {key: {"type": "string"}}}
+        for key in ("workspace_id", "workspace_name_pattern", "item_id")
+    ]
+}
+
+
+class EnvironmentDeclaration(DomainModel):
+    """A declared environment that takes precedence over inference from names.
+
+    Exactly one selector identifies what is classified: a workspace by ``workspace_id``, workspaces by
+    ``workspace_name_pattern`` (``*`` and ``?`` wildcards, case-insensitive; every other character is
+    literal, so ``Sales [PROD]`` matches that name exactly) or one item by ``item_id``. Items inherit the
+    environment of their workspace unless an ``item_id`` declaration says otherwise.
+
+    ``inferred`` marks a draft entry that ``orqentis contracts scaffold`` pre-filled from naming
+    conventions: it is applied like any other declaration, but ``contracts validate`` warns until a human
+    reviews it and clears the flag.
+    """
+
+    model_config = ConfigDict(json_schema_extra=_ENVIRONMENT_SELECTOR_SCHEMA)  # merged with DomainModel's
+
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    workspace_name_pattern: str | None = Field(default=None, min_length=1, max_length=128)
+    item_id: str | None = Field(default=None, min_length=1, max_length=128)
+    environment: Environment
+    inferred: bool = False
+    note: str | None = Field(default=None, max_length=300)
+
+    @model_validator(mode="after")
+    def _exactly_one_selector(self) -> Self:
+        selectors = [s for s in (self.workspace_id, self.workspace_name_pattern, self.item_id) if s is not None]
+        if len(selectors) != 1:
+            raise ValueError("declare exactly one of workspace_id, workspace_name_pattern or item_id")
+        return self

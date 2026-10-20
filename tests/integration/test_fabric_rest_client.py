@@ -16,6 +16,7 @@ from azure.core.exceptions import ClientAuthenticationError
 
 from orqentis.config.clock import FixedClock
 from orqentis.config.settings import AuthMode, Settings
+from orqentis.contracts import EstateContracts
 from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.estate import GenericItem, Lakehouse, Notebook, Pipeline, Report, SemanticModel, Warehouse
 from orqentis.domain.runs import RunStatus
@@ -28,7 +29,6 @@ from orqentis.fabric.errors import (
     FabricRateLimitedError,
     FabricUnavailableError,
 )
-from orqentis.fabric.fixtures import EstateContracts
 from orqentis.fabric.ports import FabricClient
 from orqentis.fabric.rest.auth import (
     FABRIC_SCOPE,

@@ -30,6 +30,9 @@ python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev,llm]"
 | `orqentis scenarios` | List synthetic scenarios |
 | `orqentis runbooks` | Validate and list runbooks (non-zero exit on invalid runbooks) |
 | `orqentis audit [--data-dir DIR]` | Verify the audit hash chain |
+| `orqentis contracts validate PATH [--catalog FILE] [--tenant-id ID] [--strict]` | Check a contracts file: JSON syntax, schema, duplicate ids and edges, references, time zones; with a catalog also that every referenced workspace and item exists. One `file:line:column: error: /pointer: message` per problem; non-zero exit on errors (and on warnings with `--strict`) |
+| `orqentis contracts scaffold --output FILE [--catalog-output FILE] [--workspace ID_OR_NAME]... [--scanner]` | Draft a contracts file from a live **read-only** listing of the Fabric tenant (see below). A draft for human review, never applied |
+| `orqentis contracts schema [--output FILE \| --check FILE]` | Print, write or check the JSON Schema of the contracts file |
 
 Demo artefacts are written to `var/demo/`:
 
@@ -86,9 +89,13 @@ make serve
 curl -X POST localhost:8000/telemetry/collect -H 'X-Orqentis-User: me@contoso.com'
 ```
 
-The contracts file declares what Fabric cannot tell you: external sources, dependencies, data
-products and SLAs. Its shape matches the corresponding sections of
-`fixtures/fabric/estate.json` (`external_sources`, `data_products`, `dependencies`, `slas`).
+The contracts file declares what Fabric cannot tell you: which environment a workspace is, external
+sources, dependencies, data products and SLAs. Its shape is described by
+[`schemas/contracts.schema.json`](../schemas/contracts.schema.json) and matches the corresponding sections
+of `fixtures/fabric/estate.json` (`external_sources`, `data_products`, `dependencies`, `slas`).
+[`contracts/estate.example.json`](../contracts/estate.example.json) is a small worked example. If the file
+is missing or invalid, startup fails with one error that names the path and every violation, so run
+`orqentis contracts validate` before you deploy it (see *Contracts workflow*).
 Capacity utilisation and Delta schema changes have no public REST API. Until the Eventhouse
 collectors arrive (milestone 9), the capacity tool reports `CAPABILITY_UNAVAILABLE`, the
 investigation continues, and the missing evidence lowers confidence.
@@ -97,17 +104,113 @@ Tool calls have a 30s timeout and the HTTP client retries up to `ORQENTIS_HTTP_M
 honouring `Retry-After` (capped at 60s). When the API is heavily throttled, lower the retries or
 raise the timeout so that retries are not cut off by the tool timeout.
 
+### Other clouds and tenants
+
+* **Sovereign clouds.** `ORQENTIS_AUTHORITY_HOST` (an https host, for example
+  `https://login.microsoftonline.us`) is passed to every azure-identity credential that talks to Entra ID,
+  and `ORQENTIS_FABRIC_SCOPE` / `ORQENTIS_POWERBI_SCOPE` replace the public-cloud token scopes.
+  `ORQENTIS_FABRIC_API_BASE_URL` / `ORQENTIS_POWERBI_API_BASE_URL` point at the cloud's APIs. Unset means the
+  public cloud. The endpoint sets Microsoft documents for Power BI (public, US Government GCC / GCC High / DoD,
+  China) are in [`infra/bicep/README.md`](../infra/bicep/README.md#sovereign-clouds); Fabric availability and
+  endpoints differ by cloud, so check them for yours. Nothing was exercised against a live sovereign cloud.
+* **A Fabric tenant in another Entra tenant.** Use `ORQENTIS_AUTH_MODE=service_principal` with
+  `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and one of `AZURE_CLIENT_SECRET` / `AZURE_CLIENT_CERTIFICATE_PATH` (a PEM
+  file) taken from a secret store, and `ORQENTIS_LLM_AUTH_MODE=managed_identity` so Azure OpenAI keeps using
+  the managed identity. The app refuses to start, naming the missing variables, if the inputs are incomplete.
+  The Bicep side (Key Vault references) is in the *Cross-tenant Fabric access* section of the Bicep README.
+* **Time zone.** `ORQENTIS_DEFAULT_TIMEZONE` must be an IANA zone; an unknown zone fails at startup.
+
+## Contracts workflow
+
+The contracts file is reviewed like code. Tools draft and check it; a person decides what is true.
+
+1. **Draft** from a read-only listing. This reads workspaces, items, recent pipeline runs and their
+   activity runs through the same read-only Fabric client the app uses, and writes two files:
+
+   ```bash
+   export ORQENTIS_TENANT_ID=<fabric-tenant-id>      # and sign in as a reader, e.g. `az login`
+   orqentis contracts scaffold --output contracts/estate.json --catalog-output contracts/catalog.json
+   ```
+
+   The draft contains:
+
+   | Section | What is drafted | How to treat it |
+   |---|---|---|
+   | `environments` | One entry per workspace, from its name (`Sales [PROD]` is PROD), each marked `"inferred": true`. A name with no environment becomes `UNKNOWN` | Confirm each one, fix wrong ones, then delete `"inferred"` |
+   | `dependencies` | `TRIGGERS` edges (notebook or pipeline) and `REFRESHES` edges (semantic model) observed in the `input` of recent pipeline activity runs (`--max-runs`, default 5 per pipeline) | Real observations, but only of what ran recently; add the rest |
+   | `external_sources`, `data_products`, `slas` | **Placeholders** marked `"metadata": {"draft": true}`: `TODO` owners, one data product per workspace holding a lakehouse or warehouse, a 06:00 deadline | Fill in or delete, then remove `draft` |
+
+   Lakehouse and warehouse targets of activities (a copy activity may read or write them) are *not*
+   turned into edges; the command reports how many, so add `READS_FROM` / `WRITES_TO` by hand. The command
+   refuses to overwrite existing files without `--force`, and `--workspace` limits the listing.
+
+   **Lineage from the admin Scanner API (optional, interactive, administrators only).** `--scanner` adds
+   report to semantic-model, semantic-model to upstream-model and semantic-model to data-source edges from the
+   Power BI admin Scanner API (`/admin/workspaces/getInfo`, `scanStatus`, `scanResult`). It needs a signed-in
+   Fabric administrator: it opens a browser sign-in (`--scanner-client-id` names your own public-client app
+   registration if the default one is not allowed), and it refuses to run without a terminal. It reads
+   metadata only and is never used by the running application. Data source descriptions drop credentials,
+   user info and query strings.
+
+2. **Review and edit** the draft in a pull request. Add `"$schema": "../schemas/contracts.schema.json"` (the
+   path relative to your file) and an editor with JSON Schema support completes and checks the file as you type.
+   Environments can be declared by workspace id, by name pattern or for one item:
+
+   ```json
+   "environments": [
+     {"workspace_id": "6f1c…", "environment": "PROD"},
+     {"workspace_name_pattern": "Finance *", "environment": "PROD"},
+     {"item_id": "9ab2…", "environment": "DEV", "note": "experimental notebook inside a PROD workspace"}
+   ]
+   ```
+
+   A declaration always beats the name. Precedence for a workspace is its id, then the first matching pattern
+   in file order, then inference from the name; an item takes its workspace's environment unless an `item_id`
+   entry says otherwise. Patterns are case-insensitive; `*` matches any run of characters, `?` one character,
+   everything else (including `[` and `]`) is literal. The environment drives incident severity (PROD is HIGH)
+   and policy rules such as `POL-002`, so declaring a PROD workspace as DEV makes its incidents less severe
+   and its production-only policy rules stop applying. Review those changes closely.
+
+3. **Validate**:
+
+   ```bash
+   orqentis contracts validate contracts/estate.json --catalog contracts/catalog.json
+   ```
+
+   ```text
+   contracts/estate.json:14:7: error: /dependencies/3/target_item_id: '3f9c…' is not a declared source or data product, nor an item in the catalog
+   contracts/estate.json:41:9: error: /slas/0/timezone: not a valid IANA time zone (for example Australia/Sydney)
+   contracts/estate.json: 2 error(s), 5 warning(s)
+   ```
+
+   Errors (non-zero exit): invalid JSON, a field that does not match the schema, duplicate ids or edges, an
+   id used by both a source and a data product, an edge from an item to itself, an SLA for an undeclared data
+   product or with an invalid time zone or weekdays, and, against a catalog, any reference to a workspace or
+   item that does not exist. Warnings: unreviewed `inferred` environments and `draft` placeholders, a
+   declared `UNKNOWN`, a name pattern matching no workspace, and references that could not be checked
+   because no catalog was given. Schema errors are reported first; the consistency checks run once the
+   schema passes. A full estate file (`fixtures/fabric/estate.json`) is its own catalog.
+   `--strict` turns warnings into failures, which is what a CI check on the reviewed file should use.
+   Refresh the catalog with `scaffold --catalog-output` whenever the estate changes.
+
+4. **Deploy** the file to `ORQENTIS_CONTRACTS_PATH` (for Azure, see the Bicep README, step 4).
+
+The JSON Schema is generated from the model: after changing `EstateContracts` run
+`orqentis contracts schema --output schemas/contracts.schema.json`; `orqentis contracts schema --check
+schemas/contracts.schema.json` (and a test) fails when the committed file is out of date.
+
 ## Testing
 
 | Suite | Contents |
 |---|---|
 | `tests/unit` | Dependency traversal and blast radius, classification and taxonomy extension, runbook loading and matching, confidence, policy decisions, approval enforcement, SLA, deployment comparison, audit chain, redaction and untrusted content, tool registry, detection, incident lifecycle |
-| `tests/integration` | Storage adapters; REST API; Microsoft Agent Framework investigator with a scripted model (grounding, injection, fallback, budget); Fabric REST adapter against mocked HTTP (auth scopes, retries, pagination, error mapping, status mapping); REST-mode composition end to end |
+| `tests/integration` | Storage adapters; REST API; Microsoft Agent Framework investigator with a scripted model (grounding, injection, fallback, budget); Fabric REST adapter against mocked HTTP (auth scopes, retries, pagination, error mapping, status mapping); REST-mode composition end to end; declared environments through severity and policy; `contracts scaffold` against recorded responses (`tests/data/recorded`, replayed by `tests/support/recorded_transport.py`, which refuses every write) |
 | `tests/scenarios` | Schema drift, authentication failure, capacity pressure, unknown failure; critical security boundary (`-m security`); CLI demo |
 
 `tests/support/scripted_chat_client.py` plays the model's side of an Agent Framework
 conversation, so the real `Agent`, function invocation and telemetry layers run without an
-endpoint. Tests clear `ORQENTIS_*` environment variables and ignore `.env`.
+endpoint. `tests/support/fake_entra.py` plays Microsoft Entra ID for real azure-identity
+credentials, which is how the tests prove where token requests go and which scope they ask for. Tests clear `ORQENTIS_*` environment variables and ignore `.env`.
 
 ## Extending
 

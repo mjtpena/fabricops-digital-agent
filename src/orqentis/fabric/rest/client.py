@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -26,6 +25,7 @@ import httpx
 
 from orqentis.config.clock import Clock, SystemClock
 from orqentis.config.settings import Settings
+from orqentis.contracts.model import EstateContracts
 from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.deployment import DeploymentState
 from orqentis.domain.estate import (
@@ -48,19 +48,15 @@ from orqentis.fabric.errors import (
     FabricError,
     FabricNotFoundError,
 )
-from orqentis.fabric.fixtures import EstateContracts
 from orqentis.fabric.ports import FabricClient
 from orqentis.fabric.rest.auth import FABRIC_SCOPE, POWERBI_SCOPE, TokenProvider
 from orqentis.fabric.rest.http import FabricHttp, JsonObject
 from orqentis.observability.logging import get_logger
+from orqentis.topology.environment import EnvironmentResolver, EnvironmentSource, infer_environment, stage_environment
 
 _log = get_logger(__name__)
 
 # ------------------------------------------------------------------------------------ vocabularies
-_PROD_TOKENS = frozenset({"prod", "production", "prd"})
-_TEST_TOKENS = frozenset({"test", "testing", "tst", "uat", "qa", "sit", "preprod", "staging", "stg"})
-_DEV_TOKENS = frozenset({"dev", "development", "develop"})
-
 _JOB_STATUS = {
     "NotStarted": RunStatus.NOT_STARTED,
     "InProgress": RunStatus.IN_PROGRESS,
@@ -109,41 +105,6 @@ _MAX_ACTIVITY_PAGES = 50
 
 
 # ----------------------------------------------------------------------------------------- helpers
-def infer_environment(name: str | None) -> Environment:
-    """Environment from naming conventions such as ``Sales [PROD]``, ``sales-prod`` or ``Sales UAT``.
-
-    The last recognised token wins (suffix convention). ``Non-Prod`` / ``Pre-Prod`` are not PROD.
-    """
-    if not name:
-        return Environment.UNKNOWN
-    tokens: list[str] = []
-    for token in re.findall(r"[a-z0-9]+", name.lower()):
-        if tokens and tokens[-1] in ("non", "pre") and token in _PROD_TOKENS:
-            tokens[-1] += "prod"
-        else:
-            tokens.append(token)
-    for token in reversed(tokens):
-        if token in _PROD_TOKENS:
-            return Environment.PROD
-        if token in _TEST_TOKENS:
-            return Environment.TEST
-        if token in _DEV_TOKENS:
-            return Environment.DEV
-    return Environment.UNKNOWN
-
-
-def stage_environment(name: str | None, index: int, count: int) -> Environment:
-    """Stage environment: an explicit name wins, else first=DEV, last=PROD, anything between=TEST."""
-    named = infer_environment(name)
-    if named is not Environment.UNKNOWN or count <= 1:
-        return named
-    if index == 0:
-        return Environment.DEV
-    if index == count - 1:
-        return Environment.PROD
-    return Environment.TEST
-
-
 def parse_datetime(value: Any) -> datetime | None:
     """Fabric/Power BI timestamps (``Z`` suffix, 7 fractional digits, or naive UTC) as aware UTC datetimes."""
     if not isinstance(value, str) or not value.strip():
@@ -272,12 +233,13 @@ def _segment(value: str) -> str:
 
 @dataclass(frozen=True)
 class _Context:
-    """What every service needs: the HTTP client, the API base URLs and the tenant id."""
+    """What every service needs: the HTTP client, the API base URLs, the tenant id and the environments."""
 
     http: FabricHttp
     fabric_base_url: str
     powerbi_base_url: str
     tenant_id: str
+    environments: EnvironmentResolver
 
     def fabric(self, *segments: str) -> str:
         return "/".join((self.fabric_base_url.rstrip("/"), *(_segment(s) for s in segments)))
@@ -294,14 +256,21 @@ class RestWorkspaceService:
 
     def _map(self, raw: JsonObject) -> Workspace:
         display_name = _required(raw, "displayName", "workspace")
+        workspace_id = _required(raw, "id", "workspace")
+        resolved = self._ctx.environments.resolve_workspace(workspace_id, display_name)  # declared > inferred
         workspace = Workspace(
-            id=_required(raw, "id", "workspace"),
+            id=workspace_id,
             tenant_id=self._ctx.tenant_id,
             display_name=display_name,
             capacity_id=_clean(raw.get("capacityId")),
-            environment=infer_environment(display_name),
+            environment=resolved.environment,
             description=_clean(raw.get("description")),
-            metadata=_compact(workspace_type=_clean(raw.get("type")), domain_id=_clean(raw.get("domainId"))),
+            metadata=_compact(
+                workspace_type=_clean(raw.get("type")),
+                domain_id=_clean(raw.get("domainId")),
+                # Provenance is recorded only when a contracts declaration decided the environment.
+                environment_source=None if resolved.source is EnvironmentSource.INFERRED else resolved.source.value,
+            ),
         )
         self._environments[workspace.id] = workspace.environment
         return workspace
@@ -335,13 +304,14 @@ class RestItemService:
         tags = [
             name for tag in raw.get("tags") or [] if isinstance(tag, dict) and (name := _clean(tag.get("displayName")))
         ]
+        item_id = _required(raw, "id", "item")
         fields: dict[str, Any] = {
-            "id": _required(raw, "id", "item"),
+            "id": item_id,
             "tenant_id": self._ctx.tenant_id,
             "workspace_id": _clean(raw.get("workspaceId")) or workspace_id,
             "display_name": _required(raw, "displayName", "item"),
             "description": _clean(raw.get("description")),
-            "environment": environment,
+            "environment": self._ctx.environments.item(item_id, environment),  # workspace's unless declared
             "tags": tags,
             "metadata": _compact(folder_id=_clean(raw.get("folderId"))),
         }
@@ -722,7 +692,9 @@ class RestFabricClient:
         self._http = FabricHttp(
             token_provider, timeout=timeout, max_retries=max_retries, transport=transport, sleep=sleep
         )
-        ctx = _Context(self._http, fabric_base_url, powerbi_base_url, tenant_id)
+        ctx = _Context(
+            self._http, fabric_base_url, powerbi_base_url, tenant_id, EnvironmentResolver(contracts.environments)
+        )
         self._workspaces = RestWorkspaceService(ctx)
         self._items = RestItemService(ctx, self._workspaces)
         self._jobs = RestJobService(ctx, self._workspaces)

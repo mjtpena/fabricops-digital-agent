@@ -54,7 +54,8 @@ sequenceDiagram
 |---|---|---|---|---|
 | `FabricClient` + services (Workspace, Item, Job, Pipeline, SemanticModel, Capacity, Deployment, Dependency) | `fabric.ports` | `MockFabricClient` (synthetic estate) | `RestFabricClient` (Fabric + Power BI REST, read-only) | Both implemented |
 | `FabricWriteClient` | `fabric.ports` | `DisabledFabricWriteClient` (default), `MockFabricWriteClient` | REST write adapter | Write adapter deliberately not built (MVP is read-only) |
-| `TokenProvider` | `fabric.rest.auth` | `AzureIdentityTokenProvider` over `DefaultAzureCredential` / managed / workload identity / environment | same | Implemented |
+| `TokenProvider` | `fabric.rest.auth` | `AzureIdentityTokenProvider` over `DefaultAzureCredential` / managed / workload identity / environment, with the configured authority host and scopes (sovereign clouds) | same | Implemented |
+| `LineageScanner` | `contracts.lineage` | none in the runtime | `PowerBiScanner` (Power BI admin Scanner API), used only by `orqentis contracts scaffold --scanner` under an interactive administrator sign-in | Implemented (CLI only) |
 | `EventStore` | `storage.event_store` | `LocalEventStore` (SQLite) | `FabricEventhouseStore` (KQL database) | Local implemented; Eventhouse is milestone 9 |
 | `EvidenceStore` | `storage.evidence_store` | `LocalEvidenceStore` (filesystem, immutable) | OneLake (ADLS Gen2 API) | Local implemented |
 | `IncidentRepository` | `storage.incidents` | `SqliteIncidentRepository` | Eventhouse / Azure SQL (decision open, ADR-0003) | Local implemented |
@@ -65,6 +66,18 @@ sequenceDiagram
 | `Collector` | `telemetry.collectors` | pipeline runs, refreshes, capacity, static replay | Eventhouse-backed capacity / schema collectors | Implemented for REST-available data |
 | `DetectionRule` | `incidents.detection` | `PipelineFailureRule` | more rules per secondary scenario | Implemented for the primary scenario |
 | `InvestigationWorkflow` | `incidents.workflows.base` | `PipelineFailureWorkflow` | refresh failure, SLA, drift workflows | Implemented for the primary scenario |
+
+### Declared contracts and environments
+
+What Fabric cannot tell FabricOps is declared in a version-controlled **contracts file** (`contracts/`,
+schema in `schemas/contracts.schema.json`, ADR-0014): environments, external sources, data products,
+dependencies and SLAs. `load_contracts` validates it and raises a typed `ContractsError` that names the
+path and every violation; `orqentis contracts validate | scaffold | schema` author and check it
+offline. The **environment** of a workspace is its declaration (by id, then by name pattern) or, failing
+that, an inference from its name (`topology/environment.py`); items inherit it unless declared. The REST
+adapter resolves it once, so detection severity and the policy engine see the same value. Scaffold drafts a
+contracts file through the read-only `FabricClient` port; the draft is reviewed and never applied
+automatically.
 
 ## 4. Domain model
 

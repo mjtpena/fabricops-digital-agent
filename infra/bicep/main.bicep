@@ -118,8 +118,50 @@ param entraClientId string
 @description('Microsoft Entra tenant id that issues tokens for the API. Defaults to the deployment tenant.')
 param entraTenantId string = tenant().tenantId
 
-@description('ORQENTIS_TENANT_ID: tenant id of the monitored Fabric estate (required in rest mode; stamped on every record). Defaults to the deployment tenant.')
+@description('ORQENTIS_TENANT_ID: tenant id of the monitored Fabric estate (required in rest mode; stamped on every record). Defaults to the deployment tenant. Set it to the Fabric tenant when that is a different Entra tenant (see fabricAuthMode).')
 param fabricTenantId string = tenant().tenantId
+
+@description('ORQENTIS_DEFAULT_TIMEZONE: IANA time zone used for time-of-day reasoning and report times (for example Europe/London). Validated when the app starts; the default keeps the previous behaviour.')
+@minLength(1)
+param defaultTimezone string = 'Australia/Sydney'
+
+// ------------------------------------------------------------------------------------------------- fabric identity
+
+@description('ORQENTIS_AUTH_MODE for the Fabric and Power BI APIs. managed_identity: the reader managed identity (the Fabric tenant is the Azure tenant). service_principal: an app registration in the Fabric tenant, for a Fabric tenant other than the one hosting this deployment (a managed identity cannot be granted access across tenants). The credential comes from Key Vault, never from the parameters.')
+@allowed([
+  'managed_identity'
+  'service_principal'
+])
+param fabricAuthMode string = 'managed_identity'
+
+@description('service_principal mode: application (client) id of the service principal in the Fabric tenant (AZURE_CLIENT_ID). Not a secret.')
+param fabricServicePrincipalClientId string = ''
+
+@description('service_principal mode, option 1: URI of the Key Vault SECRET holding the client secret, for example https://<vault>.vault.azure.net/secrets/fabric-sp-secret (no version, so rotations are picked up). Resolved by Container Apps with the reader identity. Set this or the certificate URI, not both.')
+param fabricServicePrincipalSecretUri string = ''
+
+@description('service_principal mode, option 2: URI of the Key Vault secret that holds the client certificate AND private key as PEM (create the Key Vault certificate with content type application/x-pem-file; its secret is then the PEM). Mounted read-only at /mnt/fabric-sp. Set this or the secret URI, not both.')
+param fabricServicePrincipalCertificateUri string = ''
+
+@description('Optional: full resource id of the Key Vault named in the URIs above. When set, the reader identity is granted "Key Vault Secrets User" on it (the vault must use Azure RBAC; it may be in another resource group or subscription). Leave empty if access is granted some other way.')
+param keyVaultResourceId string = ''
+
+// ------------------------------------------------------------------------------------------------- sovereign clouds
+
+@description('ORQENTIS_AUTHORITY_HOST: Microsoft Entra authority host of a sovereign cloud, for example https://login.microsoftonline.us (US Government) or https://login.chinacloudapi.cn (China). Empty: the public cloud default.')
+param authorityHost string = ''
+
+@description('ORQENTIS_FABRIC_API_BASE_URL. Empty: https://api.fabric.microsoft.com/v1 (public cloud).')
+param fabricApiBaseUrl string = ''
+
+@description('ORQENTIS_POWERBI_API_BASE_URL. Empty: https://api.powerbi.com/v1.0/myorg (public cloud).')
+param powerbiApiBaseUrl string = ''
+
+@description('ORQENTIS_FABRIC_SCOPE: token scope of the Fabric API, ending in /.default. Empty: the public cloud scope.')
+param fabricScope string = ''
+
+@description('ORQENTIS_POWERBI_SCOPE: token scope of the Power BI API, ending in /.default. Empty: the public cloud scope.')
+param powerbiScope string = ''
 
 // ------------------------------------------------------------------------------------------------- data + logs
 
@@ -173,15 +215,60 @@ var openAiIdSegments = split(
 
 var appInsightsSecretName = 'appinsights-connection-string'
 
+// Service-principal mode for a Fabric tenant other than this deployment's: the credential is a Key Vault
+// reference that Container Apps resolves with the reader identity. Nothing secret is a parameter or an output.
+var servicePrincipalMode = fabricAuthMode == 'service_principal'
+var useClientSecret = servicePrincipalMode && !empty(fabricServicePrincipalSecretUri)
+var useClientCertificate = servicePrincipalMode && !empty(fabricServicePrincipalCertificateUri)
+var fabricSpSecretName = 'fabric-sp-client-secret'
+var fabricSpCertificateName = 'fabric-sp-certificate'
+var fabricSpCertificateMountPath = '/mnt/fabric-sp'
+var fabricSpCertificateFile = 'service-principal.pem'
+
+// Placeholder keeps the indexes valid when keyVaultResourceId is empty (the module is then skipped).
+var keyVaultIdSegments = split(
+  empty(keyVaultResourceId)
+    ? '/subscriptions/${subscription().subscriptionId}/resourceGroups/${resourceGroup().name}/providers/Microsoft.KeyVault/vaults/none'
+    : keyVaultResourceId,
+  '/'
+)
+
+var keyVaultSecrets = concat(
+  useClientSecret
+    ? [
+        {
+          name: fabricSpSecretName
+          keyVaultUrl: fabricServicePrincipalSecretUri
+          identity: readerIdentity.id
+        }
+      ]
+    : [],
+  useClientCertificate
+    ? [
+        {
+          name: fabricSpCertificateName
+          keyVaultUrl: fabricServicePrincipalCertificateUri
+          identity: readerIdentity.id
+        }
+      ]
+    : []
+)
+
 var appEnv = concat(
   [
     { name: 'ORQENTIS_DEPLOYMENT_ENVIRONMENT', value: deploymentEnvironment }
     { name: 'ORQENTIS_TENANT_ID', value: fabricTenantId }
     { name: 'ORQENTIS_API_AUTH_MODE', value: 'easy_auth' }
-    { name: 'ORQENTIS_AUTH_MODE', value: 'managed_identity' }
+    { name: 'ORQENTIS_AUTH_MODE', value: fabricAuthMode }
     { name: 'ORQENTIS_MANAGED_IDENTITY_CLIENT_ID', value: readerIdentity.properties.clientId }
-    // azure-identity reads AZURE_CLIENT_ID; with two identities attached it must name the reader.
-    { name: 'AZURE_CLIENT_ID', value: readerIdentity.properties.clientId }
+    // azure-identity reads AZURE_CLIENT_ID; with two identities attached it must name the reader. In
+    // service_principal mode it names the service principal in the Fabric tenant instead (the reader is still
+    // named by ORQENTIS_MANAGED_IDENTITY_CLIENT_ID, which the LLM credential uses).
+    {
+      name: 'AZURE_CLIENT_ID'
+      value: servicePrincipalMode ? fabricServicePrincipalClientId : readerIdentity.properties.clientId
+    }
+    { name: 'ORQENTIS_DEFAULT_TIMEZONE', value: defaultTimezone }
     { name: 'ORQENTIS_FABRIC_MODE', value: fabricMode }
     { name: 'ORQENTIS_CONTRACTS_PATH', value: contractsPath }
     { name: 'ORQENTIS_ENABLE_WRITE_ACTIONS', value: enableWriteActions ? 'true' : 'false' }
@@ -191,7 +278,24 @@ var appEnv = concat(
     { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: appInsightsSecretName }
   ],
   empty(azureOpenAiEndpoint) ? [] : [{ name: 'ORQENTIS_AZURE_OPENAI_ENDPOINT', value: azureOpenAiEndpoint }],
-  empty(azureOpenAiDeployment) ? [] : [{ name: 'ORQENTIS_AZURE_OPENAI_DEPLOYMENT', value: azureOpenAiDeployment }]
+  empty(azureOpenAiDeployment) ? [] : [{ name: 'ORQENTIS_AZURE_OPENAI_DEPLOYMENT', value: azureOpenAiDeployment }],
+  empty(authorityHost) ? [] : [{ name: 'ORQENTIS_AUTHORITY_HOST', value: authorityHost }],
+  empty(fabricApiBaseUrl) ? [] : [{ name: 'ORQENTIS_FABRIC_API_BASE_URL', value: fabricApiBaseUrl }],
+  empty(powerbiApiBaseUrl) ? [] : [{ name: 'ORQENTIS_POWERBI_API_BASE_URL', value: powerbiApiBaseUrl }],
+  empty(fabricScope) ? [] : [{ name: 'ORQENTIS_FABRIC_SCOPE', value: fabricScope }],
+  empty(powerbiScope) ? [] : [{ name: 'ORQENTIS_POWERBI_SCOPE', value: powerbiScope }],
+  // service_principal mode: the Fabric tenant, and the LLM keeps using the reader managed identity (Azure
+  // OpenAI lives in this tenant, not in the Fabric one).
+  servicePrincipalMode
+    ? [
+        { name: 'AZURE_TENANT_ID', value: fabricTenantId }
+        { name: 'ORQENTIS_LLM_AUTH_MODE', value: 'managed_identity' }
+      ]
+    : [],
+  useClientSecret ? [{ name: 'AZURE_CLIENT_SECRET', secretRef: fabricSpSecretName }] : [],
+  useClientCertificate
+    ? [{ name: 'AZURE_CLIENT_CERTIFICATE_PATH', value: '${fabricSpCertificateMountPath}/${fabricSpCertificateFile}' }]
+    : []
 )
 
 // ================================================================================================= observability
@@ -277,6 +381,15 @@ module readerOpenAiUser 'modules/openai-role.bicep' = if (!empty(azureOpenAiReso
   scope: resourceGroup(openAiIdSegments[2], openAiIdSegments[4])
   params: {
     accountName: openAiIdSegments[8]
+    principalId: readerIdentity.properties.principalId
+  }
+}
+
+module readerKeyVaultSecretsUser 'modules/keyvault-role.bicep' = if (!empty(keyVaultResourceId)) {
+  name: 'orqentis-keyvault-role-${uniqueString(keyVaultResourceId, readerIdentityName)}'
+  scope: resourceGroup(keyVaultIdSegments[2], keyVaultIdSegments[4])
+  params: {
+    vaultName: keyVaultIdSegments[8]
     principalId: readerIdentity.properties.principalId
   }
 }
@@ -406,12 +519,15 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               identity: readerIdentity.id
             }
           ]
-      secrets: [
-        {
-          name: appInsightsSecretName
-          value: appInsights.properties.ConnectionString
-        }
-      ]
+      secrets: concat(
+        [
+          {
+            name: appInsightsSecretName
+            value: appInsights.properties.ConnectionString
+          }
+        ],
+        keyVaultSecrets
+      )
     }
     template: {
       containers: [
@@ -460,12 +576,22 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               failureThreshold: 3
             }
           ]
-          volumeMounts: [
-            {
-              volumeName: 'orqentis-data'
-              mountPath: dataMountPath
-            }
-          ]
+          volumeMounts: concat(
+            [
+              {
+                volumeName: 'orqentis-data'
+                mountPath: dataMountPath
+              }
+            ],
+            useClientCertificate
+              ? [
+                  {
+                    volumeName: fabricSpCertificateName
+                    mountPath: fabricSpCertificateMountPath
+                  }
+                ]
+              : []
+          )
         }
       ]
       // SQLite (event store, state DB) and the hash-chained audit log allow a single writer only. Do not raise
@@ -474,18 +600,36 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         minReplicas: 1
         maxReplicas: 1
       }
-      volumes: [
-        {
-          name: 'orqentis-data'
-          storageType: 'AzureFile'
-          storageName: environmentStorage.name
-          mountOptions: dataMountOptions
-        }
-      ]
+      volumes: concat(
+        [
+          {
+            name: 'orqentis-data'
+            storageType: 'AzureFile'
+            storageName: environmentStorage.name
+            mountOptions: dataMountOptions
+          }
+        ],
+        useClientCertificate
+          ? [
+              {
+                // The Key Vault secret (PEM) as a read-only file; the private key never touches the share.
+                name: fabricSpCertificateName
+                storageType: 'Secret'
+                secrets: [
+                  {
+                    secretRef: fabricSpCertificateName
+                    path: fabricSpCertificateFile
+                  }
+                ]
+              }
+            ]
+          : []
+      )
     }
   }
   dependsOn: [
     readerAcrPull
+    readerKeyVaultSecretsUser
   ]
 }
 

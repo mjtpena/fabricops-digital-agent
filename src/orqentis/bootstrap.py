@@ -18,15 +18,10 @@ from orqentis.approvals.provider import LocalApprovalProvider
 from orqentis.approvals.service import ApprovalService
 from orqentis.config.clock import Clock, FixedClock, SystemClock
 from orqentis.config.settings import ClockMode, FabricMode, ReasonerKind, Settings
+from orqentis.contracts import ContractsNotConfiguredError, EstateContracts, load_contracts
+from orqentis.contracts.lineage import LineageScanner
 from orqentis.domain.incidents import Incident
-from orqentis.fabric.fixtures import (
-    EstateContracts,
-    ScenarioFixture,
-    load_contracts,
-    load_estate,
-    load_history,
-    load_scenario,
-)
+from orqentis.fabric.fixtures import ScenarioFixture, load_estate, load_history, load_scenario
 from orqentis.fabric.mock import MockFabricClient
 from orqentis.fabric.ports import FabricClient, FabricWriteClient
 from orqentis.fabric.write import DisabledFabricWriteClient, MockFabricWriteClient
@@ -146,13 +141,39 @@ async def _build_fabric(settings: Settings) -> tuple[FabricClient, EstateContrac
         scenario = load_scenario(settings.fixtures_dir, settings.scenario)
         return MockFabricClient(estate, scenario), estate, scenario
     if settings.contracts_path is None:
-        raise ValueError("ORQENTIS_CONTRACTS_PATH is required in rest mode (declared topology, data products, SLAs)")
-    from orqentis.fabric.rest.auth import AzureIdentityTokenProvider, build_async_credential
+        raise ContractsNotConfiguredError()
+    from orqentis.fabric.rest.auth import build_token_provider
     from orqentis.fabric.rest.client import RestFabricClient
 
-    contracts = load_contracts(settings.contracts_path)
-    token_provider = AzureIdentityTokenProvider(build_async_credential(settings))
-    return RestFabricClient.from_settings(settings, contracts, token_provider), contracts, None
+    contracts = load_contracts(settings.contracts_path)  # ContractsError names the path and every violation
+    return RestFabricClient.from_settings(settings, contracts, build_token_provider(settings)), contracts, None
+
+
+async def build_discovery_client(settings: Settings) -> FabricClient:
+    """A read-only REST client with *no* contracts, for ``orqentis contracts scaffold``.
+
+    With no contracts the client classifies environments by name inference only, which is what the scaffold
+    records as ``inferred``. It carries the same read-only port as the application's client.
+    """
+    from orqentis.fabric.rest.auth import build_token_provider
+    from orqentis.fabric.rest.client import RestFabricClient
+
+    return RestFabricClient.from_settings(settings, EstateContracts(), build_token_provider(settings))
+
+
+async def build_lineage_scanner(settings: Settings, *, client_id: str | None = None) -> LineageScanner:
+    """The Power BI admin Scanner, signed in interactively as a Fabric administrator.
+
+    Only ``orqentis contracts scaffold --scanner`` calls this. The application never does: there is no auth
+    mode that reaches it, and the scanner is not part of :class:`Container`.
+    """
+    from orqentis.fabric.rest.auth import InteractiveTokenProvider
+    from orqentis.fabric.rest.http import FabricHttp
+    from orqentis.fabric.rest.scanner import PowerBiScanner
+
+    tokens = InteractiveTokenProvider(settings, client_id=client_id)
+    http = FabricHttp(tokens, timeout=settings.http_timeout_seconds, max_retries=settings.http_max_retries)
+    return PowerBiScanner(http, settings.powerbi_api_base_url, on_close=tokens.close)
 
 
 async def build_container(
