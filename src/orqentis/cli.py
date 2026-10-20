@@ -301,6 +301,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         from orqentis.api.app import create_app
 
         settings = _settings()
+        try:
+            settings.check_bind_host(args.host)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         _observability(settings, stream_logs=True)
         uvicorn.run(create_app(settings), host=args.host, port=args.port, log_config=None)
         return 0

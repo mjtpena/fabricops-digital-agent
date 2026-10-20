@@ -1,6 +1,6 @@
 # ADR-0003: Local development stores first; Eventhouse and OneLake behind the same ports
 
-* Status: Accepted (Milestone 2)
+* Status: Accepted (Milestone 2). The production-storage question is decided by [ADR-0008](0008-production-storage.md)
 * Date: 2026-10-09
 
 ## Context

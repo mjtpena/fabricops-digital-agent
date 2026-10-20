@@ -189,6 +189,7 @@ def test_environment_selector_errors() -> None:
     assert errors_at(bad_env, "/environments/0/environment")
 
 
+@pytest.mark.security
 def test_violations_never_echo_values_from_the_file() -> None:
     document = example()
     document["slas"][0]["owner"] = "super-secret-owner@contoso.com"

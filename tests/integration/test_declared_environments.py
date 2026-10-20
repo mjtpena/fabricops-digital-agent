@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from orqentis.config.clock import FixedClock
 from orqentis.contracts import EstateContracts, load_contracts
@@ -183,6 +184,7 @@ async def test_incident_severity_follows_the_resolved_environment(tmp_path: Path
     assert inferred["pl-b"] is Severity.MEDIUM  # UNKNOWN
 
 
+@pytest.mark.security
 async def test_policy_pol_002_follows_the_resolved_environment(tmp_path: Path) -> None:
     policy = PolicyEngine.default(FixedClock(NOW))
     contracts = load_contracts(write_contracts(tmp_path))

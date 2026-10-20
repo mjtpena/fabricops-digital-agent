@@ -207,6 +207,7 @@ def test_default_credential_keeps_the_managed_identity_client_id_and_adds_the_au
 
 
 # -------------------------------------------------------------------- the LLM credential (cross-tenant)
+@pytest.mark.security
 def test_llm_credential_can_stay_a_managed_identity_while_fabric_uses_a_service_principal(
     recorders: dict[tuple[str, str], Recorder],
 ) -> None:
@@ -308,6 +309,7 @@ def test_service_principal_problems_name_variables_never_values() -> None:
     assert both == ["set exactly one of AZURE_CLIENT_SECRET and AZURE_CLIENT_CERTIFICATE_PATH, not both"]
 
 
+@pytest.mark.security
 def test_service_principal_mode_fails_fast_when_it_is_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_CLIENT_CERTIFICATE_PATH"):
         monkeypatch.delenv(name, raising=False)

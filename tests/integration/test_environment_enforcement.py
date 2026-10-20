@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from orqentis.config.clock import FixedClock
 from orqentis.contracts import EstateContracts
 from orqentis.domain.actions import PolicyEffect
@@ -37,6 +39,7 @@ async def load(contracts: EstateContracts) -> tuple[EstateCatalog, dict[str, Sev
 
 
 # ---------------------------------------------------------------- unreviewed drafts are never enforced
+@pytest.mark.security
 async def test_a_stale_scaffold_draft_cannot_pin_a_renamed_workspace_to_dev() -> None:
     # The draft said DEV when the workspace was called "Lab [DEV]"; it has since been renamed "Lab [PROD]".
     stale = EnvironmentDeclaration(workspace_id="ws-d", environment=DEV, inferred=True)
@@ -51,6 +54,7 @@ async def test_a_stale_scaffold_draft_cannot_pin_a_renamed_workspace_to_dev() ->
     assert "POL-002-deny-production-permissions" in decision.matched_rule_ids
 
 
+@pytest.mark.security
 async def test_an_unknown_declaration_cannot_mask_a_production_name() -> None:
     masking = EnvironmentDeclaration(workspace_name_pattern="Lab *", environment=UNKNOWN)
     catalog, severities = await load(contracts_with(masking))

@@ -9,6 +9,10 @@ updates:
     groups:
       base-image:
         patterns: ["*"]
+    # The base image tag (python 3.12) moves only by a deliberate change; digest refreshes of that tag still arrive.
+    ignore:
+      - dependency-name: "mcr.microsoft.com/azurelinux/base/python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: github-actions
     directory: /

@@ -139,6 +139,7 @@ async def test_scaffold_is_deterministic() -> None:
     assert first.contracts_json() == second.contracts_json()
 
 
+@pytest.mark.security
 async def test_scaffold_makes_no_write_calls() -> None:
     result, transport = await run_scaffold()
     assert transport.rejected == [] and transport.unexpected == []
@@ -164,6 +165,7 @@ async def test_the_recorded_transport_really_refuses_writes() -> None:
     await client.aclose()
 
 
+@pytest.mark.security
 async def test_the_recorded_transport_lets_only_post_through_to_the_read_only_endpoints() -> None:
     transport = RecordedTransport(allow_scanner=True)
     client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
@@ -460,6 +462,7 @@ def run_python(code: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, capture_output=True, encoding="utf-8", errors="replace", cwd=REPO, check=False)  # noqa: S603
 
 
+@pytest.mark.security
 def test_the_application_never_imports_the_scanner() -> None:
     code = (
         "import sys\n"
@@ -473,6 +476,7 @@ def test_the_application_never_imports_the_scanner() -> None:
     assert done.returncode == 0, done.stderr
 
 
+@pytest.mark.security
 def test_contracts_commands_load_only_when_a_contracts_command_runs() -> None:
     code = (
         "import sys\n"
@@ -486,6 +490,7 @@ def test_contracts_commands_load_only_when_a_contracts_command_runs() -> None:
     assert done.returncode == 0, done.stderr
 
 
+@pytest.mark.security
 def test_interactive_sign_in_is_not_an_auth_mode() -> None:
     assert {m.value for m in AuthMode} == {"default", "managed_identity", "workload_identity", "service_principal"}
 

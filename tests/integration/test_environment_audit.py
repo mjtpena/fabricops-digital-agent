@@ -90,6 +90,7 @@ def orqentis_logs(caplog: pytest.LogCaptureFixture) -> Any:
         logger.removeHandler(caplog.handler)
 
 
+@pytest.mark.security
 async def test_a_downgrade_is_logged_and_audited_with_the_file_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, orqentis_logs: pytest.LogCaptureFixture
 ) -> None:

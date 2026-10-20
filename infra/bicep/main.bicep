@@ -13,7 +13,8 @@
 //     with Eventhouse (events/audit) and OneLake (evidence).
 //   * Container Apps environment (logs to Log Analytics) and the FabricOps Container App, protected by
 //     Container Apps built-in authentication (Microsoft Entra ID). The app trusts X-MS-CLIENT-PRINCIPAL,
-//     which only that front end can set.
+//     which only that front end can set. Exposure is chosen with ingressMode (default: external and
+//     authenticated; see README "Network exposure", including the safe first deployment).
 //   * Optional: Cognitive Services OpenAI User for the reader identity on an existing Azure OpenAI account.
 //
 // No credentials are written anywhere: identities are managed, the Application Insights connection string
@@ -106,13 +107,45 @@ param azureOpenAiResourceId string = ''
 
 // ------------------------------------------------------------------------------------------------- network + auth
 
-@description('false (default): ingress is reachable only from inside the Container Apps environment. true: reachable from outside the environment (from the internet, or only from the VNet when infrastructureSubnetId is set). Every request is still authenticated by Microsoft Entra ID.')
-param externalIngress bool = false
+@description('How the API is exposed. "externalAuthenticated" (default when this and externalIngress are both unset): public endpoint, every request must carry a valid Entra ID token (401 otherwise), optionally limited to allowedIpRanges. "vnet": internal environment with no public IP, reachable from the VNet (requires infrastructureSubnetId). "internal": reachable only from other apps in the Container Apps environment. Authentication is on in every mode. Setting this together with the deprecated externalIngress fails the deployment.')
+@allowed([
+  'externalAuthenticated'
+  'vnet'
+  'internal'
+])
+param ingressMode string?
 
-@description('Optional: resource id of a subnet (delegated to Microsoft.App/environments, /27 or larger) for an internal, VNet-integrated environment with no public endpoint. Empty: no VNet integration.')
+@description('DEPRECATED, use ingressMode. When set (and ingressMode is not) it keeps the old behaviour so that existing parameter files do not change: false = "internal", true = "externalAuthenticated" (or "vnet" when infrastructureSubnetId is set). Setting both this and ingressMode fails the deployment, so a stale value cannot silently override an explicit mode. Remove it from your parameter files.')
+param externalIngress bool?
+
+@description('Optional: resource id of a subnet (delegated to Microsoft.App/environments, /27 or larger) for an internal, VNet-integrated environment with no public endpoint. Required for ingressMode "vnet", must be empty for "externalAuthenticated" (a mismatch fails the deployment), optional for "internal".')
 param infrastructureSubnetId string = ''
 
-@description('Application (client) id of the Microsoft Entra app registration that represents the FabricOps API (defines the FabricOps.Operator and FabricOps.PlatformAdmin app roles).')
+@description('Optional IPv4 CIDR ranges (e.g. 203.0.113.0/24) allowed to reach the ingress. Empty: no address restriction. When set, every other address is denied before authentication; GitHub-hosted runners and other callers outside the ranges cannot connect.')
+param allowedIpRanges array = []
+
+@description('Optional: application (client) ids that may call the API, checked by Easy Auth against the token\'s azp/appid. Empty (default): any client application can call as long as the token is valid for this API. Recommended in production: list the clients people use (e.g. the UI, Azure CLI) and the automation identities\' client ids, so a third-party application cannot act for a user who consents to it.')
+param allowedClientApplications array = []
+
+@description('Exclude /health and /health/ready from authentication so uptime checks and smoke tests can call them without a token. They return only the version and mode flags and read no identity. false: every path requires a token.')
+param anonymousHealthEndpoints bool = true
+
+@description('ORQENTIS_API_MAX_BODY_BYTES: requests with a larger body get 413.')
+@minValue(1024)
+@maxValue(16777216)
+param apiMaxBodyBytes int = 65536
+
+@description('ORQENTIS_API_RATE_LIMIT_MUTATING_PER_MINUTE: per principal and replica, for approve/reject/execute and other mutating calls (429 + Retry-After beyond it).')
+@minValue(1)
+@maxValue(10000)
+param apiRateLimitMutatingPerMinute int = 30
+
+@description('ORQENTIS_API_RATE_LIMIT_EXPENSIVE_PER_MINUTE: per principal and replica, for telemetry collection, investigations and audit verification.')
+@minValue(1)
+@maxValue(10000)
+param apiRateLimitExpensivePerMinute int = 6
+
+@description('Application (client) id of the Microsoft Entra app registration that represents the FabricOps API (defines the FabricOps.Operator, FabricOps.PlatformAdmin, FabricOps.Automation and FabricOps.Reader app roles).')
 param entraClientId string
 
 @description('Microsoft Entra tenant id that issues tokens for the API. Defaults to the deployment tenant.')
@@ -294,6 +327,31 @@ var keyVaultSecrets = concat(
     : []
 )
 
+// Ingress mode: ingressMode, or the deprecated externalIngress mapped to it, or the default.
+var legacyIngressMode = (externalIngress ?? false)
+  ? (empty(infrastructureSubnetId) ? 'externalAuthenticated' : 'vnet')
+  : 'internal'
+var effectiveIngressMode = externalIngress == null ? (ingressMode ?? 'externalAuthenticated') : legacyIngressMode
+// Fail the deployment instead of silently choosing an exposure that differs from what was asked for:
+// * both ingressMode and the deprecated externalIngress are set (a stale externalIngress = true must not
+//   override an explicit ingressMode = 'internal');
+// * "vnet" without a subnet, or "externalAuthenticated" with one.
+// The failure is an invalid subnet id fed into the environment (the Bicep language has no assert).
+var ingressMisconfigured = (externalIngress != null && ingressMode != null) || (effectiveIngressMode == 'vnet' && empty(infrastructureSubnetId)) || (effectiveIngressMode == 'externalAuthenticated' && !empty(infrastructureSubnetId))
+var environmentSubnetId = ingressMisconfigured
+  ? 'INVALID-conflicting-ingressMode-externalIngress-infrastructureSubnetId-see-README-Network-exposure'
+  : infrastructureSubnetId
+var ipSecurityRestrictions = [
+  for (range, index) in allowedIpRanges: {
+    name: 'allow-${index}'
+    description: 'Orqentis FabricOps: allowed client range ${index}'
+    ipAddressRange: range
+    action: 'Allow'
+  }
+]
+// Easy Auth does not authenticate these paths. Nothing under them reads the caller's identity.
+var anonymousPaths = anonymousHealthEndpoints ? ['/health', '/health/ready'] : []
+
 var appEnv = concat(
   [
     { name: 'ORQENTIS_DEPLOYMENT_ENVIRONMENT', value: deploymentEnvironment }
@@ -315,6 +373,9 @@ var appEnv = concat(
     { name: 'ORQENTIS_REASONER', value: reasoner }
     { name: 'ORQENTIS_DATA_DIR', value: dataMountPath }
     { name: 'ORQENTIS_LOG_FORMAT', value: 'json' }
+    { name: 'ORQENTIS_API_MAX_BODY_BYTES', value: string(apiMaxBodyBytes) }
+    { name: 'ORQENTIS_API_RATE_LIMIT_MUTATING_PER_MINUTE', value: string(apiRateLimitMutatingPerMinute) }
+    { name: 'ORQENTIS_API_RATE_LIMIT_EXPENSIVE_PER_MINUTE', value: string(apiRateLimitExpensivePerMinute) }
     { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: appInsightsSecretName }
   ],
   empty(azureOpenAiEndpoint) ? [] : [{ name: 'ORQENTIS_AZURE_OPENAI_ENDPOINT', value: azureOpenAiEndpoint }],
@@ -512,10 +573,10 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
         workloadProfileType: 'Consumption'
       }
     ]
-    vnetConfiguration: empty(infrastructureSubnetId)
+    vnetConfiguration: empty(environmentSubnetId)
       ? null
       : {
-          infrastructureSubnetId: infrastructureSubnetId
+          infrastructureSubnetId: environmentSubnetId
           internal: true
         }
     zoneRedundant: false
@@ -549,10 +610,11 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     configuration: {
       activeRevisionsMode: 'Single'
       ingress: {
-        external: externalIngress
+        external: effectiveIngressMode != 'internal'
         targetPort: appPort
         transport: 'http'
         allowInsecure: false
+        ipSecurityRestrictions: ipSecurityRestrictions
         traffic: [
           {
             latestRevision: true
@@ -684,11 +746,13 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 }
 
 // Container Apps built-in authentication (Easy Auth) with Microsoft Entra ID. Unauthenticated requests get 401;
-// authenticated requests reach the app with X-MS-CLIENT-PRINCIPAL (claims, including app roles).
+// authenticated requests reach the app with X-MS-CLIENT-PRINCIPAL (claims, including app roles). Easy Auth strips any
+// client-supplied copy of that header. The app classifies the caller from those claims (app-only tokens are services
+// and can never approve), which is why the app registration must emit the idtyp optional claim (README step 1).
 // No client secret: the API only validates bearer tokens, it never runs an interactive login flow.
-// Authentication is required on every path because unauthenticatedClientAction is not AllowAnonymous and no
-// excludedPaths are set (Container Apps has no separate "requireAuthentication" flag, unlike App Service).
-// Health probes go straight to the container port and do not pass through this front end.
+// Authentication is required on every path except the anonymousPaths above (health only, when
+// anonymousHealthEndpoints is true). Container Apps has no separate "requireAuthentication" flag, unlike App Service.
+// Container health probes go straight to the container port and do not pass through this front end.
 resource authConfig 'Microsoft.App/containerApps/authConfigs@2024-03-01' = {
   parent: containerApp
   name: 'current'
@@ -698,6 +762,7 @@ resource authConfig 'Microsoft.App/containerApps/authConfigs@2024-03-01' = {
     }
     globalValidation: {
       unauthenticatedClientAction: 'Return401'
+      excludedPaths: anonymousPaths
     }
     httpSettings: {
       requireHttps: true
@@ -714,6 +779,11 @@ resource authConfig 'Microsoft.App/containerApps/authConfigs@2024-03-01' = {
             entraClientId
             'api://${entraClientId}'
           ]
+          defaultAuthorizationPolicy: empty(allowedClientApplications)
+            ? null
+            : {
+                allowedApplications: allowedClientApplications
+              }
         }
       }
     }
@@ -725,7 +795,10 @@ resource authConfig 'Microsoft.App/containerApps/authConfigs@2024-03-01' = {
 @description('Name of the Container App.')
 output containerAppName string = containerApp.name
 
-@description('Ingress FQDN of the Container App (environment-internal unless externalIngress is true).')
+@description('Effective ingress mode: externalAuthenticated, vnet or internal.')
+output ingressModeEffective string = effectiveIngressMode
+
+@description('Ingress FQDN of the Container App (reachable as described by ingressModeEffective).')
 output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
 
 @description('Reader (READ) identity: grant Fabric workspace Viewer to this principal id (see README).')

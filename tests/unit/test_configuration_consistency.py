@@ -142,6 +142,7 @@ def credential_problems(body: str) -> list[str]:
     return problems
 
 
+@pytest.mark.security
 def test_parameter_files_only_reference_secrets_in_key_vault() -> None:
     """A parameter file may point at a Key Vault secret (a versionless URI); it never holds a value."""
     files = sorted(BICEP.rglob("*.bicepparam"))
@@ -152,6 +153,7 @@ def test_parameter_files_only_reference_secrets_in_key_vault() -> None:
     assert "param fabricServicePrincipalSecretUri = 'https://" in cross_tenant  # the check has something to check
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     ("line", "expected"),
     [
