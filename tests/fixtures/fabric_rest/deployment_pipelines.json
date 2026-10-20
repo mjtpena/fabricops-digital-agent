@@ -1,0 +1,24 @@
+{
+  "label": "deployment_pipelines",
+  "description": "GET /deploymentPipelines as the test principal: empty.",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/deploymentPipelines",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000046"
+        },
+        "json": {
+          "value": []
+        }
+      }
+    }
+  ]
+}

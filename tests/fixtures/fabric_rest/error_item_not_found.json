@@ -1,0 +1,31 @@
+{
+  "label": "error_item_not_found",
+  "description": "GET an item that does not exist: the service's 404 body.",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000002/items/00000000-0000-4000-8000-000000000047",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000048"
+        },
+        "json": {
+          "requestId": "00000000-0000-4000-8000-000000000048",
+          "errorCode": "EntityNotFound",
+          "message": "The requested resource could not be found",
+          "isRetriable": false,
+          "relatedResource": {
+            "resourceId": "00000000-0000-4000-8000-000000000047",
+            "resourceType": "Item"
+          }
+        }
+      }
+    }
+  ]
+}

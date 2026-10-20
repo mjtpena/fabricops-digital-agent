@@ -60,6 +60,7 @@ addopts = "-q --strict-markers"
 markers = [
   "security: critical security boundary tests",
   "scenario: end-to-end synthetic incident scenarios",
+  "live: runs against the live FabricOps sandbox tenant; skipped unless ORQENTIS_LIVE_TESTS=1 (see tests/live)",
 ]
 filterwarnings = ["ignore::DeprecationWarning:agent_framework.*"]
 

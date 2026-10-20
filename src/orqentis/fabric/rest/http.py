@@ -12,6 +12,7 @@ import asyncio
 import logging
 import math
 import random
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
@@ -63,10 +64,23 @@ def _correlation_id(response: httpx.Response) -> str | None:
     return value
 
 
+_PRIVACY_TAGS = re.compile(r"</?(?:oii|eupi|pii|ii)>", re.IGNORECASE)
+
+
+def strip_privacy_tags(text: str) -> str:
+    """Drop Power BI's privacy markers but keep what they wrap.
+
+    Observed live: Power BI wraps identifiers in its messages, e.g. ``table '<oii>customers_clean</oii>'`` in
+    refresh errors and ``user <eupi>{object id}</eupi>`` in 403 bodies. The markers are telemetry plumbing, and
+    they sit inside the very words error classification matches on.
+    """
+    return _PRIVACY_TAGS.sub("", text)
+
+
 def _text(value: Any) -> str | None:
     if value is None:
         return None
-    text = str(value).strip()
+    text = strip_privacy_tags(str(value)).strip()
     return redact_text(text[:_MAX_ERROR_TEXT]) if text else None
 
 

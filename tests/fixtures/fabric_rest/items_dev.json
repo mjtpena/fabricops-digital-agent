@@ -1,0 +1,65 @@
+{
+  "label": "items_dev",
+  "description": "GET /workspaces/{id}/items for DEV: lakehouse (+ its SQL endpoint), notebooks, pipeline.",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000002/items",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000007"
+        },
+        "json": {
+          "value": [
+            {
+              "id": "00000000-0000-4000-8000-000000000008",
+              "type": "SQLEndpoint",
+              "displayName": "crm_source",
+              "description": "",
+              "workspaceId": "00000000-0000-4000-8000-000000000002",
+              "logicalId": null
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "type": "Lakehouse",
+              "displayName": "crm_source",
+              "description": "Synthetic CRM source for the FabricOps sandbox.",
+              "workspaceId": "00000000-0000-4000-8000-000000000002",
+              "logicalId": null
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000000a",
+              "type": "Notebook",
+              "displayName": "seed_customers",
+              "description": "",
+              "workspaceId": "00000000-0000-4000-8000-000000000002",
+              "logicalId": null
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000000b",
+              "type": "Notebook",
+              "displayName": "transform_customers",
+              "description": "",
+              "workspaceId": "00000000-0000-4000-8000-000000000002",
+              "logicalId": null
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000000c",
+              "type": "DataPipeline",
+              "displayName": "ingest_customers",
+              "description": "",
+              "workspaceId": "00000000-0000-4000-8000-000000000002",
+              "logicalId": null
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

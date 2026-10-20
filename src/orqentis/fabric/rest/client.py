@@ -51,7 +51,7 @@ from orqentis.fabric.errors import (
 from orqentis.fabric.fixtures import EstateContracts
 from orqentis.fabric.ports import FabricClient
 from orqentis.fabric.rest.auth import FABRIC_SCOPE, POWERBI_SCOPE, TokenProvider
-from orqentis.fabric.rest.http import FabricHttp, JsonObject
+from orqentis.fabric.rest.http import FabricHttp, JsonObject, strip_privacy_tags
 from orqentis.observability.logging import get_logger
 
 _log = get_logger(__name__)
@@ -225,12 +225,14 @@ def _refresh_error(raw: Any) -> FailureDetail | None:
         try:
             payload = json.loads(raw)
         except ValueError:
-            return FailureDetail(message=raw.strip()[:2000])
+            return FailureDetail(message=strip_privacy_tags(raw.strip())[:2000])
     if not isinstance(payload, dict):
-        return FailureDetail(message=str(payload)[:2000])
+        return FailureDetail(message=strip_privacy_tags(str(payload))[:2000])
     error = payload["error"] if isinstance(payload.get("error"), dict) else payload
     code = _clean(error.get("errorCode") or error.get("code"))
     message = _clean(error.get("errorDescription") or error.get("message") or error.get("description"))
+    if message is not None:
+        message = strip_privacy_tags(message)
     if message is None and code is None:
         return None
     return FailureDetail(message=message or code or "", error_code=code)
@@ -421,6 +423,18 @@ class RestPipelineService:
         activity_name = _required(raw, "activityName", "activity run")
         output = _maybe_json(raw.get("output"))
         fabric_status = _clean(raw.get("status"))
+        status = _status(fabric_status, _ACTIVITY_STATUS)
+        error = _failure(raw.get("error"))
+        if error is None and status is RunStatus.TIMED_OUT:
+            # Observed live: an activity that exceeds its timeout comes back with status "TimedOut" and an
+            # error object whose message and errorCode are both empty. Say so, or the timeout is invisible to
+            # error classification (the pipeline-level message is a generic "InternalServerError").
+            raw_error = raw.get("error")
+            error = FailureDetail(
+                message=f"Activity '{activity_name}' timed out: it exceeded its configured timeout",
+                error_code="ActivityTimedOut",
+                failure_type=_clean(raw_error.get("failureType")) if isinstance(raw_error, dict) else None,
+            )
         return ActivityRun(
             id=_clean(raw.get("activityRunId")) or f"{run.id}:{activity_name}",
             pipeline_run_id=run.id,
@@ -429,11 +443,11 @@ class RestPipelineService:
             pipeline_item_id=pipeline_id,
             activity_name=activity_name,
             activity_type=_clean(raw.get("activityType")) or "Unknown",
-            status=_status(fabric_status, _ACTIVITY_STATUS),
+            status=status,
             start_time=parse_datetime(raw.get("activityRunStart")),
             end_time=parse_datetime(raw.get("activityRunEnd")),
             target_item_id=target_item_id(raw.get("input")),
-            error=_failure(raw.get("error")),
+            error=error,
             output=output if isinstance(output, dict) else ({} if output is None else {"value": output}),
             correlation_id=run.correlation_id,
             metadata=_compact(

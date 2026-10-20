@@ -1,0 +1,41 @@
+{
+  "label": "items_consumer",
+  "description": "GET /workspaces/{id}/items for the Consumer workspace: semantic model and report.",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000006/items",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-00000000000d"
+        },
+        "json": {
+          "value": [
+            {
+              "id": "00000000-0000-4000-8000-00000000000e",
+              "type": "Report",
+              "displayName": "customers_report",
+              "description": "",
+              "workspaceId": "00000000-0000-4000-8000-000000000006",
+              "logicalId": null
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000000f",
+              "type": "SemanticModel",
+              "displayName": "customers_model",
+              "description": "",
+              "workspaceId": "00000000-0000-4000-8000-000000000006",
+              "logicalId": null
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

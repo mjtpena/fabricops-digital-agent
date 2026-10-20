@@ -1,0 +1,31 @@
+{
+  "label": "error_workspace_not_found",
+  "description": "GET a workspace the principal cannot see (or that does not exist).",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000047",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000049"
+        },
+        "json": {
+          "requestId": "00000000-0000-4000-8000-000000000049",
+          "errorCode": "WorkspaceNotFound",
+          "message": "The provided workspace was not found",
+          "isRetriable": false,
+          "relatedResource": {
+            "resourceId": "00000000-0000-4000-8000-000000000047",
+            "resourceType": "Workspace"
+          }
+        }
+      }
+    }
+  ]
+}

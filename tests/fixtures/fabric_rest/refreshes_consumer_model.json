@@ -1,0 +1,110 @@
+{
+  "label": "refreshes_consumer_model",
+  "description": "Power BI refresh history of customers_model as read by the sandbox OWNER (Viewer cannot read it): a completed refresh and an injected failed one.",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1.0/myorg/groups/00000000-0000-4000-8000-000000000006/datasets/00000000-0000-4000-8000-00000000000f/refreshes",
+        "query": {
+          "$top": "20"
+        },
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "json": {
+          "@odata.context": "https://wabi-south-east-asia-b-primary-redirect.analysis.windows.net/v1.0/myorg/groups/00000000-0000-4000-8000-000000000006/$metadata#refreshes",
+          "value": [
+            {
+              "endTime": "2026-10-20T01:18:51.037Z",
+              "extendedStatus": "Completed",
+              "id": 911712984,
+              "refreshAttempts": [
+                {
+                  "attemptId": 1,
+                  "endTime": "2026-10-20T01:18:51.037514Z",
+                  "executionMetrics": [],
+                  "startTime": "2026-10-20T01:18:47.0816512Z",
+                  "type": "Data"
+                }
+              ],
+              "refreshType": "ViaEnhancedApi",
+              "requestId": "00000000-0000-4000-8000-00000000003d",
+              "startTime": "2026-10-20T01:18:46.007Z",
+              "status": "Completed"
+            },
+            {
+              "endTime": "2026-10-20T01:18:00.523Z",
+              "extendedStatus": "Failed",
+              "id": 911712838,
+              "refreshAttempts": [
+                {
+                  "attemptId": 1,
+                  "endTime": "2026-10-20T01:18:00.524774Z",
+                  "executionMetrics": [],
+                  "serviceExceptionJson": "{\"errorCode\":\"ModelRefresh_ShortMessage_ProcessingError\",\"errorDescription\":\"Retry attempts for failures while executing the refresh exceeded the retry limit set on the request.\\n0xC14700C7: We cannot access the source Delta table '<oii>customers_clean_removed<\\/oii>' referenced by table '<oii>customers_clean<\\/oii>'. Either the source Delta table does not exist, or you don't have access permissions. Consider removing the table from the model. Please refer to https:\\/\\/go.microsoft.com\\/fwlink\\/?linkid=2248855 for more information.\\n0xC14700F0: {\\\"RootActivityId\\\":\\\"00000000-0000-4000-8000-00000000003e\\\"}\"}",
+                  "startTime": "2026-10-20T01:17:56.8488353Z",
+                  "type": "Data"
+                }
+              ],
+              "refreshType": "ViaEnhancedApi",
+              "requestId": "00000000-0000-4000-8000-00000000003f",
+              "serviceExceptionJson": "{\"errorCode\":\"ModelRefresh_ShortMessage_ProcessingError\",\"errorDescription\":\"We cannot access the source Delta table '<oii>customers_clean_removed<\\/oii>' referenced by table '<oii>customers_clean<\\/oii>'. Either the source Delta table does not exist, or you don't have access permissions. Consider removing the table from the model. Please refer to https:\\/\\/go.microsoft.com\\/fwlink\\/?linkid=2248855 for more information.\"}",
+              "startTime": "2026-10-20T01:17:55.583Z",
+              "status": "Failed"
+            },
+            {
+              "endTime": "2026-10-20T01:16:26.347Z",
+              "extendedStatus": "Completed",
+              "id": 911712603,
+              "refreshAttempts": [
+                {
+                  "attemptId": 1,
+                  "endTime": "2026-10-20T01:16:26.3450796Z",
+                  "executionMetrics": [],
+                  "startTime": "2026-10-20T01:16:22.5756685Z",
+                  "type": "Data"
+                }
+              ],
+              "refreshType": "ViaEnhancedApi",
+              "requestId": "00000000-0000-4000-8000-000000000040",
+              "startTime": "2026-10-20T01:16:21.103Z",
+              "status": "Completed"
+            },
+            {
+              "endTime": "2026-10-20T00:51:59.83Z",
+              "id": 911698688,
+              "refreshAttempts": [],
+              "refreshType": "DirectLakeFraming",
+              "requestId": "00000000-0000-4000-8000-000000000041",
+              "startTime": "2026-10-20T00:51:59.8Z",
+              "status": "Completed"
+            },
+            {
+              "endTime": "2026-10-20T00:51:58.347Z",
+              "extendedStatus": "Completed",
+              "id": 911698667,
+              "refreshAttempts": [
+                {
+                  "attemptId": 1,
+                  "endTime": "2026-10-20T00:51:58.3456127Z",
+                  "executionMetrics": [],
+                  "startTime": "2026-10-20T00:51:50.5254606Z",
+                  "type": "Data"
+                }
+              ],
+              "refreshType": "ViaEnhancedApi",
+              "requestId": "00000000-0000-4000-8000-000000000042",
+              "startTime": "2026-10-20T00:51:49.437Z",
+              "status": "Completed"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,151 @@
+{
+  "label": "activity_runs_05_failed",
+  "description": "GET job instance + POST queryactivityruns for a Failed run (job error code 2451).",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/items/00000000-0000-4000-8000-000000000015/jobs/instances/00000000-0000-4000-8000-000000000025",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000037"
+        },
+        "json": {
+          "id": "00000000-0000-4000-8000-000000000025",
+          "itemId": "00000000-0000-4000-8000-000000000015",
+          "jobType": "Pipeline",
+          "invokeType": "Manual",
+          "status": "Failed",
+          "failureReason": {
+            "requestId": "00000000-0000-4000-8000-000000000037",
+            "errorCode": "2451",
+            "message": "Operation on target transform_customers failed: Notebook execution failed at Notebook service with http status code - '200', please check the Run logs on Notebook, additional details - '{\"errorCode\":\"200\",\"errorName\":\"RuntimeError\",\"errorValue\":\"fabricops-sandbox injected failure: transform_customers raised on purpose\",\"message\":\"Notebook execution is in Failed state, runId: 00000000-0000-4000-8000-000000000026\"}' : ",
+            "isRetriable": false
+          },
+          "rootActivityId": "00000000-0000-4000-8000-000000000027",
+          "startTimeUtc": "2026-10-20T00:59:08.4436104",
+          "endTimeUtc": "2026-10-20T01:00:16.94"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/datapipelines/pipelineruns/00000000-0000-4000-8000-000000000025/queryactivityruns",
+        "query": {},
+        "json": {
+          "filters": [],
+          "orderBy": [
+            {
+              "orderBy": "ActivityRunStart",
+              "order": "ASC"
+            }
+          ],
+          "lastUpdatedAfter": "2026-10-19T23:59:08.443610Z",
+          "lastUpdatedBefore": "2026-10-20T02:00:16.940000Z"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000038"
+        },
+        "json": {
+          "value": [
+            {
+              "pipelineId": "00000000-0000-4000-8000-000000000015",
+              "pipelineRunId": "00000000-0000-4000-8000-000000000025",
+              "activityName": "transform_customers",
+              "activityType": "TridentNotebook",
+              "activityRunId": "00000000-0000-4000-8000-000000000026",
+              "status": "Failed",
+              "activityRunStart": "2026-10-20T00:59:15.1979096Z",
+              "activityRunEnd": "2026-10-20T01:00:13.7549764Z",
+              "durationInMs": 58557,
+              "input": {
+                "notebookId": "00000000-0000-4000-8000-000000000014",
+                "workspaceId": "00000000-0000-4000-8000-000000000004"
+              },
+              "output": {
+                "status": "Failed",
+                "result": {
+                  "runId": "00000000-0000-4000-8000-000000000026",
+                  "runStatus": "Failed",
+                  "sessionId": "00000000-0000-4000-8000-000000000039",
+                  "sparkPool": "00000000-0000-4000-8000-000000000004",
+                  "error": {
+                    "ename": "RuntimeError",
+                    "evalue": "fabricops-sandbox injected failure: transform_customers raised on purpose",
+                    "traceback": [
+                      "---------------------------------------------------------------------------",
+                      "RuntimeError                              Traceback (most recent call last)",
+                      "Cell In[9], line 1\n----> 1 raise RuntimeError(\"fabricops-sandbox injected failure: transform_customers raised on purpose\")\n",
+                      "RuntimeError: fabricops-sandbox injected failure: transform_customers raised on purpose"
+                    ]
+                  },
+                  "lastCheckedOn": "2026-10-20T01:00:00.6Z",
+                  "metadata": {
+                    "isForPipeline": null,
+                    "runStartTime": "2026-10-20T00:59:29.1865568Z",
+                    "runEndTime": "2026-10-20T00:59:54.6274802Z"
+                  },
+                  "highConcurrencyModeStatus": null,
+                  "exitValue": null
+                },
+                "message": "Notebook execution is in Failed state, runId: 00000000-0000-4000-8000-000000000026",
+                "SparkMonitoringURL": "workloads/de-ds/sparkmonitor/00000000-0000-4000-8000-000000000014/00000000-0000-4000-8000-000000000039",
+                "sessionSource": "",
+                "sessionTag": "",
+                "effectiveIntegrationRuntime": "AutoResolveIntegrationRuntime (Australia East)",
+                "executionDuration": 39,
+                "durationInQueue": {
+                  "integrationRuntimeQueue": 8
+                },
+                "billingReference": {
+                  "activityType": "ExternalActivity",
+                  "billableDuration": [
+                    {
+                      "meterType": "AzureIR",
+                      "duration": 0.016666666666666666,
+                      "unit": "Hours"
+                    }
+                  ]
+                }
+              },
+              "iterationHash": "",
+              "userProperties": {},
+              "error": {
+                "errorCode": "2451",
+                "message": "Notebook execution failed at Notebook service with http status code - '200', please check the Run logs on Notebook, additional details - '{\"errorCode\":\"200\",\"errorName\":\"RuntimeError\",\"errorValue\":\"fabricops-sandbox injected failure: transform_customers raised on purpose\",\"message\":\"Notebook execution is in Failed state, runId: 00000000-0000-4000-8000-000000000026\"}' : ",
+                "failureType": "UserError",
+                "target": "transform_customers",
+                "details": []
+              },
+              "retryAttempt": null,
+              "recoveryStatus": "None",
+              "integrationRuntimeNames": [
+                "autoresolveintegrationruntime"
+              ],
+              "executionDetails": {
+                "integrationRuntime": [
+                  {
+                    "name": "AutoResolveIntegrationRuntime",
+                    "type": "Managed",
+                    "location": "Australia East"
+                  }
+                ]
+              }
+            }
+          ],
+          "continuationToken": null
+        }
+      }
+    }
+  ]
+}

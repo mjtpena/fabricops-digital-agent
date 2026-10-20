@@ -1,0 +1,154 @@
+{
+  "label": "activity_runs_01_failed",
+  "description": "GET job instance + POST queryactivityruns for a Failed run (job error code 2108).",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/items/00000000-0000-4000-8000-000000000015/jobs/instances/00000000-0000-4000-8000-000000000017",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-00000000002a"
+        },
+        "json": {
+          "id": "00000000-0000-4000-8000-000000000017",
+          "itemId": "00000000-0000-4000-8000-000000000015",
+          "jobType": "Pipeline",
+          "invokeType": "Manual",
+          "status": "Failed",
+          "failureReason": {
+            "requestId": "00000000-0000-4000-8000-00000000002a",
+            "errorCode": "2108",
+            "message": "Operation on target call_crm_source failed: {\"error\":\"unauthorized_client\",\"error_description\":\"AADSTS700016: Application with identifier 'fabricops-fake' was not found in the directory '00000000-0000-4000-8000-000000000018'. This can happen if the application has not been installed by the administrator of the tenant or consented to by any user in the tenant. You may have sent your authentication request to the wrong tenant. Trace ID: 00000000-0000-4000-8000-000000000019 Correlation ID: 00000000-0000-4000-8000-00000000001a Timestamp: 2026-10-20 01:15:11Z\",\"error_codes\":[700016],\"timestamp\":\"2026-10-20 01:15:11Z\",\"trace_id\":\"00000000-0000-4000-8000-000000000019\",\"correlation_id\":\"00000000-0000-4000-8000-00000000001a\",\"error_uri\":\"https://login.microsoftonline.com/error?code=700016\"}",
+            "isRetriable": false
+          },
+          "rootActivityId": "00000000-0000-4000-8000-00000000001b",
+          "startTimeUtc": "2026-10-20T01:14:48.4533333",
+          "endTimeUtc": "2026-10-20T01:15:16.0333333"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/datapipelines/pipelineruns/00000000-0000-4000-8000-000000000017/queryactivityruns",
+        "query": {},
+        "json": {
+          "filters": [],
+          "orderBy": [
+            {
+              "orderBy": "ActivityRunStart",
+              "order": "ASC"
+            }
+          ],
+          "lastUpdatedAfter": "2026-10-20T00:14:48.453333Z",
+          "lastUpdatedBefore": "2026-10-20T02:15:16.033333Z"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-00000000002b"
+        },
+        "json": {
+          "value": [
+            {
+              "pipelineId": "00000000-0000-4000-8000-000000000015",
+              "pipelineRunId": "00000000-0000-4000-8000-000000000017",
+              "activityName": "call_crm_source",
+              "activityType": "WebActivity",
+              "activityRunId": "00000000-0000-4000-8000-00000000002c",
+              "status": "Failed",
+              "activityRunStart": "2026-10-20T01:14:57.1948549Z",
+              "activityRunEnd": "2026-10-20T01:15:12.8009108Z",
+              "durationInMs": 15606,
+              "input": {
+                "method": "POST",
+                "relativeUrl": "token",
+                "headers": {
+                  "Content-Type": "application/x-www-form-urlencoded"
+                },
+                "body": "grant_type=client_credentials&scope=https%3A%2F%2Fapi.fabric.microsoft.com%2F.default"
+              },
+              "output": {
+                "error": "unauthorized_client",
+                "error_description": "AADSTS700016: Application with identifier 'fabricops-fake' was not found in the directory '00000000-0000-4000-8000-000000000018'. This can happen if the application has not been installed by the administrator of the tenant or consented to by any user in the tenant. You may have sent your authentication request to the wrong tenant. Trace ID: 00000000-0000-4000-8000-000000000019 Correlation ID: 00000000-0000-4000-8000-00000000001a Timestamp: 2026-10-20 01:15:11Z",
+                "error_codes": [
+                  700016
+                ],
+                "timestamp": "2026-10-20 01:15:11Z",
+                "trace_id": "00000000-0000-4000-8000-000000000019",
+                "correlation_id": "00000000-0000-4000-8000-00000000001a",
+                "error_uri": "https://login.microsoftonline.com/error?code=700016",
+                "ADFHttpStatusCodeInResponse": "400",
+                "ResponseHeaders": {
+                  "Pragma": "no-cache",
+                  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+                  "X-Content-Type-Options": "nosniff",
+                  "x-ms-clientdata": "e|700016||microsoftonline.com|none",
+                  "x-ms-request-id": "00000000-0000-4000-8000-000000000019",
+                  "x-ms-ests-server": "2.1.25353.4 - JPE ProdSlices",
+                  "x-ms-srs": "1.P",
+                  "Content-Security-Policy-Report-Only": "object-src 'none'; base-uri 'self'; script-src 'self' 'nonce-P3GGlkaH5GP90ETvL4joTw' 'unsafe-inline' 'unsafe-eval' https://*.msauth.net https://*.msftauth.net https://*.msftauthimages.net https://*.msauthimages.net https://*.msidentity.com https://*.microsoftonline-p.com https://*.microsoftazuread-sso.com https://*.azureedge.net https://*.outlook.com https://*.office.com https://*.office365.com https://*.microsoft.com https://*.bing.com 'report-sample'; report-uri https://csp.microsoft.com/report/ESTS-UX-All",
+                  "X-XSS-Protection": "0",
+                  "Cache-Control": "no-store, no-cache",
+                  "P3P": "CP=\"DSP CUR OTPi IND OTRi ONL FIN\"",
+                  "Set-Cookie": "fpc=At7xUEeeQ5pPtazjz9xXXqcZaTGEAQAAAJ63aOIOAAAA; expires=Thu, 19-Nov-2026 01:15:11 GMT; path=/; secure; HttpOnly; SameSite=None;x-ms-gateway-slice=estsfd; path=/; secure; samesite=none; httponly;stsservicecookie=estsfd; path=/; secure; samesite=none; httponly",
+                  "Date": "Tue, 20 Oct 2026 01:15:10 GMT",
+                  "Content-Length": "748",
+                  "Content-Type": "application/json; charset=utf-8",
+                  "Expires": "-1"
+                },
+                "effectiveIntegrationRuntime": "WorkspaceIR (Australia East)",
+                "executionDuration": 1,
+                "durationInQueue": {
+                  "integrationRuntimeQueue": 10
+                },
+                "billingReference": {
+                  "activityType": "ExternalActivity",
+                  "billableDuration": [
+                    {
+                      "meterType": "AzureIR",
+                      "duration": 0.016666666666666666,
+                      "unit": "Hours"
+                    }
+                  ]
+                }
+              },
+              "iterationHash": "",
+              "userProperties": {},
+              "error": {
+                "errorCode": "2108",
+                "message": "{\"error\":\"unauthorized_client\",\"error_description\":\"AADSTS700016: Application with identifier 'fabricops-fake' was not found in the directory '00000000-0000-4000-8000-000000000018'. This can happen if the application has not been installed by the administrator of the tenant or consented to by any user in the tenant. You may have sent your authentication request to the wrong tenant. Trace ID: 00000000-0000-4000-8000-000000000019 Correlation ID: 00000000-0000-4000-8000-00000000001a Timestamp: 2026-10-20 01:15:11Z\",\"error_codes\":[700016],\"timestamp\":\"2026-10-20 01:15:11Z\",\"trace_id\":\"00000000-0000-4000-8000-000000000019\",\"correlation_id\":\"00000000-0000-4000-8000-00000000001a\",\"error_uri\":\"https://login.microsoftonline.com/error?code=700016\"}",
+                "failureType": "UserError",
+                "target": "call_crm_source",
+                "details": []
+              },
+              "retryAttempt": null,
+              "recoveryStatus": "None",
+              "integrationRuntimeNames": [
+                "workspaceir"
+              ],
+              "executionDetails": {
+                "integrationRuntime": [
+                  {
+                    "name": "WorkspaceIR",
+                    "type": "Managed",
+                    "location": "Australia East"
+                  }
+                ]
+              }
+            }
+          ],
+          "continuationToken": null
+        }
+      }
+    }
+  ]
+}

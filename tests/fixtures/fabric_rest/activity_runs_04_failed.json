@@ -1,0 +1,96 @@
+{
+  "label": "activity_runs_04_failed",
+  "description": "GET job instance + POST queryactivityruns for a Failed run (job error code 500).",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/items/00000000-0000-4000-8000-000000000015/jobs/instances/00000000-0000-4000-8000-000000000023",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000034"
+        },
+        "json": {
+          "id": "00000000-0000-4000-8000-000000000023",
+          "itemId": "00000000-0000-4000-8000-000000000015",
+          "jobType": "Pipeline",
+          "invokeType": "Manual",
+          "status": "Failed",
+          "failureReason": {
+            "requestId": "00000000-0000-4000-8000-000000000034",
+            "errorCode": "500",
+            "message": "InternalServerError executing request",
+            "isRetriable": false
+          },
+          "rootActivityId": "00000000-0000-4000-8000-000000000024",
+          "startTimeUtc": "2026-10-20T01:03:06.1533333",
+          "endTimeUtc": "2026-10-20T01:03:30.51"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/datapipelines/pipelineruns/00000000-0000-4000-8000-000000000023/queryactivityruns",
+        "query": {},
+        "json": {
+          "filters": [],
+          "orderBy": [
+            {
+              "orderBy": "ActivityRunStart",
+              "order": "ASC"
+            }
+          ],
+          "lastUpdatedAfter": "2026-10-20T00:03:06.153333Z",
+          "lastUpdatedBefore": "2026-10-20T02:03:30.510000Z"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000035"
+        },
+        "json": {
+          "value": [
+            {
+              "pipelineId": "00000000-0000-4000-8000-000000000015",
+              "pipelineRunId": "00000000-0000-4000-8000-000000000023",
+              "activityName": "transform_customers",
+              "activityType": "TridentNotebook",
+              "activityRunId": "00000000-0000-4000-8000-000000000036",
+              "status": "TimedOut",
+              "activityRunStart": "2026-10-20T01:03:15.5442429Z",
+              "activityRunEnd": "2026-10-20T01:03:26.9620662Z",
+              "durationInMs": 11417,
+              "input": {
+                "notebookId": "00000000-0000-4000-8000-000000000014",
+                "workspaceId": "00000000-0000-4000-8000-000000000004"
+              },
+              "output": {},
+              "iterationHash": "",
+              "userProperties": {},
+              "error": {
+                "errorCode": "",
+                "message": "",
+                "failureType": "UserError",
+                "target": "transform_customers",
+                "details": ""
+              },
+              "retryAttempt": null,
+              "recoveryStatus": "None",
+              "integrationRuntimeNames": null,
+              "executionDetails": {}
+            }
+          ],
+          "continuationToken": null
+        }
+      }
+    }
+  ]
+}

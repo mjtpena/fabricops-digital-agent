@@ -1,0 +1,186 @@
+{
+  "label": "job_instances_test_pipeline",
+  "description": "GET .../jobs/instances for ingest_customers: a success and each injected failure.",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/items",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000010"
+        },
+        "json": {
+          "value": [
+            {
+              "id": "00000000-0000-4000-8000-000000000011",
+              "type": "SQLEndpoint",
+              "displayName": "crm_source",
+              "description": "",
+              "workspaceId": "00000000-0000-4000-8000-000000000004",
+              "logicalId": null
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000012",
+              "type": "Lakehouse",
+              "displayName": "crm_source",
+              "description": "Synthetic CRM source for the FabricOps sandbox.",
+              "workspaceId": "00000000-0000-4000-8000-000000000004",
+              "logicalId": null
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000013",
+              "type": "Notebook",
+              "displayName": "seed_customers",
+              "description": "",
+              "workspaceId": "00000000-0000-4000-8000-000000000004",
+              "logicalId": null
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000014",
+              "type": "Notebook",
+              "displayName": "transform_customers",
+              "description": "",
+              "workspaceId": "00000000-0000-4000-8000-000000000004",
+              "logicalId": null
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000015",
+              "type": "DataPipeline",
+              "displayName": "ingest_customers",
+              "description": "",
+              "workspaceId": "00000000-0000-4000-8000-000000000004",
+              "logicalId": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/items/00000000-0000-4000-8000-000000000015/jobs/instances",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000016"
+        },
+        "json": {
+          "value": [
+            {
+              "id": "00000000-0000-4000-8000-000000000017",
+              "itemId": "00000000-0000-4000-8000-000000000015",
+              "jobType": "Pipeline",
+              "invokeType": "Manual",
+              "status": "Failed",
+              "failureReason": {
+                "requestId": "00000000-0000-4000-8000-000000000016",
+                "errorCode": "2108",
+                "message": "Operation on target call_crm_source failed: {\"error\":\"unauthorized_client\",\"error_description\":\"AADSTS700016: Application with identifier 'fabricops-fake' was not found in the directory '00000000-0000-4000-8000-000000000018'. This can happen if the application has not been installed by the administrator of the tenant or consented to by any user in the tenant. You may have sent your authentication request to the wrong tenant. Trace ID: 00000000-0000-4000-8000-000000000019 Correlation ID: 00000000-0000-4000-8000-00000000001a Timestamp: 2026-10-20 01:15:11Z\",\"error_codes\":[700016],\"timestamp\":\"2026-10-20 01:15:11Z\",\"trace_id\":\"00000000-0000-4000-8000-000000000019\",\"correlation_id\":\"00000000-0000-4000-8000-00000000001a\",\"error_uri\":\"https://login.microsoftonline.com/error?code=700016\"}",
+                "isRetriable": false
+              },
+              "rootActivityId": "00000000-0000-4000-8000-00000000001b",
+              "startTimeUtc": "2026-10-20T01:14:48.4533333",
+              "endTimeUtc": "2026-10-20T01:15:16.0333333"
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000001c",
+              "itemId": "00000000-0000-4000-8000-000000000015",
+              "jobType": "Pipeline",
+              "invokeType": "Manual",
+              "status": "Completed",
+              "failureReason": null,
+              "rootActivityId": "00000000-0000-4000-8000-00000000001d",
+              "startTimeUtc": "2026-10-20T01:11:12.4741108",
+              "endTimeUtc": "2026-10-20T01:12:32.4766667"
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000001e",
+              "itemId": "00000000-0000-4000-8000-000000000015",
+              "jobType": "Pipeline",
+              "invokeType": "Manual",
+              "status": "Failed",
+              "failureReason": {
+                "requestId": "00000000-0000-4000-8000-000000000016",
+                "errorCode": "2108",
+                "message": "Operation on target call_crm_source failed: {\"requestId\":\"00000000-0000-4000-8000-00000000001f\",\"errorCode\":\"RequestFailed\",\"message\":\"Unable to process the request\",\"isRetriable\":false}",
+                "isRetriable": false
+              },
+              "rootActivityId": "00000000-0000-4000-8000-000000000020",
+              "startTimeUtc": "2026-10-20T01:10:07.7066667",
+              "endTimeUtc": "2026-10-20T01:10:34.2866667"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000021",
+              "itemId": "00000000-0000-4000-8000-000000000015",
+              "jobType": "Pipeline",
+              "invokeType": "Manual",
+              "status": "Failed",
+              "failureReason": {
+                "requestId": "00000000-0000-4000-8000-000000000016",
+                "errorCode": "2015",
+                "message": "Operation on target call_crm_source failed: The datasetSettings are required for the connection 'Web'.",
+                "isRetriable": false
+              },
+              "rootActivityId": "00000000-0000-4000-8000-000000000022",
+              "startTimeUtc": "2026-10-20T01:04:27.41",
+              "endTimeUtc": "2026-10-20T01:04:43.9866667"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000023",
+              "itemId": "00000000-0000-4000-8000-000000000015",
+              "jobType": "Pipeline",
+              "invokeType": "Manual",
+              "status": "Failed",
+              "failureReason": {
+                "requestId": "00000000-0000-4000-8000-000000000016",
+                "errorCode": "500",
+                "message": "InternalServerError executing request",
+                "isRetriable": false
+              },
+              "rootActivityId": "00000000-0000-4000-8000-000000000024",
+              "startTimeUtc": "2026-10-20T01:03:06.1533333",
+              "endTimeUtc": "2026-10-20T01:03:30.51"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000025",
+              "itemId": "00000000-0000-4000-8000-000000000015",
+              "jobType": "Pipeline",
+              "invokeType": "Manual",
+              "status": "Failed",
+              "failureReason": {
+                "requestId": "00000000-0000-4000-8000-000000000016",
+                "errorCode": "2451",
+                "message": "Operation on target transform_customers failed: Notebook execution failed at Notebook service with http status code - '200', please check the Run logs on Notebook, additional details - '{\"errorCode\":\"200\",\"errorName\":\"RuntimeError\",\"errorValue\":\"fabricops-sandbox injected failure: transform_customers raised on purpose\",\"message\":\"Notebook execution is in Failed state, runId: 00000000-0000-4000-8000-000000000026\"}' : ",
+                "isRetriable": false
+              },
+              "rootActivityId": "00000000-0000-4000-8000-000000000027",
+              "startTimeUtc": "2026-10-20T00:59:08.4436104",
+              "endTimeUtc": "2026-10-20T01:00:16.94"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000028",
+              "itemId": "00000000-0000-4000-8000-000000000015",
+              "jobType": "Pipeline",
+              "invokeType": "Manual",
+              "status": "Completed",
+              "failureReason": null,
+              "rootActivityId": "00000000-0000-4000-8000-000000000029",
+              "startTimeUtc": "2026-10-20T00:42:32.7141311",
+              "endTimeUtc": "2026-10-20T00:44:09.23"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
