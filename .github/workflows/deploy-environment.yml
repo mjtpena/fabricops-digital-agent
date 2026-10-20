@@ -7,11 +7,12 @@ name: Deploy environment
 # Nothing here is a secret: client, tenant and subscription ids are identifiers, and Azure access is OIDC only.
 #
 # Environment variables (Settings > Environments > <environment> > Variables), see docs/delivery.md:
-#   AZURE_CLIENT_ID      client id of this environment's CI/CD identity (fabricops-cicd-<environment>)
+#   AZURE_CLIENT_ID      client id of this environment's deploy identity (fabricops-deploy-<environment>)
 #   AZURE_RESOURCE_GROUP resource group to deploy into (rg-fabricops-<environment>)
 #   ENTRA_API_CLIENT_ID  client id of this environment's "Orqentis FabricOps API" app registration
 #   FABRIC_MODE          optional: overrides fabricMode for this environment ('mock' or 'rest')
-#   SMOKE_HEALTH_AUTHENTICATED  optional: 'true' when Container Apps authentication also covers /health
+#   SMOKE_HEALTH_AUTHENTICATED  optional: 'true' only if /health is NOT excluded from Container Apps authentication
+#                        (anonymousHealthEndpoints = false); the default deployment excludes it
 # Repository variables: AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_LOGIN_SERVER, ACR_RESOURCE_ID.
 
 on:
@@ -112,7 +113,9 @@ jobs:
             --query properties.outputs \
             --output json)"
           fqdn="$(printf '%s' "$outputs" | python3 -c 'import json, sys; print(json.load(sys.stdin)["containerAppFqdn"]["value"])')"
+          app="$(printf '%s' "$outputs" | python3 -c 'import json, sys; print(json.load(sys.stdin)["containerAppName"]["value"])')"
           echo "fqdn=${fqdn}" >> "$GITHUB_OUTPUT"
+          echo "app=${app}" >> "$GITHUB_OUTPUT"
           {
             echo "### Deployed ${DEPLOY_ENVIRONMENT}"
             echo
@@ -133,6 +136,9 @@ jobs:
       - name: Smoke test
         env:
           SMOKE_BASE_URL: https://${{ steps.deploy.outputs.fqdn }}
+          SMOKE_CONTAINER_APP: ${{ steps.deploy.outputs.app }}
+          SMOKE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          SMOKE_EXPECTED_IMAGE: ${{ inputs.image }}
           SMOKE_TOKEN_RESOURCE: api://${{ vars.ENTRA_API_CLIENT_ID }}
           SMOKE_HEALTH_AUTHENTICATED: ${{ vars.SMOKE_HEALTH_AUTHENTICATED || 'false' }}
         run: bash scripts/smoke-test.sh

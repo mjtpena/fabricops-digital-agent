@@ -112,7 +112,7 @@ def test_cd_gate_comes_before_tagging() -> None:
     steps = _load(WORKFLOWS / "cd.yml")["jobs"]["build"]["steps"]
     names = [step.get("name", "") for step in steps]
     gate = next(i for i, n in enumerate(names) if n.startswith("Scan gate"))
-    tag = next(i for i, n in enumerate(names) if n.startswith("Tag with the git SHA"))
+    tag = next(i for i, n in enumerate(names) if n.startswith("Tag the image"))
     push = next(i for i, n in enumerate(names) if n.startswith("Build and push"))
     assert push < gate < tag
     gate_step = steps[gate]["with"]
@@ -234,3 +234,102 @@ def test_whatif_summary_lists_changes_and_never_prints_values() -> None:
 
 def test_whatif_summary_handles_an_empty_result() -> None:
     assert "No changes reported." in _load_summary().summarise({"changes": []})
+
+
+def test_cd_build_waits_for_ci_and_ci_is_reusable() -> None:
+    jobs = _load(WORKFLOWS / "cd.yml")["jobs"]
+    assert jobs["ci"]["uses"] == "./.github/workflows/ci.yml"
+    assert "ci" in jobs["build"]["needs"], "nothing is built, pushed or deployed unless CI passed"
+    triggers = _load(WORKFLOWS / "ci.yml")[True]  # YAML parses the key `on` as True
+    assert "workflow_call" in triggers
+    # CD runs CI for pushes to main and to dry-run branches, so CI's own push trigger must skip exactly those.
+    assert triggers["push"]["branches-ignore"] == ["main", "cd-dryrun/**"]
+    assert {"pull_request", "schedule"} <= set(triggers)
+
+
+def test_ci_concurrency_never_cancels_main_dry_run_or_scheduled_runs() -> None:
+    concurrency = _load(WORKFLOWS / "ci.yml")["concurrency"]
+    assert "github.event_name" in concurrency["group"], "the weekly run and pushes must not share a group"
+    cancel = str(concurrency["cancel-in-progress"])
+    assert "'schedule'" in cancel
+    assert "refs/heads/main" in cancel
+
+
+def test_scan_gates_fail_on_unfixed_findings_too() -> None:
+    gates = 0
+    for name in ("ci.yml", "cd.yml"):
+        for step in _steps(_load(WORKFLOWS / name)):
+            if (
+                str(step.get("uses", "")).startswith("aquasecurity/trivy-action@")
+                and step["with"].get("exit-code") == "1"
+            ):
+                gates += 1
+                assert step["with"]["ignore-unfixed"] is False, f"{name}: the gate must not ignore unfixed findings"
+                assert step["with"]["severity"] == "HIGH,CRITICAL"
+    assert gates == 2, "one gate in CI (local build) and one in CD (pushed digest)"
+
+
+def test_branch_images_never_carry_the_bare_commit_sha_tag() -> None:
+    text = (WORKFLOWS / "cd.yml").read_text(encoding="utf-8")
+    assert '"$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main"' in text
+    assert "IMAGE_TAG=dryrun-${GITHUB_SHA}" in text
+    assert "IMAGE_TAG=${GITHUB_SHA}" in text
+    assert "Tags are not moved" in text
+
+
+def test_release_has_its_own_environment_and_takes_only_successful_main_runs() -> None:
+    release = _load(WORKFLOWS / "release.yml")
+    assert release["jobs"]["publish"]["environment"] == "release"
+    text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    assert "environment: dev" not in text
+    assert "--branch main" in text
+    assert "--status success" in text
+    assert "--event push" in text
+    assert "release_tools.py fetch" in text, "evidence is fetched one artifact at a time by the tested helper"
+    assert "--name image-digest --name sbom" not in text
+
+
+def test_whatif_has_no_access_to_the_shared_registry_resource_group() -> None:
+    text = (WORKFLOWS / "whatif.yml").read_text(encoding="utf-8")
+    assert 'ACR_RESOURCE_ID: ""' in text
+    assert "vars.ACR_RESOURCE_ID" not in text
+    assert "containerapp" not in text.replace("Microsoft.App/containerApps", ""), "no CLI extension needed"
+
+
+def test_smoke_test_checks_the_deployed_revision() -> None:
+    env = next(s for s in _steps(_load(WORKFLOWS / "deploy-environment.yml")) if s.get("name") == "Smoke test")["env"]
+    assert env["SMOKE_EXPECTED_IMAGE"] == "${{ inputs.image }}"
+    assert {"SMOKE_CONTAINER_APP", "SMOKE_RESOURCE_GROUP"} <= set(env)
+    assert env["SMOKE_HEALTH_AUTHENTICATED"].endswith("|| 'false' }}"), "/health is anonymous by default"
+
+
+def test_dockerfile_uses_one_digest_pinned_non_dockerhub_base_and_asserts_pip_is_gone() -> None:
+    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    bases = re.findall(r"^FROM (\S+)", text, re.MULTILINE)
+    assert len(bases) == 2
+    assert bases[0] == bases[1], "builder and runtime must use the same reference"
+    assert re.search(r"@sha256:[0-9a-f]{64}$", bases[0])
+    assert bases[0].startswith("mcr.microsoft.com/"), "MCR: no anonymous pull rate limit"
+    assert "pip is still installed" in text, "the build fails if pip can still be run"
+    assert "site-packages/pip" not in text, "no hard-coded interpreter paths"
+
+
+def test_oidc_subjects_in_the_docs_name_the_repository_owner() -> None:
+    for relative in ("docs/delivery.md", "docs/adr/0016-delivery-pipeline.md", ".github/workflows/cd.yml"):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        assert "repo:mjtpe/" not in text, f"{relative}: the owner is mjtpena"
+
+
+def test_trivy_exceptions_are_justified_and_expire_within_sixty_days() -> None:
+    import datetime as dt
+
+    ignore = _load(ROOT / ".trivyignore.yaml")
+    today = dt.datetime.now(dt.UTC).date()
+    for entry in ignore["vulnerabilities"]:
+        assert entry["id"]
+        assert str(entry["statement"]).strip(), (
+            f"{entry['id']}: a statement naming the owner and the reason is required"
+        )
+        expires = entry["expired_at"]
+        assert expires >= today, f"{entry['id']}: expired on {expires}; remove it or renew it with a fresh review"
+        assert expires <= today + dt.timedelta(days=60), f"{entry['id']}: expires more than 60 days ahead"

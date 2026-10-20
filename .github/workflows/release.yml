@@ -5,14 +5,15 @@ name: Release
 #
 # How to cut a release (docs/delivery.md, 'Releasing'):
 #   1. A pull request bumps `version` in pyproject.toml and moves the CHANGELOG.md 'Unreleased' entries under
-#      `## [X.Y.Z] - YYYY-MM-DD`. Merge it to main and let CD finish for that commit.
+#      `## [X.Y.Z] - YYYY-MM-DD`. Merge it to main and let CD finish for that commit (prod included).
 #   2. Push the tag:  git tag -a vX.Y.Z -m "FabricOps X.Y.Z" <merge commit> && git push origin vX.Y.Z
+#      A tag ruleset limits who may create v* tags.
 #
 # `verify` checks the tag, the package version, the changelog and that the tagged commit is on main, then collects the
-# image digest and SBOM from the CD run for that commit. `publish` proves the registry holds that digest under the
-# commit tag (which CD sets only after the scan gate passed), adds the semver tag, and creates the release with the
-# notes taken from CHANGELOG.md. It runs in the `dev` environment, whose OIDC subject already holds AcrPush on the
-# registry; allow tags v*.*.* in that environment's deployment rules.
+# image digest and SBOM from the SUCCESSFUL CD run of that commit on main. `publish` runs in the `release` GitHub
+# environment (required reviewers, tags v* only; its own OIDC subject), proves the registry holds that digest under the
+# commit tag (CD sets it only after the scan gate passed), adds the semver tag, and creates the release with the notes
+# from CHANGELOG.md. Its identity can push to the registry and do nothing else.
 
 on:
   push:
@@ -62,47 +63,24 @@ jobs:
 
       - name: Build the release notes from CHANGELOG.md
         run: |
-          python3 -I - "$VERSION" > release-notes.md <<'PY'
-          import re
-          import sys
-
-          version = sys.argv[1]
-          lines = open("CHANGELOG.md", encoding="utf-8").read().splitlines()
-          start = next((i for i, line in enumerate(lines) if re.match(rf"^## \[{re.escape(version)}\]", line)), None)
-          if start is None:
-              sys.exit(f"CHANGELOG.md has no '## [{version}]' section")
-          body: list[str] = []
-          for line in lines[start + 1 :]:
-              if line.startswith("## [") or re.match(r"^\[[^\]]+\]:\s", line):
-                  break
-              body.append(line)
-          notes = "\n".join(body).strip()
-          if not notes:
-              sys.exit(f"The '## [{version}]' section of CHANGELOG.md is empty")
-          print(notes)
-          PY
+          mkdir -p release-bundle
+          python3 -I scripts/release_tools.py notes "$VERSION" > release-bundle/release-notes.md
           echo "--- release notes ---"
-          cat release-notes.md
+          cat release-bundle/release-notes.md
 
-      # The CD run for this exact commit built, scanned and pushed the image. Its artifacts are the release evidence.
+      # Only a successful CD run on main counts: a branch dry run, or a run whose scan gate or deployments failed or are
+      # still waiting for approval, is not a releasable build. Its artifacts are the release evidence.
       - name: Collect the image digest and SBOM from the CD run for this commit
         run: |
-          run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow cd.yml --commit "$GITHUB_SHA" --event push \
-            --json databaseId --jq '.[0].databaseId // empty')"
+          run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow cd.yml --commit "$GITHUB_SHA" \
+            --branch main --event push --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
           if [[ -z "$run_id" ]]; then
-            echo "::error::No CD run found for ${GITHUB_SHA}. Merge the release pull request to main and wait for CD before tagging."
+            echo "::error::No successful CD run on main for ${GITHUB_SHA}. Merge the release pull request, let CD (including the prod approval) finish, then tag."
             exit 1
           fi
           echo "Using CD run ${run_id}"
-          mkdir -p release-bundle
-          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name image-digest --name sbom --name trivy-report --dir release-bundle
-          mv release-notes.md release-bundle/release-notes.md
+          python3 -I scripts/release_tools.py fetch "$run_id" --repo "$GITHUB_REPOSITORY" --dest release-bundle
           ls -la release-bundle
-          image="$(cat release-bundle/image-digest.txt)"
-          if [[ ! "$image" =~ @sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::release-bundle/image-digest.txt does not hold an image digest reference"
-            exit 1
-          fi
 
       - name: Upload the release bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -116,7 +94,7 @@ jobs:
     needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    environment: dev
+    environment: release
     permissions:
       contents: write
       id-token: write

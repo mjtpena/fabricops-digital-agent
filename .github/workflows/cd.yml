@@ -2,17 +2,20 @@ name: CD
 
 # Continuous delivery for Orqentis FabricOps (docs/delivery.md, ADR-0016).
 #
+#   ci         The whole CI workflow (lint, types, tests, dependency audit, workflow lint, Bicep, image build and scan).
+#              Nothing below runs unless it passed, so a push to main cannot reach the registry or an environment
+#              without the same gates a pull request needs.
 #   build      Build the image ONCE, push it to the shared registry by digest, generate the SBOM, scan it, and only
-#              if the scan passes tag it with the git SHA. The digest is the identity of the release from here on.
+#              if the scan passes tag it. The digest is the identity of the release from here on.
 #   deploy-dev Deploy that digest to dev and smoke-test it.
 #   promote-*  Deploy the SAME digest to test, then prod. The `test` and `prod` GitHub environments hold the required
 #              reviewers; the job waits for approval before it runs.
 #
 # Triggers:
-#   * push to main: build, scan, push, then deploy dev and promote (test and prod wait for approval).
-#   * push to a cd-dryrun/** branch: the dry run. It builds, scans and pushes, and skips every deployment. It exists
-#     because GitHub only runs workflow_dispatch for a workflow file that is already on the default branch, so a new
-#     or changed workflow cannot be exercised from a feature branch with a manual run. It stays inert until someone
+#   * push to main: CI, build, scan, push, then deploy dev and promote (test and prod wait for approval).
+#   * push to a cd-dryrun/** branch: the dry run. CI, build, scan and push, tagged dryrun-<sha>, and no deployment. It
+#     exists because GitHub only runs workflow_dispatch for a workflow file that is already on the default branch, so a
+#     new or changed workflow cannot be exercised from a feature branch with a manual run. It stays inert until someone
 #     registers a federated credential for the branch (docs/delivery.md, 'Dry run on a branch').
 #   * manual run (workflow_dispatch): once this file is on main, run it on any branch. "deploy" unticked is the same
 #     dry run; ticked deploys, which the environments' main-only deployment rules refuse from a branch.
@@ -20,7 +23,8 @@ name: CD
 # No secrets are used. Azure access is OIDC only, and the ids below are repository variables (docs/delivery.md):
 #   AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_NAME, ACR_LOGIN_SERVER, ACR_RESOURCE_ID, ACR_PUSH_CLIENT_ID
 #
-# The build job declares no environment, so its OIDC subject is the ref that triggered the run:
+# The build job declares no environment, so its OIDC subject is the ref that triggered the run, and the identity behind
+# ACR_PUSH_CLIENT_ID can only push to the registry (it cannot deploy anything):
 #   repo:<owner>/<repo>:ref:refs/heads/main               (push to main)
 #   repo:<owner>/<repo>:ref:refs/heads/cd-dryrun/<name>   (dry run)
 #   repo:<owner>/<repo>:ref:refs/heads/<branch>           (manual run on a branch)
@@ -42,8 +46,15 @@ permissions:
 # while the next builds). Deployments are serialised per environment in deploy-environment.yml instead.
 
 jobs:
+  ci:
+    name: CI
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build, scan and push image
+    needs: ci
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -71,6 +82,14 @@ jobs:
             exit 1
           fi
 
+          # Only a build of main is a release candidate; everything else (dry runs, manual runs on branches) is tagged
+          # dryrun-<sha> so that no branch image can ever carry the tag release.yml looks for.
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
+            echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
+          else
+            echo "IMAGE_TAG=dryrun-${GITHUB_SHA}" >> "$GITHUB_ENV"
+          fi
+
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -88,7 +107,7 @@ jobs:
         run: az acr login --name "$ACR_NAME"
 
       # BuildKit runs from Google's pull-through mirror of Docker Hub, pinned by digest, because anonymous Docker Hub
-      # pulls are rate limited on shared runners (the same reason the Dockerfile uses the ECR Public mirror).
+      # pulls are rate limited on shared runners (the Dockerfile's base image comes from MCR for the same reason).
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -130,8 +149,8 @@ jobs:
           format: spdx-json
           output: sbom.spdx.json
 
-      # Everything HIGH/CRITICAL, fixable or not, for the record. Never fails the job.
-      - name: Scan report (all HIGH/CRITICAL findings)
+      # The scan report that is kept as an artifact and attached to releases. Never fails the job.
+      - name: Scan report
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ steps.reference.outputs.image }}
@@ -142,23 +161,33 @@ jobs:
           format: table
           output: trivy-report.txt
 
-      # The gate: HIGH and CRITICAL findings that have a fix fail the build unless .trivyignore.yaml accepts them
-      # with a justification and an expiry (docs/delivery.md, 'Accepting a scan finding').
-      - name: Scan gate (fails on unaccepted fixable HIGH/CRITICAL)
+      # The gate: any HIGH or CRITICAL finding, fixed or not, fails the build unless .trivyignore.yaml accepts it with
+      # a justification and an expiry (docs/delivery.md, 'Accepting a scan finding').
+      - name: Scan gate (fails on unaccepted HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ steps.reference.outputs.image }}
           severity: HIGH,CRITICAL
-          ignore-unfixed: true
+          ignore-unfixed: false
           exit-code: "1"
           trivyignores: .trivyignore.yaml
           format: table
 
-      # Only an image that passed the gate gets the commit tag.
-      - name: Tag with the git SHA
+      # Only an image that passed the gate gets a tag. A tag is never moved: if the commit tag already points at
+      # another digest, an earlier build of this commit exists and re-running all jobs would change what it means.
+      - name: Tag the image
         env:
           IMAGE: ${{ steps.reference.outputs.image }}
-        run: docker buildx imagetools create --tag "${IMAGE_REPOSITORY}:${GITHUB_SHA}" "$IMAGE"
+        run: |
+          digest="${IMAGE##*@}"
+          existing="$(docker buildx imagetools inspect "${IMAGE_REPOSITORY}:${IMAGE_TAG}" --format '{{json .Manifest.Digest}}' 2> /dev/null | tr -d '"' || true)"
+          if [[ -n "$existing" && "$existing" != "$digest" ]]; then
+            echo "::error::${IMAGE_REPOSITORY}:${IMAGE_TAG} already points at ${existing}, not ${digest}. Tags are not moved; push a new commit instead of re-running every job."
+            exit 1
+          fi
+          if [[ -z "$existing" ]]; then
+            docker buildx imagetools create --tag "${IMAGE_REPOSITORY}:${IMAGE_TAG}" "$IMAGE"
+          fi
 
       - name: Write release evidence
         if: always()
@@ -176,10 +205,10 @@ jobs:
             echo
             echo "* Commit: \`${GITHUB_SHA}\`"
             echo "* Image: \`${IMAGE:-not built}\`"
-            echo "* Tag: \`${IMAGE_REPOSITORY}:${GITHUB_SHA}\` (set only after the scan gate passed)"
+            echo "* Tag: \`${IMAGE_REPOSITORY}:${IMAGE_TAG}\` (set only after the scan gate passed)"
             if [[ -f trivy-report.txt ]]; then
               echo
-              echo "<details><summary>All HIGH/CRITICAL findings, including those with no fix yet</summary>"
+              echo "<details><summary>HIGH/CRITICAL findings</summary>"
               echo
               echo '```text'
               cat trivy-report.txt

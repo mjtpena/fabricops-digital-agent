@@ -1,18 +1,27 @@
 name: CI
 
+# Runs on pull requests, pushes to other branches, weekly, and as a reusable workflow: cd.yml calls it and its build job
+# `needs` it, so nothing is built, pushed or deployed from main (or a cd-dryrun branch) unless every job here passed.
+# Those two pushes therefore do not trigger CI on their own; cd.yml runs it for them.
 on:
   push:
+    branches-ignore:
+      - main
+      - "cd-dryrun/**"
   pull_request:
   schedule:
     # Weekly: new advisories land without code changes, so rescan the dependencies and the image on a schedule.
     - cron: "23 4 * * 1"
+  workflow_call:
 
 permissions:
   contents: read
 
+# One group per event, so the weekly run, a push and a pull request never cancel one another. Only superseded runs on
+# branches and pull requests are cancelled; main, dry-run and scheduled runs always finish.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.ref != 'refs/heads/main' }}
 
 # Every third-party action is pinned by full commit SHA with the version in a trailing comment; Dependabot keeps
 # both current (.github/dependabot.yml). Runners are pinned to ubuntu-24.04 rather than ubuntu-latest.
@@ -180,14 +189,14 @@ jobs:
           docker logs orqentis
           exit 1
 
-      # Same policy as the CD gate: HIGH and CRITICAL findings that have a fix fail the build unless they are
-      # accepted, with a justification and an expiry, in .trivyignore.yaml.
-      - name: Scan image (Trivy, fails on unaccepted fixable HIGH/CRITICAL)
+      # Same policy as the CD gate: any HIGH or CRITICAL finding, fixed or not, fails the build unless it is accepted,
+      # with a justification and an expiry, in .trivyignore.yaml.
+      - name: Scan image (Trivy, fails on unaccepted HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: orqentis-fabricops:ci
           severity: HIGH,CRITICAL
-          ignore-unfixed: true
+          ignore-unfixed: false
           exit-code: "1"
           trivyignores: .trivyignore.yaml
           format: table

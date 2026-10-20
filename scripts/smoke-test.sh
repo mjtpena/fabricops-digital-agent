@@ -6,6 +6,9 @@
 #   bash scripts/smoke-test.sh
 #
 # Checks, in order:
+#   0. The container app's LATEST revision is ready, takes 100% of traffic and runs the image that was deployed
+#      (only when SMOKE_CONTAINER_APP, SMOKE_RESOURCE_GROUP and SMOKE_EXPECTED_IMAGE are set, as the pipeline does).
+#      Without it, a failed rollout would be hidden behind the previous revision still answering the HTTP checks.
 #   1. GET /health                          -> 200 (retried until the new revision answers)
 #   2. GET /incidents, no token             -> 401 (authentication is enforced at the front door)
 #   3. GET /incidents, bearer token         -> 200 and a JSON array (the caller holds an app role)
@@ -19,10 +22,15 @@
 #   SMOKE_BASE_URL               required   Base URL of the API, without a trailing slash.
 #   SMOKE_TOKEN_RESOURCE         required unless SMOKE_TOKEN is set. Application ID URI of the API (api://<client id>).
 #   SMOKE_TOKEN                  optional   Bearer token to use instead of calling `az`.
-#   SMOKE_HEALTH_AUTHENTICATED   optional   "true": send the token on /health. Use this when Container Apps
-#                                           authentication also covers /health (no excludedPaths), in which case an
-#                                           anonymous request gets 401 from the front end. Default "false".
-#   SMOKE_RETRIES / SMOKE_RETRY_DELAY       /health attempts (default 30) and seconds between them (default 10).
+#   SMOKE_CONTAINER_APP / SMOKE_RESOURCE_GROUP / SMOKE_EXPECTED_IMAGE
+#                                optional   All three or none. Enables check 0 (needs `az`, signed in with read access).
+#                                           The expected image is the digest reference that was deployed.
+#   SMOKE_HEALTH_AUTHENTICATED   optional   "true": send the token on /health. The default "false" matches the
+#                                           deployment, which excludes /health from Container Apps authentication
+#                                           (anonymousHealthEndpoints, default true). Set "true" only if you turned that off:
+#                                           the front end then answers an anonymous /health with 401.
+#   SMOKE_RETRIES / SMOKE_RETRY_DELAY       Attempts (default 30) and seconds between them (default 10), for the
+#                                           revision check and for /health.
 set -euo pipefail
 
 base_url="${SMOKE_BASE_URL:-}"
@@ -31,6 +39,9 @@ token="${SMOKE_TOKEN:-}"
 health_authenticated="${SMOKE_HEALTH_AUTHENTICATED:-false}"
 retries="${SMOKE_RETRIES:-30}"
 retry_delay="${SMOKE_RETRY_DELAY:-10}"
+container_app="${SMOKE_CONTAINER_APP:-}"
+resource_group="${SMOKE_RESOURCE_GROUP:-}"
+expected_image="${SMOKE_EXPECTED_IMAGE:-}"
 max_time=20
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -48,6 +59,11 @@ if [[ -z "$base_url" ]]; then
 fi
 if [[ -z "$token" && -z "$token_resource" ]]; then
   echo "Set SMOKE_TOKEN_RESOURCE (api://<client id>) or SMOKE_TOKEN" >&2
+  exit 2
+fi
+if [[ -n "${container_app}${resource_group}${expected_image}" ]] \
+  && [[ -z "$container_app" || -z "$resource_group" || -z "$expected_image" ]]; then
+  echo "Set SMOKE_CONTAINER_APP, SMOKE_RESOURCE_GROUP and SMOKE_EXPECTED_IMAGE together, or none of them" >&2
   exit 2
 fi
 base_url="${base_url%/}"
@@ -98,6 +114,50 @@ print(f"      token claims: aud={claims.get('aud')} roles={claims.get('roles')} 
 PY
 }
 
+# ---------------------------------------------------------------------------------------------- 0. revision
+# Reads the app with `az resource` (core CLI, no extension to install). Single-revision mode: the latest revision must be
+# the latest READY revision, must hold all traffic, and must run exactly the image the pipeline deployed.
+revision_api_version="2024-03-01"
+check_revision() {
+  local attempt app_id latest ready details image traffic state
+  for attempt in $(seq 1 "$retries"); do
+    app_id=""
+    latest=""
+    ready=""
+    image=""
+    traffic=""
+    state=""
+    if info="$(az resource show --resource-group "$resource_group" --name "$container_app" \
+      --resource-type Microsoft.App/containerApps --api-version "$revision_api_version" \
+      --query "[id, properties.latestRevisionName, properties.latestReadyRevisionName]" \
+      --output tsv 2> /dev/null)"; then
+      { read -r app_id; read -r latest; read -r ready; } <<< "$info"
+    fi
+    if [[ -n "$latest" && "$latest" == "$ready" ]]; then
+      if details="$(az resource show --ids "${app_id}/revisions/${latest}" --api-version "$revision_api_version" \
+        --query "[properties.template.containers[0].image, properties.trafficWeight, properties.runningState]" \
+        --output tsv 2> /dev/null)"; then
+        { read -r image; read -r traffic; read -r state; } <<< "$details"
+      fi
+      if [[ "$image" == "$expected_image" && "$traffic" == "100" && "$state" == Running* ]]; then
+        pass "revision ${latest} is ready, serves 100% of traffic and runs the deployed image"
+        return 0
+      fi
+    fi
+    echo "      revision attempt ${attempt}/${retries}: latest=${latest:-?} ready=${ready:-?} traffic=${traffic:-?} state=${state:-?}"
+    sleep "$retry_delay"
+  done
+  fail "revision: latest=${latest:-?} ready=${ready:-?} traffic=${traffic:-?} state=${state:-?} image=${image:-?} (expected ${expected_image} at 100% traffic)"
+  return 1
+}
+
+echo "Smoke test against ${base_url}"
+if [[ -n "$container_app" ]]; then
+  check_revision || true
+else
+  echo "      (revision check skipped: SMOKE_CONTAINER_APP is not set)"
+fi
+
 # ---------------------------------------------------------------------------------------------- token
 if [[ -z "$token" ]]; then
   echo "Requesting a token for ${token_resource} as the signed-in principal"
@@ -116,7 +176,6 @@ if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
 fi
 
 # ---------------------------------------------------------------------------------------------- 1. /health
-echo "Smoke test against ${base_url}"
 health_token=""
 [[ "$health_authenticated" == "true" ]] && health_token="$token"
 status="000"

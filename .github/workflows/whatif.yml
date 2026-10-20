@@ -10,8 +10,12 @@ name: Bicep what-if
 # The artifact lists resources and property paths only. Property VALUES are deliberately left out: template functions
 # such as listKeys() put keys into what-if payloads, and the raw payload is never printed or uploaded.
 #
-# Repository variables (docs/delivery.md): AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_LOGIN_SERVER, ACR_RESOURCE_ID,
-# WHATIF_CLIENT_ID, WHATIF_RESOURCE_GROUP, WHATIF_ENTRA_API_CLIENT_ID.
+# The identity has rights on the dev resource group only. The AcrPull grant on the shared registry is deployed as a module
+# into ANOTHER resource group, so the what-if leaves it out (containerRegistryResourceId is empty) rather than giving a
+# pull-request identity any access to the shared registry's resource group. Review that module by reading the diff.
+#
+# Repository variables (docs/delivery.md): AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_LOGIN_SERVER, WHATIF_CLIENT_ID,
+# WHATIF_RESOURCE_GROUP, WHATIF_ENTRA_API_CLIENT_ID.
 
 on:
   pull_request:
@@ -39,7 +43,8 @@ jobs:
     env:
       RESOURCE_GROUP: ${{ vars.WHATIF_RESOURCE_GROUP }}
       ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
-      ACR_RESOURCE_ID: ${{ vars.ACR_RESOURCE_ID }}
+      # Empty on purpose: skips the cross-resource-group AcrPull module (see above).
+      ACR_RESOURCE_ID: ""
       ENTRA_API_CLIENT_ID: ${{ vars.WHATIF_ENTRA_API_CLIENT_ID }}
     steps:
       - name: Check configuration
@@ -48,7 +53,7 @@ jobs:
           AZURE_SUBSCRIPTION_ID_VAR: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
           missing=()
-          for name in AZURE_TENANT_ID_VAR AZURE_SUBSCRIPTION_ID_VAR RESOURCE_GROUP ACR_LOGIN_SERVER ACR_RESOURCE_ID ENTRA_API_CLIENT_ID; do
+          for name in AZURE_TENANT_ID_VAR AZURE_SUBSCRIPTION_ID_VAR RESOURCE_GROUP ACR_LOGIN_SERVER ENTRA_API_CLIENT_ID; do
             [[ -n "${!name:-}" ]] || missing+=("${name%_VAR}")
           done
           if ((${#missing[@]} > 0)); then
@@ -84,8 +89,11 @@ jobs:
       - name: What-if
         if: steps.group.outputs.exists == 'true'
         run: |
-          current_image="$(az containerapp list --resource-group "$RESOURCE_GROUP" --query '[0].properties.template.containers[0].image' --output tsv 2>/dev/null || true)"
-          [[ "$current_image" == "None" ]] && current_image=""
+          app_name="$(az resource list --resource-group "$RESOURCE_GROUP" --resource-type Microsoft.App/containerApps --query '[0].name' --output tsv 2> /dev/null || true)"
+          current_image=""
+          if [[ -n "$app_name" ]]; then
+            current_image="$(az resource show --resource-group "$RESOURCE_GROUP" --name "$app_name" --resource-type Microsoft.App/containerApps --api-version 2024-03-01 --query 'properties.template.containers[0].image' --output tsv 2> /dev/null || true)"
+          fi
           export CONTAINER_IMAGE="${current_image:-${ACR_LOGIN_SERVER}/orqentis-fabricops@sha256:0000000000000000000000000000000000000000000000000000000000000000}"
           raw="$RUNNER_TEMP/whatif-raw.json"
           mkdir -p whatif-out
