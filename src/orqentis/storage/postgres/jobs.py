@@ -26,6 +26,19 @@ from orqentis.runtime.job_store import (
 )
 from orqentis.storage.postgres.database import PostgresDatabase
 
+# Explicit columns, never ``*``: a newer revision may add a column (expand migration) while this one still serves, and
+# a cached prepared ``SELECT *`` would then fail with "cached statement plan is invalid".
+_COLUMNS = (
+    "job_id, incident_id, status, trigger, requested_by, created_at, started_at, finished_at, error, result, "
+    "principal, claim_seq, attempts"
+)
+
+
+def _sql(template: str) -> str:
+    """Fill ``{columns}`` / ``{j_columns}`` in a fixed statement text (no caller-supplied value ever reaches it)."""
+    j_columns = ", ".join(f"j.{column.strip()}" for column in _COLUMNS.split(","))
+    return template.replace("{columns}", _COLUMNS).replace("{j_columns}", j_columns)
+
 
 def _job(row: asyncpg.Record) -> InvestigationJob:
     return InvestigationJob(
@@ -65,7 +78,10 @@ class PostgresJobStore:
                 if inserted is not None:
                     return job, True
                 existing = await conn.fetchrow(
-                    "SELECT * FROM investigation_jobs WHERE incident_id = $1 AND status IN ('QUEUED', 'RUNNING')",
+                    _sql(
+                        "SELECT {columns} FROM investigation_jobs "
+                        "WHERE incident_id = $1 AND status IN ('QUEUED', 'RUNNING')"
+                    ),
                     job.incident_id,
                 )
             if existing is not None:
@@ -74,12 +90,15 @@ class PostgresJobStore:
         raise RuntimeError(f"Could not enqueue or find an active investigation job for {job.incident_id}")
 
     async def get(self, job_id: str) -> InvestigationJob | None:
-        row = await self._db.fetchrow("SELECT * FROM investigation_jobs WHERE job_id = $1", job_id)
+        row = await self._db.fetchrow(_sql("SELECT {columns} FROM investigation_jobs WHERE job_id = $1"), job_id)
         return _job(row) if row else None
 
     async def latest_for(self, incident_id: str) -> InvestigationJob | None:
         row = await self._db.fetchrow(
-            "SELECT * FROM investigation_jobs WHERE incident_id = $1 ORDER BY created_at DESC, job_id DESC LIMIT 1",
+            _sql(
+                "SELECT {columns} FROM investigation_jobs WHERE incident_id = $1 "
+                "ORDER BY created_at DESC, job_id DESC LIMIT 1"
+            ),
             incident_id,
         )
         return _job(row) if row else None
@@ -110,11 +129,13 @@ class PostgresJobStore:
     async def claim_next(self, worker_id: str, claim_ttl: timedelta, started_at: datetime) -> ClaimedJob | None:
         async with self._db.transaction() as conn:
             row = await conn.fetchrow(
-                "UPDATE investigation_jobs j SET status = 'RUNNING', claimed_by = $1, "
-                "claim_expires_at = now() + $2::interval, claim_seq = j.claim_seq + 1, started_at = $3 "
-                "WHERE j.job_id = (SELECT job_id FROM investigation_jobs WHERE status = 'QUEUED' "
-                "ORDER BY created_at, job_id FOR UPDATE SKIP LOCKED LIMIT 1) "
-                "RETURNING *",
+                _sql(
+                    "UPDATE investigation_jobs j SET status = 'RUNNING', claimed_by = $1, "
+                    "claim_expires_at = now() + $2::interval, claim_seq = j.claim_seq + 1, started_at = $3 "
+                    "WHERE j.job_id = (SELECT job_id FROM investigation_jobs WHERE status = 'QUEUED' "
+                    "ORDER BY created_at, job_id FOR UPDATE SKIP LOCKED LIMIT 1) "
+                    "RETURNING {j_columns}"
+                ),
                 worker_id,
                 claim_ttl,
                 started_at,
@@ -185,16 +206,18 @@ class PostgresJobStore:
     async def reclaim_expired(self, *, max_attempts: int, finished_at: datetime) -> list[InvestigationJob]:
         async with self._db.transaction() as conn:
             rows = await conn.fetch(
-                "WITH expired AS (SELECT job_id FROM investigation_jobs WHERE status = 'RUNNING' "
-                "AND claim_expires_at < now() FOR UPDATE SKIP LOCKED) "
-                "UPDATE investigation_jobs j SET attempts = j.attempts + 1, "
-                "status = CASE WHEN j.attempts + 1 >= $1 THEN 'FAILED' ELSE 'QUEUED' END, "
-                "claimed_by = NULL, claim_expires_at = NULL, "
-                "started_at = CASE WHEN j.attempts + 1 >= $1 THEN j.started_at ELSE NULL END, "
-                "finished_at = CASE WHEN j.attempts + 1 >= $1 THEN $2::timestamptz ELSE NULL END, "
-                "error = CASE WHEN j.attempts + 1 >= $1 THEN 'Abandoned: ' || (j.attempts + 1) || "
-                "' workers stopped answering while running this investigation' ELSE j.error END "
-                "FROM expired WHERE j.job_id = expired.job_id RETURNING j.*",
+                _sql(
+                    "WITH expired AS (SELECT job_id FROM investigation_jobs WHERE status = 'RUNNING' "
+                    "AND claim_expires_at < now() FOR UPDATE SKIP LOCKED) "
+                    "UPDATE investigation_jobs j SET attempts = j.attempts + 1, "
+                    "status = CASE WHEN j.attempts + 1 >= $1 THEN 'FAILED' ELSE 'QUEUED' END, "
+                    "claimed_by = NULL, claim_expires_at = NULL, "
+                    "started_at = CASE WHEN j.attempts + 1 >= $1 THEN j.started_at ELSE NULL END, "
+                    "finished_at = CASE WHEN j.attempts + 1 >= $1 THEN $2::timestamptz ELSE NULL END, "
+                    "error = CASE WHEN j.attempts + 1 >= $1 THEN 'Abandoned: ' || (j.attempts + 1) || "
+                    "' workers stopped answering while running this investigation' ELSE j.error END "
+                    "FROM expired WHERE j.job_id = expired.job_id RETURNING {j_columns}"
+                ),
                 max_attempts,
                 finished_at,
             )
@@ -204,8 +227,10 @@ class PostgresJobStore:
         args: list[Any] = [error, finished_at]
         async with self._db.transaction() as conn:
             rows = await conn.fetch(
-                "UPDATE investigation_jobs SET status = 'FAILED', error = $1, finished_at = $2, counts_attempt = false "
-                "WHERE status = 'QUEUED' RETURNING *",
+                _sql(
+                    "UPDATE investigation_jobs SET status = 'FAILED', error = $1, finished_at = $2, "
+                    "counts_attempt = false WHERE status = 'QUEUED' RETURNING {columns}"
+                ),
                 *args,
             )
         return [_job(r) for r in rows]
