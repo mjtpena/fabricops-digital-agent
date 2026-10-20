@@ -8,12 +8,16 @@ retention ends. Listing is lexicographic, which for zero-padded sequences is num
 
 from __future__ import annotations
 
+import re
+
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import ContainerClient
 
 from orqentis.observability.anchors import AuditAnchor, parse_anchor_name, pick_latest
 from orqentis.storage.blob.evidence import normalise_prefix
+
+_EPOCH_FOLDER = re.compile(r"^epoch-(\d{4})/$")
 
 
 class BlobAuditAnchorStore:
@@ -32,6 +36,16 @@ class BlobAuditAnchorStore:
         except ResourceExistsError:
             return False
         return True
+
+    async def highest_epoch(self) -> int | None:
+        # One level of "folders" (epoch-NNNN/): listing by delimiter does not read every anchor ever written.
+        epochs: list[int] = []
+        async for item in self._container.walk_blobs(name_starts_with=f"{self._prefix}epoch-", delimiter="/"):
+            name = str(item.name)[len(self._prefix) :]
+            match = _EPOCH_FOLDER.match(name)
+            if match:
+                epochs.append(int(match.group(1)))
+        return max(epochs) if epochs else None
 
     async def latest(self, epoch: int) -> AuditAnchor | None:
         folder = f"{self._prefix}epoch-{epoch:04d}/"

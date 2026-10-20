@@ -47,3 +47,12 @@ async def test_two_different_hashes_for_one_sequence_are_a_conflict(anchor_store
     await anchor_store.put(anchor(10))  # a later, unambiguous anchor supersedes the conflict
     latest = await anchor_store.latest(1)
     assert latest is not None and latest.sequence == 10
+
+
+async def test_the_highest_epoch_is_the_highest_epoch_with_any_anchor(anchor_store: AuditAnchorStore) -> None:
+    assert await anchor_store.highest_epoch() is None
+    await anchor_store.put(anchor(5, epoch=1))
+    assert await anchor_store.highest_epoch() == 1
+    await anchor_store.put(anchor(3, epoch=3))
+    await anchor_store.put(anchor(9, epoch=2))
+    assert await anchor_store.highest_epoch() == 3

@@ -8,7 +8,9 @@ same hash: rewriting history or dropping the tail contradicts something the data
 
 * Anchors are grouped in **epochs**. A new epoch begins only through an explicit, audited operator action after a
   restore (``orqentis audit start-epoch``; docs/operations/restore.md); the anchors of the previous epoch stay in the
-  immutable container as the evidence of what the restore lost.
+  immutable container as the evidence of what the restore lost. The operator action also writes the first anchor of the
+  new epoch (the ``audit.epoch`` record), so the **highest epoch with an anchor** is the epoch the database must be in:
+  someone who only holds the database cannot move the epoch counter to a place no anchor reaches.
 * ``put`` is write-once and idempotent: anchoring the same (epoch, sequence, hash) again is a no-op, and a *different*
   hash for an already anchored sequence is kept as a second anchor so that ``latest`` can report the conflict.
 * The anchors are re-derived from nothing the application can edit afterwards, so the application deletes none.
@@ -59,6 +61,10 @@ class AuditAnchorStore(Protocol):
         """The anchor with the highest sequence in ``epoch``; raises :class:`AnchorConflictError` on disagreement."""
         ...
 
+    async def highest_epoch(self) -> int | None:
+        """The highest epoch that has any anchor, or ``None`` when nothing was ever anchored."""
+        ...
+
 
 @dataclass(frozen=True)
 class ChainHead:
@@ -106,6 +112,21 @@ class LocalAuditAnchorStore:
         except FileExistsError:
             return False
         return True
+
+    async def highest_epoch(self) -> int | None:
+        return await asyncio.to_thread(self._highest_epoch)
+
+    def _highest_epoch(self) -> int | None:
+        if not self._root.is_dir():
+            return None
+        epochs = [
+            parsed[0]
+            for folder in self._root.iterdir()
+            if folder.is_dir()
+            for p in folder.iterdir()
+            if (parsed := parse_anchor_name(f"{folder.name}/{p.name}")) is not None
+        ]
+        return max(epochs) if epochs else None
 
     async def latest(self, epoch: int) -> AuditAnchor | None:
         return await asyncio.to_thread(self._latest, epoch)

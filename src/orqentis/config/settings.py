@@ -329,11 +329,13 @@ class Settings(BaseSettings):
         if missing:
             raise ValueError(f"ORQENTIS_STORAGE_BACKEND=postgres requires {', '.join(missing)}")
         if self.deployment_environment != "local" and (
-            self.postgres_auth is not PostgresAuth.ENTRA or self.postgres_ssl_mode is PostgresSslMode.DISABLE
+            self.postgres_auth is not PostgresAuth.ENTRA or self.postgres_ssl_mode is not PostgresSslMode.VERIFY_FULL
         ):
+            # The Entra access token is the database password: a connection that does not verify the server's
+            # certificate and host name (require) would hand it to anyone who can intercept the connection.
             raise ValueError(
-                "ORQENTIS_POSTGRES_AUTH=none and ORQENTIS_POSTGRES_SSL_MODE=disable are only permitted when "
-                "deployment_environment=local (a throwaway test container)"
+                "ORQENTIS_POSTGRES_AUTH=none and ORQENTIS_POSTGRES_SSL_MODE=disable or require are only permitted "
+                "when deployment_environment=local (a throwaway test container)"
             )
         parts = urlsplit(self.evidence_blob_url or "")
         if parts.scheme != "https" and not (parts.scheme == "http" and _is_loopback(parts.hostname or "")):

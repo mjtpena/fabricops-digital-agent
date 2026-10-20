@@ -205,12 +205,15 @@ was cut, **before** any app writes to the restored server:
 
 ```bash
 orqentis audit start-epoch --reason "PITR restore of $OLD to $RESTORE_TIME as $NEW after <incident or ticket reference>; audit records after the restore point are lost"
-orqentis audit          # valid again: the new epoch has no anchor yet
+orqentis audit          # valid again: the new epoch's first anchor is the audit.epoch record itself
 ```
 
 This appends an `audit.epoch` record to the restored chain (it names the restored head and the last anchored sequence and
-hash of the epoch that ends) and starts a new anchor epoch. From then on the app writes its anchors under `epoch-0002/`,
-and verification checks the new epoch's anchors only. The anchors of the previous epoch stay in the immutable `audit-anchors`
+hash of the epoch that ends), writes that record as the first anchor of a new epoch (`epoch-0002/...`) and moves the
+database into it. The anchors, which the database cannot change, say which epoch the database must be in, so an epoch
+counter that was changed any other way fails verification. From then on the app writes its anchors under `epoch-0002/`,
+and verification checks the new epoch's anchors only. (If an earlier restore already created epoch 2, the new epoch is the
+next free one.) The anchors of the previous epoch stay in the immutable `audit-anchors`
 container as the evidence of what the restore lost; nothing deletes them.
 
 **Why before.** The restored chain resumes at the sequence numbers the lost records had. If the app appended first and

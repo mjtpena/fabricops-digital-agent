@@ -217,10 +217,16 @@ class InvestigationJobRunner:
             else:
                 await self._finish(claimed, InvestigationJobStatus.FAILED, error=_SHUTDOWN_REASON, counts=False)
         self._unentered.clear()
-        # Jobs that never got a slot have no task to mark them.
-        if not self._store.shared:
+        if self._store.shared:
+            # A claim can commit just as the worker loop is cancelled: it then belongs to no task. Give it back now
+            # instead of leaving it RUNNING until its claim expires (which would also cost the job an attempt).
+            if (orphaned := await self._store.release_claims(self._worker_id)) > 0:
+                _log.info("released claims that no task had started", extra={"jobs": orphaned})
+        else:
+            # Jobs that never got a slot have no task to mark them.
             for job in await self._store.cancel_queued(error=_SHUTDOWN_REASON, finished_at=self._clock.now()):
                 _log.info("queued investigation cancelled by shutdown", extra={"job_id": job.job_id})
+                await self._audit_failure(job)
 
     async def reset_stale(self, incident_id: str, *, reason: str) -> bool:
         """Put an incident stuck in ``INVESTIGATING`` back to ``DETECTED`` (no live job is working on it)."""
@@ -299,7 +305,13 @@ class InvestigationJobRunner:
         self._request_pump()  # a slot is free: take the next queued job
 
     async def _reclaim(self) -> None:
-        for job in await self._store.reclaim_expired(max_attempts=self._max_claims, finished_at=self._clock.now()):
+        # Never take back a job this process is still running: after a database outage longer than the claim TTL its
+        # claim looks expired, but its task is alive and will heartbeat again (or find the claim lost, if another
+        # replica took it).
+        expired = await self._store.reclaim_expired(
+            max_attempts=self._max_claims, finished_at=self._clock.now(), exclude=list(self._running)
+        )
+        for job in expired:
             _log.warning("investigation abandoned by its workers", extra={"job_id": job.job_id})
             await self._reset(job.incident_id, reason=job.error or "abandoned")
             await self._audit_failure(job)

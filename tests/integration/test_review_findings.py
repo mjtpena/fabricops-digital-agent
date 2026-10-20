@@ -109,6 +109,9 @@ async def test_shutdown_does_not_burn_the_retry_budget_of_running_or_queued_inve
     # Being stopped by a deploy says nothing about the incident: it must stay eligible for automatic investigation.
     assert await runner.failed_attempts(first.incident_id) == 0
     assert await runner.failed_attempts(second.incident_id) == 0
+    # Both ended, so both are in the audit trail (the one that never got a slot as well as the one that was running).
+    failed = [r for r in await container.audit.list() if r.action == "investigation.job" and r.outcome == "FAILED"]
+    assert sorted(r.incident_id or "" for r in failed) == sorted([first.incident_id, second.incident_id])
 
 
 async def test_a_genuine_timeout_still_counts_as_a_failed_attempt(

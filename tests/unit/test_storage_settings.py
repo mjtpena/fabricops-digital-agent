@@ -111,3 +111,17 @@ def test_a_contracts_blob_location_that_could_escape_its_container_is_refused(tm
     for container in ("Contracts", "co", "-contracts", "contracts-", "a_b", "x" * 64):
         with pytest.raises(ValueError, match="contracts_container"):
             make_settings(tmp_path, **POSTGRES, contracts_container=container)
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("environment", ["dev", "test", "prod"])
+def test_a_database_connection_that_does_not_verify_the_server_is_for_a_local_container_only(
+    tmp_path: Path, environment: str
+) -> None:
+    """The Entra access token is the password: ``require`` encrypts but accepts any certificate, so it would hand
+    the token to whoever can intercept the connection."""
+    for mode in (PostgresSslMode.REQUIRE, PostgresSslMode.DISABLE):
+        with pytest.raises(ValueError, match="only permitted when deployment_environment=local"):
+            deployed(tmp_path, deployment_environment=environment, postgres_ssl_mode=mode)
+    deployed(tmp_path, deployment_environment=environment, postgres_ssl_mode=PostgresSslMode.VERIFY_FULL)
+    make_settings(tmp_path, **POSTGRES, postgres_ssl_mode=PostgresSslMode.REQUIRE)  # a local container may

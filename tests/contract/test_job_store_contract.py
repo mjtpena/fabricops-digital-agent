@@ -231,3 +231,49 @@ async def test_cancel_queued_fails_queued_jobs_without_counting(job_store: JobSt
     )
     assert await job_store.count_failed_attempts("INC-2026-0002") == 0
     assert (await job_store.get("INV-1")).status is InvestigationJobStatus.RUNNING  # type: ignore[union-attr]
+
+
+async def test_a_job_the_caller_is_still_running_is_not_reclaimed_even_when_its_claim_expired(
+    job_store: JobStore,
+) -> None:
+    """A worker that could not heartbeat (a database outage) must not take back, and restart, its own live job."""
+    await job_store.enqueue(job(1), OPERATOR)
+    await job_store.enqueue(job(2), OPERATOR)
+    short = timedelta(milliseconds=400)
+    first = await job_store.claim_next("w1", short, now())
+    second = await job_store.claim_next("w1", short, now())
+    assert first is not None and second is not None
+    await asyncio.sleep(0.8)
+    assert await job_store.reclaim_expired(max_attempts=3, finished_at=now(), exclude=["INV-1"]) == []
+    one, two = await job_store.get("INV-1"), await job_store.get("INV-2")
+    assert one is not None and one.status is InvestigationJobStatus.RUNNING  # left alone
+    assert two is not None and two.status is InvestigationJobStatus.QUEUED  # not excluded: re-queued
+    # Its worker comes back: the heartbeat still holds, the claim number is unchanged, nothing was lost.
+    assert await job_store.heartbeat("INV-1", "w1", first.claim, TTL)
+    assert await job_store.finish(
+        "INV-1", "w1", first.claim, status=InvestigationJobStatus.SUCCEEDED, finished_at=now()
+    )
+
+
+async def test_release_claims_gives_back_every_job_of_a_worker_without_counting_an_attempt(
+    job_store: JobStore,
+) -> None:
+    for n in (1, 2, 3):
+        await job_store.enqueue(job(n), OPERATOR)
+    mine_a = await job_store.claim_next("w1", TTL, now())
+    mine_b = await job_store.claim_next("w1", TTL, now())
+    theirs = await job_store.claim_next("w2", TTL, now())
+    assert mine_a is not None and mine_b is not None and theirs is not None
+
+    assert await job_store.release_claims("w1") == 2
+    assert await job_store.release_claims("w1") == 0  # nothing left
+    for job_id in (mine_a.job.job_id, mine_b.job.job_id):
+        released = await job_store.get(job_id)
+        assert released is not None and released.status is InvestigationJobStatus.QUEUED
+    still = await job_store.get(theirs.job.job_id)
+    assert still is not None and still.status is InvestigationJobStatus.RUNNING
+    # The released worker's claim numbers are dead; the next claim is a fresh one and not a "recovered" job.
+    assert not await job_store.heartbeat(mine_a.job.job_id, "w1", mine_a.claim, TTL)
+    again = await job_store.claim_next("w3", TTL, now())
+    assert again is not None and again.claim > mine_a.claim and not again.recovered
+    assert await job_store.count_failed_attempts(mine_a.job.incident_id) == 0

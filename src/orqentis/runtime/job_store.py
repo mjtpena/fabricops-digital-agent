@@ -13,6 +13,7 @@ it:
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -133,8 +134,22 @@ class JobStore(Protocol):
         """Give a claimed job back to the queue without counting an attempt (a graceful shutdown)."""
         ...
 
-    async def reclaim_expired(self, *, max_attempts: int, finished_at: datetime) -> list[InvestigationJob]:
-        """Re-queue running jobs whose claim expired; returns the jobs that were failed for good instead."""
+    async def release_claims(self, worker_id: str) -> int:
+        """Give back every job this worker still holds, without counting an attempt; returns how many.
+
+        For a graceful shutdown, after the worker's own tasks have ended: a claim that committed as the worker loop was
+        cancelled belongs to no task, and would otherwise sit ``RUNNING`` until its claim expires.
+        """
+        ...
+
+    async def reclaim_expired(
+        self, *, max_attempts: int, finished_at: datetime, exclude: Collection[str] = ()
+    ) -> list[InvestigationJob]:
+        """Re-queue running jobs whose claim expired; returns the jobs that were failed for good instead.
+
+        ``exclude`` are job ids the caller is itself running: a worker that could not heartbeat for a while (a database
+        outage) must not take back, and start a second time, a job whose task is still alive. Another worker may.
+        """
         ...
 
     async def cancel_queued(self, *, error: str, finished_at: datetime) -> list[InvestigationJob]:
@@ -250,12 +265,24 @@ class InMemoryJobStore:
         del self._claims[job_id]
         return True
 
-    async def reclaim_expired(self, *, max_attempts: int, finished_at: datetime) -> list[InvestigationJob]:
+    async def release_claims(self, worker_id: str) -> int:
+        released = 0
+        for job_id, (worker, _, _) in list(self._claims.items()):
+            job = self._jobs[job_id]
+            if worker == worker_id and job.status is InvestigationJobStatus.RUNNING:
+                job.status, job.started_at = InvestigationJobStatus.QUEUED, None
+                del self._claims[job_id]
+                released += 1
+        return released
+
+    async def reclaim_expired(
+        self, *, max_attempts: int, finished_at: datetime, exclude: Collection[str] = ()
+    ) -> list[InvestigationJob]:
         failed: list[InvestigationJob] = []
         now = self._clock.now()
         for job_id, (_, _, expires) in list(self._claims.items()):
             job = self._jobs[job_id]
-            if job.status is not InvestigationJobStatus.RUNNING or expires >= now:
+            if job.status is not InvestigationJobStatus.RUNNING or expires >= now or job_id in exclude:
                 continue
             del self._claims[job_id]
             attempts = self._attempts[job_id] = self._attempts.get(job_id, 0) + 1

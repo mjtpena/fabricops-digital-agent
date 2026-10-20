@@ -191,7 +191,8 @@ async def test_a_fully_recomputed_history_contradicts_the_anchor(
         await conn.execute("ALTER TABLE audit_records DISABLE TRIGGER USER")
         for record in rebuilt:
             await conn.execute(
-                "UPDATE audit_records SET body = $1, hash = $2, prev_hash = $3 WHERE sequence = $4",
+                "UPDATE audit_records SET body = $1, hash = $2, prev_hash = $3, outcome = 'REWRITTEN' "
+                "WHERE sequence = $4",
                 record.model_dump_json(),
                 record.hash,
                 record.prev_hash,
@@ -200,7 +201,7 @@ async def test_a_fully_recomputed_history_contradicts_the_anchor(
         await conn.execute("UPDATE audit_chain_head SET hash = $1 WHERE id = 1", previous)
     finally:
         await conn.close()
-    plain = await PostgresAuditTrail(pg.database, SystemClock()).verify()  # without an anchor the rewrite is invisible
+    plain = await PostgresAuditTrail(pg.database, SystemClock()).verify()  # no anchor: the rewrite is invisible
     assert plain.valid
     anchored = await audit.verify()
     assert not anchored.valid and "contradicts the audit anchor" in (anchored.reason or "")
@@ -241,7 +242,9 @@ async def test_starting_a_new_epoch_after_a_restore_documents_the_loss_and_resum
     assert marker.details["previous_epoch"] == 1 and marker.details["database_head_sequence"] == 3
     assert marker.details["last_anchored_sequence"] == 5  # the loss, in the chain itself and in the old anchors
     assert (await audit.head()).epoch == 2
-    resumed = await audit.verify()  # nothing is anchored in the new epoch yet; the chain itself is intact
+    first = await anchors.latest(2)  # starting an epoch anchors its first record: the anchors now say "epoch 2"
+    assert first is not None and first.sequence == 4 and first.hash == marker.hash
+    resumed = await audit.verify()
     assert resumed.valid and resumed.records == 4
     await audit.record(actor="a", action="after", outcome="OK")
     assert await AuditAnchorTask(audit, anchors, SystemClock()).run() is not None
@@ -250,3 +253,139 @@ async def test_starting_a_new_epoch_after_a_restore_documents_the_loss_and_resum
     old = await anchors.latest(1)
     assert old is not None and old.sequence == 5  # the old epoch's anchors are untouched evidence of the loss
     assert (await audit.verify()).valid
+
+
+async def test_a_second_restore_from_an_older_backup_does_not_reuse_an_epoch_that_has_anchors(
+    pg: PostgresStorage, tmp_path
+) -> None:
+    anchors = LocalAuditAnchorStore(tmp_path / "anchors")
+    audit = PostgresAuditTrail(pg.database, FixedClock(datetime(2026, 10, 20, tzinfo=UTC)), anchors)
+    await chain_of(pg, 3)
+    await AuditAnchorTask(audit, anchors, SystemClock()).run()
+    await audit.start_epoch(actor="operator:test", reason="first restore")
+    assert (await audit.head()).epoch == 2 and await anchors.highest_epoch() == 2
+    # A later restore from a backup taken before the first one: the database says epoch 1 again.
+    await pg.database.execute("UPDATE audit_chain_head SET epoch = 1")
+    assert "anchors exist for audit epoch 2" in (await audit.verify()).reason  # type: ignore[operator]
+    await audit.start_epoch(actor="operator:test", reason="second restore")
+    assert (await audit.head()).epoch == 3  # not 2: epoch 2 already has anchors that describe another history
+    assert (await audit.verify()).valid
+
+
+# --------------------------------------------------------------------- findings of the independent review
+@pytest.mark.security
+async def test_moving_the_epoch_counter_does_not_escape_the_anchors(
+    pg: PostgresStorage, pg_config: PostgresConfig, postgres_server: PostgresServer, tmp_path
+) -> None:
+    """A full rewrite *and* ``epoch = epoch + 1``: the rewritten chain would be checked against an epoch with no
+    anchors. The anchors say which epoch the database must be in; starting an epoch is the only thing that moves it."""
+    anchors = LocalAuditAnchorStore(tmp_path / "anchors")
+    audit = PostgresAuditTrail(pg.database, SystemClock(), anchors)
+    await chain_of(pg)
+    await AuditAnchorTask(audit, anchors, SystemClock()).run()
+    rows = await pg.database.fetch("SELECT body FROM audit_records ORDER BY sequence")
+    previous, rebuilt = GENESIS_HASH, []
+    for row in rows:
+        record = AuditRecord.model_validate_json(row["body"])
+        draft = record.model_copy(update={"outcome": "REWRITTEN", "prev_hash": previous, "hash": ""})
+        record = draft.model_copy(update={"hash": record_digest(previous, draft)})
+        previous = record.hash
+        rebuilt.append(record)
+    conn = await admin(postgres_server, pg_config.schema)
+    try:
+        await conn.execute("ALTER TABLE audit_records DISABLE TRIGGER USER")
+        for record in rebuilt:
+            await conn.execute(
+                "UPDATE audit_records SET body = $1, hash = $2, prev_hash = $3, outcome = 'REWRITTEN' "
+                "WHERE sequence = $4",
+                record.model_dump_json(),
+                record.hash,
+                record.prev_hash,
+                record.sequence,
+            )
+        await conn.execute("UPDATE audit_chain_head SET hash = $1, epoch = epoch + 1 WHERE id = 1", previous)
+    finally:
+        await conn.close()
+    result = await audit.verify()
+    assert not result.valid and "epoch counter was moved" in (result.reason or "")
+
+
+@pytest.mark.security
+async def test_an_epoch_with_no_anchor_at_all_is_not_accepted(pg: PostgresStorage, tmp_path) -> None:
+    anchors = LocalAuditAnchorStore(tmp_path / "anchors")
+    audit = PostgresAuditTrail(pg.database, SystemClock(), anchors)
+    await chain_of(pg, 3)
+    assert (await audit.verify()).valid  # epoch 1, nothing anchored yet: a fresh installation
+    await pg.database.execute("UPDATE audit_chain_head SET epoch = 2")
+    result = await audit.verify()
+    assert not result.valid and "no anchor exists for it" in (result.reason or "")
+
+
+@pytest.mark.security
+async def test_a_record_slipped_in_beyond_the_head_is_reported_and_not_listed(
+    pg: PostgresStorage, pg_config: PostgresConfig, postgres_server: PostgresServer
+) -> None:
+    records = await chain_of(pg, 3)
+    last = records[-1]
+    forged = AuditRecord(
+        sequence=4,
+        audit_id="AUD-forged",
+        timestamp=last.timestamp,
+        actor="mallory",
+        action="forged",
+        outcome="OK",
+        incident_id=None,
+        trace_id=None,
+        details={},
+        prev_hash=last.hash,
+        hash="",
+    )
+    forged = forged.model_copy(update={"hash": record_digest(last.hash, forged)})
+    conn = await admin(postgres_server, pg_config.schema)
+    try:  # an INSERT is not blocked by the append-only triggers; the head row is not moved
+        await conn.execute(
+            "INSERT INTO audit_records (sequence, audit_id, ts, actor, action, outcome, incident_id, trace_id, "
+            "prev_hash, hash, body) VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, $7, $8, $9)",
+            forged.sequence,
+            forged.audit_id,
+            forged.timestamp,
+            forged.actor,
+            forged.action,
+            forged.outcome,
+            forged.prev_hash,
+            forged.hash,
+            forged.model_dump_json(),
+        )
+    finally:
+        await conn.close()
+    result = await pg.audit.verify()
+    assert not result.valid and "beyond the chain head" in (result.reason or "")
+    assert [r.sequence for r in await pg.audit.list()] == [1, 2, 3]  # the forged row is not part of the trail
+
+
+@pytest.mark.security
+async def test_columns_that_disagree_with_the_hashed_body_are_reported(
+    pg: PostgresStorage, pg_config: PostgresConfig, postgres_server: PostgresServer
+) -> None:
+    """Queries filter on the columns, the hash covers the body: a mismatch lets a record hide from ``list``."""
+    await pg.audit.record(actor="a", action="one", outcome="OK", incident_id="INC-1")
+    await pg.audit.record(actor="a", action="two", outcome="OK", incident_id="INC-1")
+    await pg.audit.record(actor="a", action="three", outcome="OK", incident_id="INC-1")
+    conn = await admin(postgres_server, pg_config.schema)
+    try:
+        await conn.execute("ALTER TABLE audit_records DISABLE TRIGGER USER")
+        await conn.execute("UPDATE audit_records SET incident_id = NULL, actor = 'nobody' WHERE sequence = 2")
+    finally:
+        await conn.close()
+    assert len(await pg.audit.list(incident_id="INC-1")) == 2  # the record is hidden from this query...
+    result = await pg.audit.verify()  # ...and verification says so
+    assert not result.valid and result.first_invalid_sequence == 2 and "indexed columns" in (result.reason or "")
+
+
+async def test_a_nul_character_is_kept_in_the_record_and_does_not_break_the_indexed_columns(
+    pg: PostgresStorage,
+) -> None:
+    record = await pg.audit.record(actor="user\x00x", action="a", outcome="OK", incident_id="INC-\x00-1")
+    assert record.actor == "user\x00x" and record.incident_id == "INC-\x00-1"  # the body keeps the exact value
+    assert (await pg.audit.list(incident_id="INC-\x00-1"))[0].audit_id == record.audit_id
+    assert (await pg.audit.verify()).valid

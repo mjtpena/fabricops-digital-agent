@@ -11,12 +11,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import datetime, timedelta
 from typing import Any
 
 import asyncpg
 
 from orqentis.domain.principals import Principal
+from orqentis.observability.logging import get_logger
 from orqentis.runtime.job_store import (
     ClaimedJob,
     InvestigationJob,
@@ -25,6 +27,8 @@ from orqentis.runtime.job_store import (
     InvestigationTrigger,
 )
 from orqentis.storage.postgres.database import PostgresDatabase
+
+_log = get_logger(__name__)
 
 # Explicit columns, never ``*``: a newer revision may add a column (expand migration) while this one still serves, and
 # a cached prepared ``SELECT *`` would then fail with "cached statement plan is invalid".
@@ -124,6 +128,7 @@ class PostgresJobStore:
                 "WHERE incident_id = $1 AND status = 'SUCCEEDED'), '-infinity'::timestamptz)",
                 incident_id,
             )
+            or 0
         )
 
     async def claim_next(self, worker_id: str, claim_ttl: timedelta, started_at: datetime) -> ClaimedJob | None:
@@ -140,14 +145,30 @@ class PostgresJobStore:
                 claim_ttl,
                 started_at,
             )
-        if row is None:
-            return None
-        return ClaimedJob(
-            job=_job(row),
-            principal=Principal.model_validate_json(row["principal"]),
-            claim=int(row["claim_seq"]),
-            recovered=int(row["attempts"]) > 0,
-        )
+            if row is None:
+                return None
+            try:
+                return ClaimedJob(
+                    job=_job(row),
+                    principal=Principal.model_validate_json(row["principal"]),
+                    claim=int(row["claim_seq"]),
+                    recovered=int(row["attempts"]) > 0,
+                )
+            except ValueError as exc:  # pydantic.ValidationError too
+                # A row this revision cannot read (a newer revision wrote a field it does not know): leaving it RUNNING
+                # with no task would hold the incident's slot until the claim expired. Fail it, visibly and for free.
+                _log.error(
+                    "investigation job cannot be read; failing it",
+                    extra={"job_id": row["job_id"], "error": type(exc).__name__},  # not the message: it quotes values
+                )
+                await conn.execute(
+                    "UPDATE investigation_jobs SET status = 'FAILED', claimed_by = NULL, claim_expires_at = NULL, "
+                    "finished_at = $2, counts_attempt = false, error = $3 WHERE job_id = $1",
+                    row["job_id"],
+                    started_at,
+                    "The job could not be read by this version of the application (written by a newer version?)",
+                )
+                return None
 
     async def heartbeat(self, job_id: str, worker_id: str, claim: int, claim_ttl: timedelta) -> bool:
         async with self._db.transaction() as conn:
@@ -203,12 +224,23 @@ class PostgresJobStore:
             )
         return row is not None
 
-    async def reclaim_expired(self, *, max_attempts: int, finished_at: datetime) -> list[InvestigationJob]:
+    async def release_claims(self, worker_id: str) -> int:
+        async with self._db.transaction() as conn:
+            rows = await conn.fetch(
+                "UPDATE investigation_jobs SET status = 'QUEUED', claimed_by = NULL, claim_expires_at = NULL, "
+                "started_at = NULL WHERE status = 'RUNNING' AND claimed_by = $1 RETURNING job_id",
+                worker_id,
+            )
+        return len(rows)
+
+    async def reclaim_expired(
+        self, *, max_attempts: int, finished_at: datetime, exclude: Collection[str] = ()
+    ) -> list[InvestigationJob]:
         async with self._db.transaction() as conn:
             rows = await conn.fetch(
                 _sql(
                     "WITH expired AS (SELECT job_id FROM investigation_jobs WHERE status = 'RUNNING' "
-                    "AND claim_expires_at < now() FOR UPDATE SKIP LOCKED) "
+                    "AND claim_expires_at < now() AND job_id <> ALL($3::text[]) FOR UPDATE SKIP LOCKED) "
                     "UPDATE investigation_jobs j SET attempts = j.attempts + 1, "
                     "status = CASE WHEN j.attempts + 1 >= $1 THEN 'FAILED' ELSE 'QUEUED' END, "
                     "claimed_by = NULL, claim_expires_at = NULL, "
@@ -220,6 +252,7 @@ class PostgresJobStore:
                 ),
                 max_attempts,
                 finished_at,
+                list(exclude),
             )
         return [_job(r) for r in rows if r["status"] == InvestigationJobStatus.FAILED.value]
 

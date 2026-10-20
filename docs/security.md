@@ -184,7 +184,8 @@ row lock on the chain head, and `audit_records` rejects `UPDATE`, `DELETE` and `
 depth against bugs). The tamper evidence is the chain plus **anchors**: every 15 minutes the head
 (epoch, sequence, hash) is written once to a blob in a container with version-level immutability, and `orqentis
 audit` / `GET /audit/verify` check that the database still holds the anchored record with the anchored hash. An
-edited record, a removed record, a removed tail, and a table rewritten with every hash recomputed are each detected
+edited record, a removed record, a removed tail, a row slipped in beyond the head, columns edited apart from the
+hashed body, and a table rewritten with every hash recomputed (also with the epoch counter moved) are each detected
 (`tests/concurrency/test_audit_chain.py`). Records newer than the latest anchor are protected by the chain alone.
 After a restore the database can be behind its anchor; that is reported until an operator records the loss with
 `orqentis audit start-epoch` ([ADR-0017](adr/0017-postgresql-system-of-record.md),
@@ -252,7 +253,8 @@ to keep these defences under test.
 
 * The local stores (SQLite, filesystem) are single-node and for development only: deployed environments refuse to
   start on them. The PostgreSQL and Blob stores are encrypted at rest by the platform (Microsoft-managed keys;
-  customer-managed keys are a possible follow-up) and reached over TLS 1.2+ (`verify-full`).
+  customer-managed keys are a possible follow-up) and reached over TLS 1.2+ (`verify-full`; the Entra access token is the
+  database password, so `require`, which does not verify the server, and `disable` are refused outside `local`).
 * `easy_auth` trusts the front end's header. Do not expose the container without the built-in
   authentication layer.
 * **The app trusts `X-MS-CLIENT-PRINCIPAL` and does not validate bearer tokens itself.** If an externally reachable

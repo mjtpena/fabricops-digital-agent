@@ -100,17 +100,26 @@ have exactly one winner across any number of processes, and a write behind the c
   connection and PostgreSQL rolls it back (tested by dropping the connection). `audit_records` also refuses `UPDATE`,
   `DELETE` and `TRUNCATE` with triggers: defence in depth against bugs, **not** the tamper evidence (a privileged
   user can drop a trigger).
-* **Verification** re-derives every hash from the stored body, checks contiguity, that the last record is the head,
-  and the latest **anchor**. Records appended while it runs are beyond the head it started from.
+* **Verification** re-derives every hash from the stored body, checks contiguity, that the indexed columns (the ones
+  queries filter on) agree with the hashed body, that the last record is the head and that nothing exists beyond it
+  (a row slipped in past the head would otherwise be listed, and would block every later append), and the latest
+  **anchor**. Records appended while it runs are beyond the head it started from. Values with a NUL character, which
+  PostgreSQL text cannot hold, are stored in the columns with U+FFFD in its place; the exact value stays in the body.
 * **Anchors.** Every 15 minutes (leader-only job) the head `(epoch, sequence, hash)` is written to a blob with
   `If-None-Match: *` in a container with version-level immutability. Whoever rewrites the table, recomputes every hash
   and moves the head, or deletes the tail, contradicts an anchor the database owner cannot change: verified against
   all three attacks (`tests/concurrency/test_audit_chain.py`). Two different hashes anchored for one sequence are
   reported as a conflict.
+* **The epoch counter is a database column, so the anchors decide it.** The database must be in the **highest epoch
+  that has an anchor**; otherwise verification fails. Without this, the same attacker could rewrite every record and
+  also add one to the counter, so that the rewritten chain is checked against an epoch nobody anchored (found by the
+  independent review). `orqentis audit start-epoch` therefore also writes the first anchor of the new epoch (the
+  `audit.epoch` record), and chooses an epoch above every one that has anchors (a second restore from an older backup
+  does not reuse epoch 2). Someone who holds the database but not the anchor container cannot move the counter.
 * **Epochs.** After a restore the database may be *behind* its latest anchor; that is reported (records are lost) and
   stays reported until an operator runs `orqentis audit start-epoch --reason ...`, which appends an `audit.epoch`
-  record naming the head and the last anchor of the epoch that ends, and begins a new anchor epoch. Old anchors stay
-  as the evidence of the loss. Without this, a legitimate restore would leave verification failing forever.
+  record naming the head and the last anchor of the epoch that ends, anchors that record as the first anchor of a new
+  epoch, and moves the database into it. Old anchors stay as the evidence of the loss. Without this, a legitimate restore would leave verification failing forever.
 * The timestamp is the application clock's, taken while holding the head lock. Audit appends are never fenced (see 7):
   a record of something that happened is kept even from a deposed leader.
 
@@ -223,6 +232,12 @@ storage key and the SMB mount are removed.** The estate contracts file, which li
     policy in production and keep the retention long.
   * Detection serialises on a mutex; a very long detection pass delays other replicas' manual collections up to the
     wait bound (2 minutes) and then fails visibly.
+  * Stored aggregates (incidents, approvals, events, principals, jobs) are strict Pydantic models (`extra="forbid"`)
+    read from JSON. During a rolling deploy a revision that **writes** a new field makes the older, still running
+    revision fail to read those rows. The rule, as for columns ("add before you use"): ship a new field first as one
+    the models *accept* and ignore, write it only from the next release. A job row that cannot be read is failed for
+    free by the claim (the incident's slot is released); the other aggregates fail their request until the old
+    revision is gone.
   * Anchoring runs every 15 minutes (leader-only). Records newer than the latest anchor are protected by the hash
     chain alone: someone with full database rights could rewrite that last interval before the next anchor covers it.
     A shorter interval narrows the window (`ORQENTIS_SCHEDULER_AUDIT_ANCHOR_INTERVAL_MINUTES`).

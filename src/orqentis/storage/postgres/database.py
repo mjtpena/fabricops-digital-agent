@@ -78,6 +78,10 @@ class PostgresConfig:
             )
 
 
+def _has_nul(args: tuple[Any, ...]) -> bool:
+    return any(isinstance(arg, str) and "\x00" in arg for arg in args)
+
+
 def _ssl_context(config: PostgresConfig) -> ssl.SSLContext | Literal["disable"]:
     if config.ssl_mode == "disable":
         return "disable"
@@ -181,15 +185,23 @@ class PostgresDatabase:
             yield conn
 
     # ---------------------------------------------------------------------------------------------- shortcuts
+    # Reads answer "nothing" for a value PostgreSQL text cannot hold (a NUL in an id from a URL): it cannot match any
+    # stored row, and the local backend answers "not found" for it too.
     async def fetch(self, sql: str, *args: Any) -> list[asyncpg.Record]:
+        if _has_nul(args):
+            return []
         async with self.connection() as conn:
             return await conn.fetch(sql, *args)
 
     async def fetchrow(self, sql: str, *args: Any) -> asyncpg.Record | None:
+        if _has_nul(args):
+            return None
         async with self.connection() as conn:
             return await conn.fetchrow(sql, *args)
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
+        if _has_nul(args):
+            return None
         async with self.connection() as conn:
             return await conn.fetchval(sql, *args)
 
