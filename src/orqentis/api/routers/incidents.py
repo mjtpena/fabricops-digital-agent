@@ -8,12 +8,13 @@ from fastapi import APIRouter, Query, Response
 
 from orqentis.api.auth import CurrentPrincipal
 from orqentis.api.deps import ContainerDep
-from orqentis.api.schemas import IncidentSummary, InvestigationResult
+from orqentis.api.schemas import IncidentSummary, InvestigationAccepted
 from orqentis.domain.actions import Recommendation
 from orqentis.domain.evidence import Evidence
 from orqentis.domain.incidents import Incident, IncidentStatus
 from orqentis.reports.markdown import render_markdown
 from orqentis.reports.model import IncidentReport
+from orqentis.runtime.investigations import InvestigationJob, InvestigationJobNotFoundError, InvestigationTrigger
 from orqentis.storage.incidents import IncidentQuery
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
@@ -35,17 +36,32 @@ async def get_incident(incident_id: str, c: ContainerDep, _: CurrentPrincipal) -
     return await c.incidents.get(incident_id)
 
 
-@router.post("/{incident_id}/investigate", response_model=InvestigationResult)
-async def investigate(incident_id: str, c: ContainerDep, principal: CurrentPrincipal) -> InvestigationResult:
-    incident, trace = await c.investigations.investigate(incident_id, actor=principal)
-    return InvestigationResult(
-        incident=IncidentSummary.of(incident),
-        trace_id=trace.trace_id,
-        findings=len(incident.findings),
-        evidence=len(incident.evidence),
-        tool_calls=len(trace.tool_calls),
-        approval_ids=incident.approval_ids,
+@router.post("/{incident_id}/investigate", response_model=InvestigationAccepted, status_code=202)
+async def investigate(
+    incident_id: str, c: ContainerDep, principal: CurrentPrincipal, response: Response
+) -> InvestigationAccepted:
+    """Queue an investigation and return immediately; poll ``GET /investigations/{job_id}`` for the outcome.
+
+    Idempotent per incident: while one is queued or running, the same job is returned (``already_active``).
+    """
+    submission = await c.investigation_jobs.submit(
+        incident_id, requested_by=principal, trigger=InvestigationTrigger.API
     )
+    status_url = f"/investigations/{submission.job.job_id}"
+    response.headers["Location"] = status_url
+    return InvestigationAccepted(
+        **submission.job.model_dump(), status_url=status_url, already_active=not submission.created
+    )
+
+
+@router.get("/{incident_id}/investigation", response_model=InvestigationJob)
+async def latest_investigation(incident_id: str, c: ContainerDep, _: CurrentPrincipal) -> InvestigationJob:
+    """The most recent investigation job of an incident (this process keeps the last few hundred jobs)."""
+    await c.incidents.get(incident_id)  # 404 for an unknown incident
+    job = c.investigation_jobs.latest_for(incident_id)
+    if job is None:
+        raise InvestigationJobNotFoundError(incident_id)
+    return job
 
 
 @router.get("/{incident_id}/evidence", response_model=list[Evidence])

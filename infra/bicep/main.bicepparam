@@ -39,6 +39,26 @@ param azureOpenAiResourceId = ''
 // param azureOpenAiDeployment = 'gpt-4.1'
 // param azureOpenAiResourceId = '/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/aoai-fabricops'
 
+// Autonomous runtime: the app collects, detects, investigates, sweeps SLAs and refreshes its catalog by itself.
+// Every value below is the default; set schedulerEnabled = false to run the app API-driven only.
+param schedulerEnabled = true
+param collectEnabled = true
+param collectIntervalMinutes = 5
+param autoInvestigateEnabled = true
+param autoInvestigateIntervalMinutes = 1
+param slaSweepEnabled = true
+param slaSweepIntervalMinutes = 15
+param catalogRefreshEnabled = true
+param catalogRefreshIntervalMinutes = 60
+param investigationMaxConcurrency = 2
+param investigationTimeoutSeconds = 600
+// Global budget for Fabric / Power BI calls (shared by every job) and incremental-collection windows.
+param fabricMaxConcurrency = 4
+param fabricRatePerSecond = 5
+param fabricRateBurst = 10
+param collectionMaxLookbackHours = 168
+param collectionOverlapMinutes = 15
+
 // Environment-internal ingress by default. For VNet-only access set infrastructureSubnetId and externalIngress = true.
 param externalIngress = false
 param infrastructureSubnetId = ''

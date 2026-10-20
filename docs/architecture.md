@@ -62,6 +62,7 @@ sequenceDiagram
 | `ApprovalProvider` | `approvals.provider` | `LocalApprovalProvider` (SQLite, API-driven) | `TeamsApprovalProvider` (Adaptive Cards) | Local implemented; Teams is milestone 10 |
 | `AuditTrail` | `observability.audit` | `LocalAuditLog` (hash-chained JSONL) | append-only Eventhouse table / immutable storage | Local implemented |
 | `Reasoner` | `agents.reasoning` | `RuleBasedReasoner` | `AgentFrameworkReasoner` (Azure OpenAI or Foundry via Microsoft Agent Framework) | Both implemented |
+| `LeaderLease` | `runtime.lease` | `InProcessLeaderLease` (single replica) | database-backed lease (PostgreSQL system of record) | In-process implemented |
 | `Collector` | `telemetry.collectors` | pipeline runs, refreshes, capacity, static replay | Eventhouse-backed capacity / schema collectors | Implemented for REST-available data |
 | `DetectionRule` | `incidents.detection` | `PipelineFailureRule` | more rules per secondary scenario | Implemented for the primary scenario |
 | `InvestigationWorkflow` | `incidents.workflows.base` | `PipelineFailureWorkflow` | refresh failure, SLA, drift workflows | Implemented for the primary scenario |
@@ -226,3 +227,60 @@ The score is capped at 0.95. Levels are HIGH (0.75 and above), MEDIUM (0.45 and 
 | A detection rule | Implement `DetectionRule.evaluate(event) -> IncidentCandidate | None` and add it to `DetectionEngine`. |
 | An investigation workflow | Implement `InvestigationWorkflow` (`supports`, `run`) and register it in `bootstrap.py`. |
 | A storage backend | Implement the port and wire it in `bootstrap.py`; domain code is unchanged. |
+| A scheduled job | Add a `JobSpec` (name, interval, async function) in `bootstrap.py` and a `scheduler_<name>_*` setting pair (enabled, interval). |
+
+## 13. Autonomous runtime
+
+FabricOps works without being called. Everything below lives in `orqentis.runtime` and is wired in
+`bootstrap.py`; the investigation workflow itself is unchanged.
+
+**Process lifecycle** (`api/app.py`, `runtime/service.py`). The FastAPI lifespan starts a `Runtime`
+that builds the container in the background and returns within `ORQENTIS_STARTUP_GRACE_SECONDS`, so
+the port opens even when reading the estate takes minutes. `GET /health` is liveness (no
+dependencies, always `200` while the process runs). `GET /health/ready` is `503` with a redacted
+one-line reason until the container is built and the first catalog load finished. If the build
+raises (invalid contracts, Fabric unreachable, anything), the exception is logged, the process
+stays up, and the build is retried with exponential backoff (`ORQENTIS_BUILD_RETRY_*`); resources
+opened by a failed attempt are closed. Other endpoints answer `503 NOT_READY` meanwhile.
+
+**Scheduler** (`runtime/scheduler.py`). Jobs are `JobSpec(name, interval, async function)`. Every
+tick (`ORQENTIS_SCHEDULER_TICK_SECONDS`) the scheduler acquires or renews a `LeaderLease`; only the
+holder starts jobs, and a holder that loses the lease cancels its running jobs. A job never
+overlaps with itself: a run that outlasts its interval makes the next slot be skipped (counted),
+not queued, and missed slots collapse into one run. A job that raises or times out is logged and
+recorded in `Scheduler.status()`; it is audited when its health *changes* (first failure,
+recovery), and never stops the scheduler or other jobs. The scheduler reads time from the injected
+`Clock`, so tests drive it with a fake clock.
+
+| Job | Default | What it does |
+|---|---|---|
+| `collect-detect` | every 5 min | `TelemetryIngestor` then `DetectionEngine` (serialised with `POST /telemetry/collect`) |
+| `auto-investigate` | every 1 min | submits an investigation job for each `DETECTED` incident not already being investigated (most severe first, bounded per run and per incident) |
+| `sla-sweep` | every 15 min | assesses every declared SLA and appends an `SLA_ASSESSED` event when an SLA enters a new state for a deadline day |
+| `catalog-refresh` | every 60 min | reloads workspaces, items, capacities and declared dependencies, applies the diff to the live catalog and graph, audits it |
+
+**Investigation jobs** (`runtime/investigations.py`). `POST /incidents/{id}/investigate` returns
+`202` with a job; the scheduler submits through the same runner, so there is one code path.
+Submitting while a job for the incident is queued or running returns that job (idempotent per
+incident). At most `ORQENTIS_INVESTIGATION_MAX_CONCURRENCY` run at once, each with a timeout; a job
+that times out, is cancelled or fails puts its incident back to `DETECTED`. Auto-investigation gives
+up on an incident after `ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_MAX_ATTEMPTS` failures (a human can
+still investigate it) and resets incidents orphaned in `INVESTIGATING` by a crashed process.
+Automation acts as `system:orqentis`; the agent still cannot approve or execute.
+
+**Incremental collection** (`telemetry/collectors.py`, `storage/event_store.py`). Each collector has
+a watermark in the event store. A run reads `[watermark - overlap, now]`, never further back than
+`ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS`; the watermark advances only after the events were stored,
+so a failed collector retries the same window. The overlap is safe because events are
+de-duplicated by `dedupe_key`. Fabric documents no ordering for "List Item Job Instances", so job
+listings filter by the watermark without stopping early and are capped at
+`ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES` pages.
+
+**Fabric call budget** (`fabric/rest/budget.py`). One semaphore and one token bucket, shared by every
+Fabric and Power BI call through `FabricHttp`, cap concurrency and request rate. A `429` or any
+`Retry-After` pauses all callers, and retry sleeps never hold a slot.
+
+**Catalog refresh** (`topology/refresh.py`). A new snapshot is built first (any error applies
+nothing), an empty estate is refused, and the dictionaries of the live catalog are rebound, so a
+collector iterating them is unaffected. The diff (added, removed, changed ids per kind, including
+dependencies) is logged and audited.

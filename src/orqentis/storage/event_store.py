@@ -7,7 +7,7 @@ SQLite development adapter; both satisfy :class:`EventStore`.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol
 
 from pydantic import BaseModel, Field
@@ -38,6 +38,14 @@ class EventStore(Protocol):
 
     async def count(self) -> int: ...
 
+    async def get_watermark(self, collector: str) -> datetime | None:
+        """Everything the collector observed up to this instant has been appended (``None``: never collected)."""
+        ...
+
+    async def advance_watermark(self, collector: str, watermark: datetime) -> datetime:
+        """Move the collector's watermark forward. It never moves backwards. Returns the stored value."""
+        ...
+
 
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS operational_events (
@@ -53,6 +61,11 @@ _SCHEMA = (
     )""",
     "CREATE INDEX IF NOT EXISTS ix_events_item_ts ON operational_events(item_id, ts)",
     "CREATE INDEX IF NOT EXISTS ix_events_type_ts ON operational_events(event_type, ts)",
+    # One row per collector: how far its observations are complete (incremental collection).
+    """CREATE TABLE IF NOT EXISTS collector_watermarks (
+        collector TEXT PRIMARY KEY,
+        watermark REAL NOT NULL
+    )""",
 )
 
 
@@ -129,3 +142,17 @@ class LocalEventStore:
     async def count(self) -> int:
         row = await self._db.fetchone("SELECT COUNT(*) AS n FROM operational_events")
         return int(row["n"]) if row else 0
+
+    async def get_watermark(self, collector: str) -> datetime | None:
+        row = await self._db.fetchone("SELECT watermark FROM collector_watermarks WHERE collector = ?", (collector,))
+        return datetime.fromtimestamp(float(row["watermark"]), UTC) if row else None
+
+    async def advance_watermark(self, collector: str, watermark: datetime) -> datetime:
+        await self._db.execute(
+            "INSERT INTO collector_watermarks (collector, watermark) VALUES (?, ?) "
+            "ON CONFLICT(collector) DO UPDATE SET watermark = MAX(watermark, excluded.watermark)",
+            (collector, watermark.timestamp()),
+        )
+        stored = await self.get_watermark(collector)
+        assert stored is not None
+        return stored

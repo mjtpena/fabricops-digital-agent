@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -24,12 +25,27 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         yield test_client
 
 
+def await_job(client: TestClient, job_id: str, headers: dict[str, str], *, timeout: float = 30.0) -> dict[str, object]:
+    """Poll an investigation job until it leaves QUEUED/RUNNING."""
+    deadline = time.monotonic() + timeout
+    while True:
+        job: dict[str, object] = client.get(f"/investigations/{job_id}", headers=headers).json()
+        if job["status"] not in ("QUEUED", "RUNNING"):
+            return job
+        assert time.monotonic() < deadline, f"investigation job still {job['status']} after {timeout}s"
+        time.sleep(0.02)
+
+
 def investigated(client: TestClient) -> dict[str, object]:
+    """Investigate the first incident over HTTP (202 + job) and return the incident summary and job result."""
     incident_id = client.get("/incidents", headers=VIEWER).json()[0]["incident_id"]
     response = client.post(f"/incidents/{incident_id}/investigate", headers=VIEWER)
-    assert response.status_code == 200, response.text
-    body: dict[str, object] = response.json()
-    return body
+    assert response.status_code == 202, response.text
+    job = await_job(client, response.json()["job_id"], VIEWER)
+    assert job["status"] == "SUCCEEDED", job
+    summary = next(i for i in client.get("/incidents", headers=VIEWER).json() if i["incident_id"] == incident_id)
+    result: dict[str, object] = {"incident": summary, **job["result"]}  # type: ignore[dict-item]
+    return result
 
 
 def test_health_and_openapi(client: TestClient) -> None:
@@ -41,6 +57,9 @@ def test_health_and_openapi(client: TestClient) -> None:
         "/incidents",
         "/incidents/{incident_id}",
         "/incidents/{incident_id}/investigate",
+        "/incidents/{incident_id}/investigation",
+        "/investigations/{job_id}",
+        "/health/ready",
         "/incidents/{incident_id}/evidence",
         "/incidents/{incident_id}/recommendations",
         "/runbooks",
@@ -138,7 +157,11 @@ def test_easy_auth_principal(tmp_path: Path) -> None:
         assert client.get("/incidents").status_code == 401
         assert client.get("/incidents", headers={"X-MS-CLIENT-PRINCIPAL": "%%%"}).status_code == 401
         incident_id = client.get("/incidents", headers=header).json()[0]["incident_id"]
-        approvals = client.post(f"/incidents/{incident_id}/investigate", headers=header).json()["approval_ids"]
+        accepted = client.post(f"/incidents/{incident_id}/investigate", headers=header)
+        assert accepted.status_code == 202
+        job = await_job(client, accepted.json()["job_id"], header)
+        assert job["status"] == "SUCCEEDED", job
+        approvals = job["result"]["approval_ids"]  # type: ignore[index]
         # Requester is the agent, approver is the Easy Auth principal with the Operator role.
         approved = client.post(f"/approvals/{approvals[0]}/approve", headers=header)
         assert approved.status_code == 200 and approved.json()["approved_by"] == "oid-123"

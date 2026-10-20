@@ -35,7 +35,9 @@ policy and approval, local stores), deployed as a single Container App with a ma
 | **Information disclosure** of secrets | Secret inside a Fabric error message | Redaction before logs, evidence, audit and model; tokens never logged | Novel secret formats may slip past the regexes. Mitigation: extend the patterns. |
 | Disclosure to the LLM provider | Fabric metadata sent to Azure OpenAI | Azure OpenAI in the customer tenant through Entra ID; prompt content not recorded in telemetry; the rule-based reasoner is available for no-LLM operation | Data residency depends on the Azure OpenAI deployment region. |
 | **Denial of service** through agent loops | Model calls tools endlessly | Per-investigation tool budget (reserved before awaits), Agent Framework iteration and call limits, per-tool timeouts | Low |
-| DoS against Fabric APIs | Aggressive polling | Bounded collectors, retry with backoff and `Retry-After`, a single replica | Medium until a scheduler with quotas exists |
+| DoS against Fabric APIs | Aggressive polling | Bounded collectors, incremental windows (watermark + overlap), a global concurrency and rate budget, retry with backoff and `Retry-After` (a `429` pauses every caller), a single replica | Low-Medium: the budget defaults are conservative guesses, because Fabric's per-endpoint quotas are not published |
+| Runaway automation | A failing investigation is retried forever, or a flood of incidents triggers a flood of LLM calls | Per-incident attempt limit, batch size and concurrency limit for investigations, investigation timeout, jobs that never overlap | Low |
+| Silent loss of monitoring | A glitch makes Fabric return an empty estate, or a job fails every run | Catalog refresh refuses an empty estate and audits every diff; job health changes are audited; `Scheduler.status()` shows the last outcome | A failing job is visible in logs and status only; alerting arrives with the metrics workstream |
 | **Elevation of privilege** | Agent requests `DELETE_ITEM` or a permission change | Policy DENY; the read client has no mutation methods; the write client is held only by the gateway and disabled by default | Low |
 | Elevation through policy misconfiguration | Policy file allows a mutation automatically | Code invariant: mutations always require approval in the MVP; unknown action types are HIGH_RISK; default effect DENY | Low |
 | Confused deputy | Approver approves an action they don't understand | Report labels FACT / INFERENCE / RECOMMENDATION, cites evidence ids, shows risk and policy rules, and binds the approval to an exact target | Human error remains possible. Two-person approval for HIGH_RISK is on the roadmap. |
@@ -52,3 +54,5 @@ policy and approval, local stores), deployed as a single Container App with a ma
 * Expired, double-decided and self-approved approvals are refused.
 * Audit tampering and deletion are detected.
 * A secret in a Fabric error never reaches evidence or the report.
+* A job or build failure with a secret in its message is redacted in logs, status, audit and the readiness reason.
+* An automatic investigation requests approvals but cannot approve or execute them.

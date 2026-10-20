@@ -9,6 +9,7 @@ strings (which may carry continuation tokens) are never logged or copied into er
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import random
@@ -31,6 +32,7 @@ from orqentis.fabric.errors import (
     FabricUnavailableError,
 )
 from orqentis.fabric.rest.auth import TokenProvider
+from orqentis.fabric.rest.budget import FabricCallBudget
 from orqentis.observability.logging import get_logger
 from orqentis.observability.redaction import redact, redact_text
 
@@ -139,6 +141,7 @@ class FabricHttp:
         backoff_max_seconds: float = 30.0,
         max_retry_after_seconds: float = 60.0,
         max_pages: int = 100,
+        budget: FabricCallBudget | None = None,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
@@ -152,6 +155,7 @@ class FabricHttp:
         self._backoff_max = backoff_max_seconds
         self._max_retry_after = max_retry_after_seconds
         self._max_pages = max_pages
+        self._budget = budget
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
             transport=transport,
@@ -184,7 +188,9 @@ class FabricHttp:
             headers = {"Authorization": f"Bearer {token}", CLIENT_REQUEST_ID_HEADER: correlation_id}
             started = time.perf_counter()
             try:
-                response = await self._client.request(method, url, params=params, json=json, headers=headers)
+                # The budget covers the network round trip only: backoff sleeps below never hold a slot.
+                async with self._budget.slot() if self._budget else contextlib.nullcontext():
+                    response = await self._client.request(method, url, params=params, json=json, headers=headers)
             except httpx.TransportError as exc:
                 will_retry = attempt <= self._max_retries
                 self._log(
@@ -240,10 +246,14 @@ class FabricHttp:
                 correlation_id=correlation_id,
                 outcome="retry" if will_retry else "error",
             )
-            if not will_retry:
-                raise self._error(response, method=method, path=path, correlation_id=correlation_id, attempts=attempt)
             retry_after = parse_retry_after(response, cap=self._max_retry_after)
-            await self._sleep(retry_after if retry_after is not None else self._backoff(attempt))
+            delay = (retry_after if retry_after is not None else self._backoff(attempt)) if will_retry else retry_after
+            if self._budget is not None and delay is not None and (status == 429 or retry_after is not None):
+                # Throttling is per identity, not per request: tell every other caller to hold back too.
+                self._budget.penalize(delay)
+            if delay is None or not will_retry:
+                raise self._error(response, method=method, path=path, correlation_id=correlation_id, attempts=attempt)
+            await self._sleep(delay)
 
     async def get_json(self, url: str, *, scope: str, params: QueryParams | None = None) -> JsonObject:
         return self._json_object(await self.request("GET", url, scope=scope, params=params))
@@ -254,20 +264,27 @@ class FabricHttp:
         return self._json_object(await self.request("POST", url, scope=scope, params=params, json=json))
 
     async def paginate(
-        self, url: str, *, scope: str, params: QueryParams | None = None, items_key: str = "value"
+        self,
+        url: str,
+        *,
+        scope: str,
+        params: QueryParams | None = None,
+        items_key: str = "value",
+        max_pages: int | None = None,
     ) -> list[JsonObject]:
         """Collect every page of a Fabric list API.
 
         Follows ``continuationUri`` (only when it stays on the original host, so the bearer token is
         never sent elsewhere) or else ``continuationToken``. Stops with a warning on a repeated token or
-        after ``max_pages`` pages rather than looping forever.
+        after ``max_pages`` pages (default: the client's cap) rather than looping forever.
         """
+        page_cap = min(max_pages, self._max_pages) if max_pages is not None else self._max_pages
         origin, log_extra = _origin(url), {"http_path": urlsplit(url).path}
         items: list[JsonObject] = []
         next_url: str = url
         next_params: QueryParams | None = params
         seen: set[str] = set()
-        for _ in range(self._max_pages):
+        for _ in range(page_cap):
             body = await self.get_json(next_url, scope=scope, params=next_params)
             page = body.get(items_key)
             if isinstance(page, list):
@@ -287,7 +304,7 @@ class FabricHttp:
             else:
                 _log.warning("fabric pagination stopped: continuation is off-host", extra=log_extra)
                 return items
-        _log.warning("fabric pagination stopped: page limit reached", extra={**log_extra, "max_pages": self._max_pages})
+        _log.warning("fabric pagination stopped: page limit reached", extra={**log_extra, "max_pages": page_cap})
         return items
 
     async def aclose(self) -> None:

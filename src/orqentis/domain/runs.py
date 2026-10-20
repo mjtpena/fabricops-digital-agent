@@ -68,6 +68,11 @@ class PipelineRun(DomainModel):
     def duration_seconds(self) -> float | None:
         return _duration(self.start_time, self.end_time)
 
+    @property
+    def observed_at(self) -> datetime | None:
+        """When the run last changed state as far as telemetry is concerned: its end, else its start."""
+        return self.end_time or self.start_time
+
 
 class ActivityRun(DomainModel):
     id: str

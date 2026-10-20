@@ -31,7 +31,27 @@ The app runs with these settings (see `src/orqentis/config/settings.py`):
 | `ORQENTIS_AZURE_OPENAI_ENDPOINT` / `_DEPLOYMENT` | `azureOpenAiEndpoint` / `azureOpenAiDeployment` (only set when non-empty) |
 | `ORQENTIS_DATA_DIR` | `/var/lib/orqentis` (Azure Files mount) |
 | `ORQENTIS_LOG_FORMAT` | `json` |
+| `ORQENTIS_SCHEDULER_ENABLED` | `schedulerEnabled` (default `true`) |
+| `ORQENTIS_SCHEDULER_COLLECT_ENABLED` / `_INTERVAL_MINUTES` | `collectEnabled` / `collectIntervalMinutes` (default `true` / `5`) |
+| `ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_ENABLED` / `_INTERVAL_MINUTES` | `autoInvestigateEnabled` / `autoInvestigateIntervalMinutes` (default `true` / `1`) |
+| `ORQENTIS_SCHEDULER_SLA_SWEEP_ENABLED` / `_INTERVAL_MINUTES` | `slaSweepEnabled` / `slaSweepIntervalMinutes` (default `true` / `15`) |
+| `ORQENTIS_SCHEDULER_CATALOG_REFRESH_ENABLED` / `_INTERVAL_MINUTES` | `catalogRefreshEnabled` / `catalogRefreshIntervalMinutes` (default `true` / `60`) |
+| `ORQENTIS_INVESTIGATION_MAX_CONCURRENCY` / `_TIMEOUT_SECONDS` | `investigationMaxConcurrency` / `investigationTimeoutSeconds` (default `2` / `600`) |
+| `ORQENTIS_FABRIC_MAX_CONCURRENCY` / `_RATE_PER_SECOND` / `_RATE_BURST` | `fabricMaxConcurrency` / `fabricRatePerSecond` / `fabricRateBurst` (default `4` / `5` / `10`) |
+| `ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS` / `_OVERLAP_MINUTES` | `collectionMaxLookbackHours` / `collectionOverlapMinutes` (default `168` / `15`) |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | Container App **secret** reference |
+
+### Health probes and autonomous operation
+
+The Container App has three probes (see the `probes` block of `main.bicep`):
+
+| Probe | Path | Meaning |
+|---|---|---|
+| Startup | `/health` | The process is listening. It does not wait for the estate to be read: that happens in the background after the port opens, so a large tenant cannot fail the startup probe. |
+| Liveness | `/health` | The process is alive. It is dependency-free and answers `200` while the container is still being built and while a failed build is being retried, so a bad contracts file or a Fabric outage never causes a restart loop. |
+| Readiness | `/health/ready` | `503` (with a redacted reason) until the container is built and the first catalog load finished, `200` afterwards. A failing build is retried with exponential backoff (`ORQENTIS_BUILD_RETRY_*`). |
+
+With `schedulerEnabled = true` (the default) the app runs a small in-process scheduler: collect + detect every `collectIntervalMinutes`, automatic investigation of new incidents (as background jobs, at most `investigationMaxConcurrency` at a time), an SLA sweep, and a catalog refresh that applies workspace / item / dependency changes without a restart. Only the holder of an in-process leader lease runs the jobs. That is correct for the single replica this template deploys; the lease moves to the database with the PostgreSQL system of record, which is what allows more than one replica. All Fabric and Power BI calls share one concurrency and rate budget (`fabricMaxConcurrency`, `fabricRatePerSecond`, `fabricRateBurst`), and a `429` / `Retry-After` pauses every caller. Defaults are deliberately conservative; the real Fabric throttling quotas are not published per endpoint, so tune them from the `fabric http request` log lines (`status_code: 429`).
 
 ## Deploy
 
@@ -154,7 +174,7 @@ Set `azureOpenAiEndpoint`, `azureOpenAiDeployment` and `azureOpenAiResourceId`. 
 
 The subnet must be delegated to `Microsoft.App/environments` and be at least `/27`, because the environment uses workload profiles.
 
-**Trust boundary.** With `ORQENTIS_API_AUTH_MODE=easy_auth` the app trusts the `X-MS-CLIENT-PRINCIPAL` header. Container Apps authentication sets that header and strips any client-supplied copy, so the app must only be reached through Container Apps ingress. Do not expose additional ports. Keep the environment dedicated to FabricOps, without other or untrusted workloads. Health probes target the container port directly and are not subject to authentication; `/health` exposes only version and mode flags.
+**Trust boundary.** With `ORQENTIS_API_AUTH_MODE=easy_auth` the app trusts the `X-MS-CLIENT-PRINCIPAL` header. Container Apps authentication sets that header and strips any client-supplied copy, so the app must only be reached through Container Apps ingress. Do not expose additional ports. Keep the environment dedicated to FabricOps, without other or untrusted workloads. Health probes target the container port directly and are not subject to authentication; `/health` exposes only version and mode flags, and `/health/ready` only a redacted one-line reason while the app is not ready.
 
 ## MVP storage and its limits
 
@@ -169,7 +189,7 @@ The MVP keeps its stores on the Azure Files share mounted at `/var/lib/orqentis`
 
 Constraints that follow from this:
 
-* **Single writer.** SQLite and the hash-chained audit log allow exactly one writing process. The app is therefore pinned to `minReplicas = maxReplicas = 1`, and uvicorn runs a single worker. Do not scale it out. In single-revision mode, Container Apps briefly runs the old and new revision side by side during an update. Deploy changes in a quiet period, and run `orqentis audit` / `GET /audit/verify` afterwards.
+* **Single writer.** SQLite and the hash-chained audit log allow exactly one writing process, and the scheduler's leader lease is in-process. The app is therefore pinned to `minReplicas = maxReplicas = 1`, and uvicorn runs a single worker. Do not scale it out. In single-revision mode, Container Apps briefly runs the old and new revision side by side during an update. Deploy changes in a quiet period, and run `orqentis audit` / `GET /audit/verify` afterwards.
 * **SMB and SQLite.** The share is mounted with `nobrl`, so byte-range locks are not forwarded to the server. SQLite's locking cannot work over SMB, and without `nobrl` it typically fails with "database is locked". This is safe only because there is a single writer. The app uses SQLite WAL mode, which SQLite does not support across hosts on network file systems; with one host it works, but it is not a durable production design.
 * **Shared key.** Container Apps mounts Azure Files over SMB with the storage account key, so `allowSharedKeyAccess` must stay `true` on this account. Mitigations: the account is dedicated to this share, TLS 1.2+ and HTTPS-only are enforced, public blob access and cross-tenant replication are disabled, the portal defaults to Entra auth, and soft delete for shares is on. Rotate the key with `az storage account keys renew`, then redeploy the template so the environment picks up the new key. For a private setup, add a private endpoint and a VNet-integrated environment.
 * **Mount ownership.** The mount maps all files to UID/GID `10001` with owner-only modes, matching the non-root user in the Dockerfile. Change both together.

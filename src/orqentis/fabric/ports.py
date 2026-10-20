@@ -34,7 +34,11 @@ class ItemService(Protocol):
 
 
 class JobService(Protocol):
-    async def list_job_instances(self, workspace_id: str, item_id: str, *, limit: int = 50) -> list[PipelineRun]: ...
+    async def list_job_instances(
+        self, workspace_id: str, item_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[PipelineRun]:
+        """Most recent runs first. ``since`` drops runs that finished (or, if unfinished, started) before it."""
+        ...
 
     async def get_job_instance(self, workspace_id: str, item_id: str, job_instance_id: str) -> PipelineRun: ...
 

@@ -124,10 +124,12 @@ On a machine where `python3` is older than 3.12, use `make demo PYTHON=python3.1
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health` | Liveness and mode |
+| GET | `/health` | Liveness (cheap, no dependencies) and mode |
+| GET | `/health/ready` | Readiness: `503` with a redacted reason until the container is built and the estate catalog is loaded |
 | GET | `/incidents` | List incidents (`?status=`) |
 | GET | `/incidents/{id}` | Full incident: evidence, findings, root causes, blast radius, timeline |
-| POST | `/incidents/{id}/investigate` | Run the investigation workflow |
+| POST | `/incidents/{id}/investigate` | Queue the investigation workflow: `202` with a job (idempotent per incident) |
+| GET | `/investigations/{job_id}` · `/incidents/{id}/investigation` | Job status (`QUEUED`/`RUNNING`/`SUCCEEDED`/`FAILED`), timestamps and result summary |
 | GET | `/incidents/{id}/evidence` | Evidence |
 | GET | `/incidents/{id}/recommendations` | Recommendations with policy decisions |
 | GET | `/incidents/{id}/report` | Incident report (`?format=markdown`) |
@@ -143,6 +145,18 @@ On a machine where `python3` is older than 3.12, use `make demo PYTHON=python3.1
 Locally, identify yourself with headers: `X-Orqentis-User: you@contoso.com` and
 `X-Orqentis-Roles: FabricOps.Operator`. In deployed environments the API uses Microsoft Entra ID
 through Container Apps built-in authentication (`ORQENTIS_API_AUTH_MODE=easy_auth`).
+
+### Autonomous operation
+
+In deployed environments (`ORQENTIS_DEPLOYMENT_ENVIRONMENT` `dev`/`test`/`prod`) the app runs a small
+in-process scheduler, held by a leader lease, so nobody has to call the API for it to work: it
+collects telemetry and runs the detection rules every 5 minutes (incrementally, from per-collector
+watermarks), investigates new incidents as background jobs, records SLA state changes as events, and
+reloads the estate catalog hourly, applying and auditing what changed. All Fabric calls share one
+concurrency and rate budget. Locally it is off unless you set `ORQENTIS_SCHEDULER_ENABLED=true`.
+Automation stops at the approval boundary: it can investigate and *request* approval, never approve
+or execute. See [ADR-0013](docs/adr/0013-scheduler-lease-and-async-investigation-jobs.md) and
+[docs/architecture.md](docs/architecture.md#13-autonomous-runtime).
 
 ### Using the LLM investigator
 
@@ -205,6 +219,7 @@ src/orqentis/
   domain/         typed models (incident, evidence, findings, actions, approvals, SLA, ...)
   fabric/         FabricClient ports, MockFabricClient, read-only REST adapter, write-capability clients
   telemetry/      collectors and normalisation into operational events
+  runtime/        leader lease, scheduler, background investigation jobs, readiness supervision
   incidents/      detection, lifecycle, classification, history, confidence, SLA, workflows
   evidence/       evidence recorder
   topology/       estate catalog and storage-agnostic dependency graph

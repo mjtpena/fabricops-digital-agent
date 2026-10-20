@@ -27,6 +27,9 @@ from orqentis.topology.catalog import EstateCatalog
 
 _log = get_logger(__name__)
 
+# Fabric keeps about the 100 most recent completed job instances per item (plus every active one).
+_JOB_INSTANCE_LIMIT = 100
+
 
 class Collector(Protocol):
     name: str
@@ -46,7 +49,9 @@ class PipelineRunCollector:
         for item in self._catalog.items.values():
             if item.item_type is not ItemType.DATA_PIPELINE:
                 continue
-            runs = await self._fabric.jobs.list_job_instances(item.workspace_id, item.id)
+            runs = await self._fabric.jobs.list_job_instances(
+                item.workspace_id, item.id, limit=_JOB_INSTANCE_LIMIT, since=since
+            )
             for run in runs:
                 when = run.end_time or run.start_time
                 if not is_reportable(run.status) or when is None or not since <= when <= until:
@@ -113,13 +118,22 @@ class IngestionResult:
     new_events: list[OperationalEvent] = field(default_factory=list)
     collected: int = 0
     errors: dict[str, str] = field(default_factory=dict)
+    # The (since, until) window each collector was asked for; collectors that failed are listed too.
+    windows: dict[str, tuple[datetime, datetime]] = field(default_factory=dict)
 
     def counts(self) -> dict[str, int]:
         return dict(Counter(e.event_type.value for e in self.new_events))
 
 
 class TelemetryIngestor:
-    """Runs collectors over a lookback window and appends normalised events to the event store."""
+    """Runs each collector over its own window and appends normalised events to the event store.
+
+    The window of a collector is ``[watermark - overlap, now]``: the watermark is the instant up to which a previous
+    run completed, and the overlap re-reads a little history so late-arriving data is not missed (the event store
+    de-duplicates by ``dedupe_key``, so re-reading is harmless). The window never reaches further back than
+    ``lookback``, which is also the window of a collector that has never run. A collector's watermark advances only
+    after its events were stored, so a failed run is retried over the same window.
+    """
 
     def __init__(
         self,
@@ -128,27 +142,42 @@ class TelemetryIngestor:
         clock: Clock,
         *,
         lookback: timedelta = timedelta(days=7),
+        overlap: timedelta = timedelta(minutes=15),
     ) -> None:
+        if lookback <= timedelta(0):
+            raise ValueError("lookback must be positive")
+        if overlap < timedelta(0):
+            raise ValueError("overlap must not be negative")
         self._collectors = list(collectors)
         self._event_store = event_store
         self._clock = clock
         self._lookback = lookback
+        self._overlap = overlap
+
+    async def window_start(self, collector: Collector, *, until: datetime) -> datetime:
+        floor = until - self._lookback
+        watermark = await self._event_store.get_watermark(collector.name)
+        if watermark is None:
+            return floor
+        return min(max(watermark - self._overlap, floor), until)
 
     async def run(self) -> IngestionResult:
         until = self._clock.now()
-        since = until - self._lookback
         result = IngestionResult()
         for collector in self._collectors:
+            since = await self.window_start(collector, until=until)
+            result.windows[collector.name] = (since, until)
             try:
                 events = await collector.collect(since=since, until=until)
             except FabricError as exc:
-                # One failing collector must not blind the others.
+                # One failing collector must not blind the others, and its watermark stays where it was.
                 result.errors[collector.name] = exc.message
                 _log.warning("collector failed", extra={"collector": collector.name, "error": exc.to_dict()})
                 continue
             result.collected += len(events)
             events.sort(key=lambda e: e.timestamp)
             result.new_events.extend(await self._event_store.append(events))
+            await self._event_store.advance_watermark(collector.name, until)
         result.new_events.sort(key=lambda e: e.timestamp)
         _log.info(
             "telemetry ingested",

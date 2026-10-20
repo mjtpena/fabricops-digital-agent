@@ -148,3 +148,29 @@ to keep these defences under test.
 * There is no rate limiting on the internal API, which is internal ingress only.
 * No REST write adapter is shipped. Enabling writes against a real tenant first requires
   implementing and reviewing one.
+
+## 10. Autonomous operation
+
+The scheduler adds an actor, `system:orqentis` (`PrincipalKind.SERVICE`), that runs collection,
+detection, auto-investigation, the SLA sweep and the catalog refresh. It changes nothing about the
+boundaries above:
+
+* Detection is still only deterministic `DetectionRule`s over events. The SLA sweep records
+  assessments as events; opening an incident from one is a rule's job.
+* An automatic investigation is the same workflow with the same allowlisted read-only tools,
+  grounding validation, computed confidence and policy evaluation. It can *request* approvals (as the
+  agent principal), never approve or execute: those paths still require a human principal with the
+  role, and `system:` ids cannot be impersonated over the API.
+* Autonomous loops are bounded: a global Fabric concurrency and rate budget, investigation
+  concurrency and timeouts, a per-incident retry limit, a batch size per run, and non-overlapping
+  jobs. A throttling response from Fabric pauses every caller.
+* Job failures are logged with redacted messages and audited when health changes. The readiness
+  probe shows only the exception type and a redacted first line of its message; the full detail
+  stays in the (redacted) logs.
+* Catalog refreshes are audited with the ids that changed, and an empty estate is refused so a
+  permission glitch cannot silently blind monitoring.
+
+Limits: the scheduler's leader lease and the investigation jobs are in-process, which is correct for
+the single replica this deployment runs and not for several. Jobs are lost on restart (their
+incidents are recovered and re-investigated). Durable jobs and a database-backed lease arrive with
+the PostgreSQL system of record.

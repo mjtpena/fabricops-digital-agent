@@ -3,21 +3,38 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.incidents import ApprovalState, BlastRadius, Incident, IncidentStatus
 from orqentis.domain.taxonomy import Severity
+from orqentis.runtime.investigations import InvestigationJob
 
 
 class Health(BaseModel):
+    """Liveness: the process is up. Says nothing about whether the estate has been loaded (see ``Ready``)."""
+
     status: str
     version: str
     fabric_mode: str
     reasoner: str
     write_actions_enabled: bool
     time: datetime
+
+
+class Ready(BaseModel):
+    status: Literal["ready"] = "ready"
+    scheduler: Literal["disabled", "standby", "leader"]
+
+
+class NotReady(BaseModel):
+    status: Literal["not_ready"] = "not_ready"
+    # Exception type plus a redacted first line of its message; the full detail is in the (redacted) logs.
+    reason: str
+    attempts: int
+    retry_in_seconds: float | None = None
 
 
 class IncidentSummary(BaseModel):
@@ -56,13 +73,12 @@ class IncidentSummary(BaseModel):
         )
 
 
-class InvestigationResult(BaseModel):
-    incident: IncidentSummary
-    trace_id: str
-    findings: int
-    evidence: int
-    tool_calls: int
-    approval_ids: list[str]
+class InvestigationAccepted(InvestigationJob):
+    """``202 Accepted`` for ``POST /incidents/{id}/investigate``: the job to poll."""
+
+    status_url: str
+    # True when an investigation of this incident was already queued or running and that job is returned.
+    already_active: bool = False
 
 
 class CollectionResult(BaseModel):

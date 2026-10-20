@@ -6,7 +6,11 @@ item id to its workspace, type, owner and environment without extra round trips.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.estate import Capacity, DataProduct, FabricItem, Workspace
@@ -16,6 +20,76 @@ from orqentis.fabric.ports import FabricClient
 from orqentis.observability.logging import get_logger
 
 _log = get_logger(__name__)
+
+
+class EntityDiff(BaseModel):
+    """Ids that appeared, disappeared or changed between two snapshots of one kind of entity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    added: list[str] = Field(default_factory=list)
+    removed: list[str] = Field(default_factory=list)
+    # id -> names of the fields whose value changed
+    changed: dict[str, list[str]] = Field(default_factory=dict)
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.added or self.removed or self.changed)
+
+
+class CatalogDiff(BaseModel):
+    """What a catalog refresh changed (ids only: display names are untrusted Fabric metadata)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspaces: EntityDiff = Field(default_factory=EntityDiff)
+    items: EntityDiff = Field(default_factory=EntityDiff)
+    capacities: EntityDiff = Field(default_factory=EntityDiff)
+    data_products: EntityDiff = Field(default_factory=EntityDiff)
+    slas: EntityDiff = Field(default_factory=EntityDiff)
+    dependencies: EntityDiff = Field(default_factory=EntityDiff)
+
+    @property
+    def is_empty(self) -> bool:
+        return all(d.is_empty for d in self._parts().values())
+
+    def _parts(self) -> dict[str, EntityDiff]:
+        return {name: getattr(self, name) for name in type(self).model_fields}
+
+    def counts(self) -> dict[str, dict[str, int]]:
+        """``{kind: {added, removed, changed}}`` for the kinds that changed."""
+        return {
+            kind: {"added": len(d.added), "removed": len(d.removed), "changed": len(d.changed)}
+            for kind, d in self._parts().items()
+            if not d.is_empty
+        }
+
+    def summary(self, *, limit: int = 25) -> dict[str, Any]:
+        """Audit/log friendly view: counts plus a bounded number of ids per kind."""
+        return {
+            kind: {
+                "added": d.added[:limit],
+                "removed": d.removed[:limit],
+                "changed": {k: v for k, v in list(d.changed.items())[:limit]},
+                "counts": {"added": len(d.added), "removed": len(d.removed), "changed": len(d.changed)},
+            }
+            for kind, d in self._parts().items()
+            if not d.is_empty
+        }
+
+
+def diff_entities(before: Mapping[str, BaseModel], after: Mapping[str, BaseModel]) -> EntityDiff:
+    changed: dict[str, list[str]] = {}
+    for key in before.keys() & after.keys():
+        if before[key] == after[key]:
+            continue
+        old, new = before[key].model_dump(mode="json"), after[key].model_dump(mode="json")
+        changed[key] = sorted(f for f in old.keys() | new.keys() if old.get(f) != new.get(f))
+    return EntityDiff(
+        added=sorted(after.keys() - before.keys()),
+        removed=sorted(before.keys() - after.keys()),
+        changed=dict(sorted(changed.items())),
+    )
 
 
 @dataclass(frozen=True)
@@ -95,3 +169,26 @@ class EstateCatalog:
 
     def find_items_by_name(self, display_name: str) -> list[FabricItem]:
         return [i for i in self.items.values() if i.display_name == display_name]
+
+    def diff(self, other: EstateCatalog) -> CatalogDiff:
+        """Changes that moving from this catalog to ``other`` would make (dependencies are diffed separately)."""
+        return CatalogDiff(
+            workspaces=diff_entities(self.workspaces, other.workspaces),
+            items=diff_entities(self.items, other.items),
+            capacities=diff_entities(self.capacities, other.capacities),
+            data_products=diff_entities(self.data_products, other.data_products),
+            slas=diff_entities(self.slas, other.slas),
+        )
+
+    def apply(self, other: EstateCatalog) -> None:
+        """Adopt ``other``'s contents in place.
+
+        The dictionaries are *rebound*, not mutated: a collector that is iterating ``catalog.items`` across an
+        ``await`` keeps its consistent snapshot, and every holder of this catalog sees the new one on its next
+        access. There is no ``await`` here, so no coroutine ever observes a half-applied catalog.
+        """
+        self.workspaces = other.workspaces
+        self.items = other.items
+        self.data_products = other.data_products
+        self.slas = other.slas
+        self.capacities = other.capacities
