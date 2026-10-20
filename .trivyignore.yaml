@@ -1,0 +1,18 @@
+# Reviewed exceptions for the container image scan (Trivy), used by .github/workflows/ci.yml and cd.yml.
+#
+# The scan fails on ANY HIGH or CRITICAL finding, fixed or not (docs/adr/0016-delivery-pipeline.md); at the pinned Azure
+# Linux base image there are none. Accept a finding here only when it cannot be fixed by updating the base image or a
+# dependency and the owner has assessed the risk. Trivy stops honouring an entry after expired_at, so an exception
+# cannot outlive its review. Each entry needs the CVE, the package (purls), a statement naming the owner and the
+# justification, and expired_at at most 60 days ahead. The owner accepts entries in the programme ledger.
+#
+# vulnerabilities:
+#   - id: CVE-2026-0000
+#     purls:                         # optional: limit the exception to one package
+#       - pkg:rpm/azurelinux/example
+#     statement: >-
+#       Owner: github-handle. Why the vulnerable code path is not reachable in this image, and what removes the
+#       exception (for example: fixed in base image version X, tracked in #123).
+#     expired_at: 2026-12-31
+
+vulnerabilities: []

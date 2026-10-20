@@ -1,20 +1,34 @@
 name: CI
 
+# Runs on pull requests, pushes to other branches, weekly, and as a reusable workflow: cd.yml calls it and its build job
+# `needs` it, so nothing is built, pushed or deployed from main (or a cd-dryrun branch) unless every job here passed.
+# Those two pushes therefore do not trigger CI on their own; cd.yml runs it for them.
 on:
   push:
+    branches-ignore:
+      - main
+      - "cd-dryrun/**"
   pull_request:
+  schedule:
+    # Weekly: new advisories land without code changes, so rescan the dependencies and the image on a schedule.
+    - cron: "23 4 * * 1"
+  workflow_call:
 
 permissions:
   contents: read
 
+# One group per event, so the weekly run, a push and a pull request never cancel one another. Only superseded runs on
+# branches and pull requests are cancelled; main, dry-run and scheduled runs always finish.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/cd-dryrun/') }}
 
+# Every third-party action is pinned by full commit SHA with the version in a trailing comment; Dependabot keeps
+# both current (.github/dependabot.yml). Runners are pinned to ubuntu-24.04 rather than ubuntu-latest.
 jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -22,12 +36,12 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -44,6 +58,11 @@ jobs:
       - name: Format check (ruff)
         run: ruff format --check src tests
 
+      - name: Lint and format check delivery scripts (ruff)
+        run: |
+          ruff check scripts
+          ruff format --check scripts
+
       - name: Type check (mypy)
         run: mypy
 
@@ -58,20 +77,81 @@ jobs:
 
       - name: Upload demo incident report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: demo-incident-report-py${{ matrix.python-version }}
           path: var/demo/evidence/**/report.md
           if-no-files-found: warn
           retention-days: 14
 
-  bicep:
-    name: Bicep build
-    runs-on: ubuntu-latest
+  dependency-audit:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # The audited set is what the image ships (see the Dockerfile): the project plus its llm and azure-monitor extras,
+      # resolved fresh, and nothing else. The image removes pip, setuptools and wheel after installing, so they are
+      # build tooling, not part of what is deployed: findings in the runner's own pip must not fail this gate. The
+      # resolved set is therefore frozen without them (and without the project itself) and audited as pinned
+      # requirements; pip-audit is installed outside that environment so it does not audit itself either.
+      - name: Resolve the runtime dependency set
+        run: |
+          python -m venv "$RUNNER_TEMP/audit-venv"
+          "$RUNNER_TEMP/audit-venv/bin/python" -m pip install --quiet ".[llm,azure-monitor]"
+          "$RUNNER_TEMP/audit-venv/bin/python" -m pip freeze --exclude pip --exclude setuptools --exclude wheel \
+            --exclude orqentis-fabricops > "$RUNNER_TEMP/runtime-requirements.txt"
+          echo "Auditing $(wc -l < "$RUNNER_TEMP/runtime-requirements.txt") pinned runtime requirements"
+
+      - name: Install pip-audit
+        run: python -m pip install --quiet "pip-audit==2.10.1"
+
+      - name: Audit (fails on anything not in .pip-audit-allowlist.toml)
+        run: |
+          python scripts/pip_audit_gate.py -r "$RUNNER_TEMP/runtime-requirements.txt" --no-deps --disable-pip
+
+  actionlint:
+    name: Lint workflows (actionlint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No third-party action: download the pinned release and verify its published SHA-256 before running it.
+      # Bump version and checksum together (checksums are in actionlint_<version>_checksums.txt on the release).
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
+
+      - name: actionlint
+        run: '"$RUNNER_TEMP/actionlint" -color'
+
+  bicep:
+    name: Bicep build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -84,13 +164,16 @@ jobs:
       - name: Build main.bicepparam
         run: az bicep build-params --file infra/bicep/main.bicepparam --stdout > /dev/null
 
+      - name: Build every environment parameter file and check the prod write switch
+        run: bash scripts/validate-bicep.sh
+
   docker:
     name: Docker image build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -110,3 +193,15 @@ jobs:
           done
           docker logs orqentis
           exit 1
+
+      # Same policy as the CD gate: any HIGH or CRITICAL finding, fixed or not, fails the build unless it is accepted,
+      # with a justification and an expiry, in .trivyignore.yaml.
+      - name: Scan image (Trivy, fails on unaccepted HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: orqentis-fabricops:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+          trivyignores: .trivyignore.yaml
+          format: table

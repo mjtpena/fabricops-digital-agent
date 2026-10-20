@@ -48,6 +48,9 @@ param containerRegistryName string = ''
 @description('Optional: login server of another private registry (e.g. shared.azurecr.io) that already grants AcrPull to the reader identity. Ignored when containerRegistryName is set. Leave both empty for a public image.')
 param containerRegistryServer string = ''
 
+@description('Optional: full resource id of an Azure Container Registry in ANY resource group or subscription, such as the shared registry used by every environment (/subscriptions/<sub>/resourceGroups/rg-fabricops-shared/providers/Microsoft.ContainerRegistry/registries/<name>). When set, the reader identity is granted AcrPull on it before the app is created. Set containerRegistryServer to its login server as well. The deploying principal needs permission to create that role assignment (docs/delivery.md).')
+param containerRegistryResourceId string = ''
+
 @description('vCPU for the container (Consumption profile pairs: 0.25/0.5Gi, 0.5/1Gi, 1/2Gi, 2/4Gi).')
 @allowed([
   '0.25'
@@ -368,6 +371,14 @@ var openAiIdSegments = split(
   '/'
 )
 
+// Same placeholder approach for containerRegistryResourceId (the module is then skipped).
+var acrIdSegments = split(
+  empty(containerRegistryResourceId)
+    ? '/subscriptions/${subscription().subscriptionId}/resourceGroups/${resourceGroup().name}/providers/Microsoft.ContainerRegistry/registries/none'
+    : containerRegistryResourceId,
+  '/'
+)
+
 var appInsightsSecretName = 'appinsights-connection-string'
 
 // Service-principal mode for a Fabric tenant other than this deployment's: the credential is a Key Vault
@@ -652,6 +663,20 @@ module readerKeyVaultSecretsUser 'modules/keyvault-role.bicep' = if (!empty(keyV
   }
 }
 
+// AcrPull on a registry that lives elsewhere (the shared registry). The deployment name includes this resource
+// group's id because every environment deploys this module into the registry's resource group.
+// The deploying principal therefore needs, in the REGISTRY's resource group, Microsoft.Resources/deployments/write (this
+// module is a nested deployment there) and, on the registry, Microsoft.Authorization/roleAssignments/write for AcrPull
+// (docs/delivery.md, section 5). Without the first, the deployment fails with AuthorizationFailed before the app exists.
+module readerSharedAcrPull 'modules/acr-pull.bicep' = if (!empty(containerRegistryResourceId)) {
+  name: 'orqentis-acr-pull-${uniqueString(containerRegistryResourceId, resourceGroup().id, readerIdentityName)}'
+  scope: resourceGroup(acrIdSegments[2], acrIdSegments[4])
+  params: {
+    registryName: acrIdSegments[8]
+    principalId: readerIdentity.properties.principalId
+  }
+}
+
 // ================================================================================================= storage (MVP)
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
@@ -892,6 +917,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
   dependsOn: [
     readerAcrPull
+    readerSharedAcrPull
     readerKeyVaultSecretsUser
     servicePrincipalInputCheck
   ]

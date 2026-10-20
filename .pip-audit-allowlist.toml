@@ -1,0 +1,14 @@
+# Reviewed exceptions for the dependency vulnerability gate (scripts/pip_audit_gate.py, run by CI).
+#
+# Empty by design: the current runtime dependency set has no known vulnerabilities. Add an entry only when a
+# vulnerability cannot be fixed by upgrading and the risk has been assessed. Every field is required:
+#
+#   [[ignore]]
+#   id = "GHSA-xxxx-xxxx-xxxx"        # the advisory id, or any alias (CVE-...) that pip-audit reports
+#   package = "example-package"
+#   justification = "Why the vulnerable code path is unreachable or the risk is accepted, and what removes the need."
+#   owner = "github-handle"           # who re-reviews it
+#   expires = 2026-12-31              # TOML date, at most 90 days ahead; an expired entry fails the gate
+#
+# Expired, incomplete or unknown-field entries are errors. Entries that no longer match anything are reported
+# as stale: delete them.
