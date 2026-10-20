@@ -8,17 +8,20 @@
 //       id-<prefix>-reader  READ  - the operating identity of the app (Fabric / Power BI read, Azure OpenAI).
 //       id-<prefix>-actor   WRITE - only attached to the app when enableWriteActions = true.
 //     Fabric workspace roles cannot be granted from ARM/Bicep; see README.md.
-//   * Storage account + Azure Files share mounted at /var/lib/orqentis for the MVP local stores (SQLite event
-//     store and state DB, evidence files, hash-chained audit log). The target architecture replaces these
-//     with Eventhouse (events/audit) and OneLake (evidence).
+//   * Azure Database for PostgreSQL Flexible Server (Microsoft Entra authentication only, no password): the system
+//     of record for incidents, approvals, events, scheduler leases and the hash-chained audit trail
+//     (modules/postgres.bicep; ADR-0008). The app is stateless and runs as two or more replicas.
+//   * Storage account for evidence, reports and audit anchors (Blob, Entra only, version-level immutability), with
+//     data access for the reader identity on its two containers only (modules/evidence-storage.bicep).
 //   * Container Apps environment (logs to Log Analytics) and the FabricOps Container App, protected by
 //     Container Apps built-in authentication (Microsoft Entra ID). The app trusts X-MS-CLIENT-PRINCIPAL,
 //     which only that front end can set. Exposure is chosen with ingressMode (default: external and
 //     authenticated; see README "Network exposure", including the safe first deployment).
 //   * Optional: Cognitive Services OpenAI User for the reader identity on an existing Azure OpenAI account.
 //
-// No credentials are written anywhere: identities are managed, the Application Insights connection string
-// is a Container App secret, and the storage key is read at deployment time for the Azure Files mount only.
+// No credentials are written anywhere: identities are managed, PostgreSQL accepts Entra tokens only, storage Shared
+// Key access is off, and the Application Insights connection string is a Container App secret. (The Log Analytics
+// key for the environment's log destination is the only key read at deployment time.)
 
 targetScope = 'resourceGroup'
 
@@ -86,8 +89,12 @@ param deploymentEnvironment string = 'prod'
 ])
 param fabricMode string = 'rest'
 
-@description('ORQENTIS_CONTRACTS_PATH: declared topology, data products and SLAs (required in rest mode). Default is on the Azure Files share; upload the file before the app starts (see README).')
-param contractsPath string = '/var/lib/orqentis/contracts/estate.json'
+@description('ORQENTIS_CONTRACTS_PATH: declared topology, data products and SLAs (required in rest mode). The default is where contractsContent is mounted (read-only); change it only if the file comes from somewhere else.')
+param contractsPath string = '/mnt/contracts/estate.json'
+
+@description('The JSON text of the estate contracts file (schemas/contracts.schema.json). Required when fabricMode is rest: the deployment fails otherwise. Stored as the Container App secret estate-contracts and mounted read-only at /mnt/contracts/estate.json. It holds identifiers, not credentials; it is a secure parameter only to keep it out of deployment logs. Container Apps limits the size of a secret (verify the current limit); for a very large estate use a Key Vault secret reference instead.')
+@secure()
+param contractsContent string = ''
 
 @description('ORQENTIS_ENABLE_WRITE_ACTIONS. Also attaches the actor (WRITE) identity to the app. Approved actions still go through the policy engine and human approval.')
 param enableWriteActions bool = false
@@ -113,10 +120,10 @@ param azureOpenAiResourceId string = ''
 @description('ORQENTIS_SCHEDULER_ENABLED. true: the app collects, detects, investigates, sweeps SLAs and refreshes its catalog on a schedule. false: it only acts when called through the API.')
 param schedulerEnabled bool = true
 
-@description('Seconds the scheduler waits after the app starts before it takes the leader lease or runs a job (ORQENTIS_SCHEDULER_STARTUP_DELAY_SECONDS). Container Apps runs the old and the new revision side by side during a deploy on the same Azure Files volume; the delay lets the old one drain first. Not a substitute for the database-backed lease: until then deploy with schedulerEnabled = false or accept the risk.')
+@description('Seconds the scheduler waits after the app starts before it takes the leader lease or runs a job (ORQENTIS_SCHEDULER_STARTUP_DELAY_SECONDS). Container Apps runs the old and the new revision side by side during a deploy; the database lease already guarantees that only one process runs the jobs, so this delay is only a courtesy: a starting revision does not compete for the lease while it is still warming up.')
 @minValue(0)
 @maxValue(900)
-param schedulerStartupDelaySeconds int = 120
+param schedulerStartupDelaySeconds int = 30
 
 @description('Seconds between scheduler ticks, i.e. how often due jobs are started and the lease is renewed (ORQENTIS_SCHEDULER_TICK_SECONDS).')
 @minValue(1)
@@ -184,6 +191,24 @@ param investigationMaxConcurrency int = 2
 @minValue(30)
 @maxValue(21600)
 param investigationTimeoutSeconds int = 600
+
+@description('Anchor the audit chain head (sequence and hash) to an immutable blob on a schedule (ORQENTIS_SCHEDULER_AUDIT_ANCHOR_ENABLED). The anchor is what makes records lost in a database restore, or rewritten in the database, detectable.')
+param auditAnchorEnabled bool = true
+
+@description('Minutes between audit anchors (ORQENTIS_SCHEDULER_AUDIT_ANCHOR_INTERVAL_MINUTES). Audit records written after the latest anchor are not covered by it, so this interval bounds the window in which a loss would go unproven.')
+@minValue(1)
+@maxValue(1440)
+param auditAnchorIntervalMinutes int = 15
+
+@description('Seconds between polls for queued investigation jobs; every replica polls (ORQENTIS_INVESTIGATION_POLL_INTERVAL_SECONDS).')
+@minValue(1)
+@maxValue(60)
+param investigationPollIntervalSeconds int = 2
+
+@description('Seconds after which an investigation claim that was not renewed, because its replica crashed, is released for another replica (ORQENTIS_INVESTIGATION_CLAIM_TTL_SECONDS). Must be at least three times investigationPollIntervalSeconds, or the deployment fails.')
+@minValue(10)
+@maxValue(3600)
+param investigationClaimTtlSeconds int = 120
 
 @description('Fabric / Power BI calls in flight at once, across all jobs (ORQENTIS_FABRIC_MAX_CONCURRENCY).')
 @minValue(1)
@@ -328,33 +353,166 @@ param powerbiScope string = ''
 @maxValue(730)
 param logRetentionInDays int = 30
 
-@description('Storage redundancy for the MVP data share. Use Standard_ZRS where the region supports it.')
+@description('Storage redundancy of the evidence storage account (evidence, reports, audit anchors). Use Standard_ZRS where the region supports it.')
 @allowed([
   'Standard_LRS'
   'Standard_ZRS'
 ])
 param storageSkuName string = 'Standard_LRS'
 
-@description('Quota (GiB) of the Azure Files share mounted at /var/lib/orqentis.')
+// ------------------------------------------------------------------------------------------------- scale
+
+@description('Container App minimum replicas. The app is stateless: the audit chain, the leader lease, approvals and investigation jobs are serialised by the database, so two replicas (the default) give availability and zero-downtime deploys. dev uses 1.')
 @minValue(1)
-@maxValue(5120)
-param fileShareQuotaGiB int = 32
+@maxValue(30)
+param minReplicas int = 2
+
+@description('Container App maximum replicas; at least minReplicas. Every replica opens up to postgresPoolMax database connections, see postgresPoolMax.')
+@minValue(1)
+@maxValue(30)
+param maxReplicas int = 2
+
+// ------------------------------------------------------------------------------------------------- durable storage: PostgreSQL
+
+@description('ORQENTIS_POSTGRES_POOL_MAX: database connections per replica. During a deploy the old revision (up to maxReplicas) and the new one (minReplicas) run together, so keep (maxReplicas + minReplicas) x postgresPoolMax plus about 15 reserved connections below the server\'s max_connections (about 50 on Standard_B1ms; the deployment checks that SKU and fails when the budget is exceeded; for other SKUs check SHOW max_connections).')
+@minValue(1)
+@maxValue(100)
+param postgresPoolMax int = 8
+
+@description('Compute SKU of the PostgreSQL Flexible Server. Standard_B* is Burstable (dev, test), Standard_D* General Purpose (prod); the tier is derived from the name.')
+param postgresSkuName string = 'Standard_B1ms'
+
+@description('Storage (GiB) of the PostgreSQL server; it auto-grows. After it has grown, raise this value to the current size before the next deployment: a smaller value is refused.')
+@allowed([
+  32
+  64
+  128
+  256
+  512
+  1024
+  2048
+  4096
+  8192
+  16384
+  32767
+])
+param postgresStorageSizeGiB int = 32
+
+@description('Major PostgreSQL version of a NEW server.')
+@allowed([
+  '14'
+  '15'
+  '16'
+  '17'
+])
+param postgresVersion string = '17'
+
+@description('Days of backups kept for point-in-time restore (7-35). The restore window of docs/operations/restore.md.')
+@minValue(7)
+@maxValue(35)
+param postgresBackupRetentionDays int = 7
+
+@description('Copy PostgreSQL backups to the paired region (geo-restore). Chosen when the server is created; it also moves backups across a regional boundary, which is a data-residency decision.')
+param postgresGeoRedundantBackup bool = false
+
+@description('PostgreSQL high availability: Disabled, ZoneRedundant or SameZone. Not available on the Burstable tier (the deployment fails if you combine them).')
+@allowed([
+  'Disabled'
+  'ZoneRedundant'
+  'SameZone'
+])
+param postgresHighAvailabilityMode string = 'Disabled'
+
+@description('REQUIRED. Object id of the Microsoft Entra principal that administers the PostgreSQL server: a group is recommended, so that people can be added without touching the server. It runs the bootstrap step (infra/bicep/README.md) that creates the app\'s database role. The deployment fails with a readable reason when this is empty.')
+param postgresEntraAdminObjectId string
+
+@description('REQUIRED. Name of that principal (for a group, its display name); it is the PostgreSQL role name people sign in with. The deployment fails when this is empty.')
+param postgresEntraAdminName string
+
+@description('Type of the PostgreSQL Entra administrator: Group (default), User or ServicePrincipal.')
+@allowed([
+  'Group'
+  'User'
+  'ServicePrincipal'
+])
+param postgresEntraAdminType string = 'Group'
+
+@description('Name of the application database.')
+@minLength(1)
+@maxLength(63)
+param postgresDatabaseName string = 'orqentis'
+
+@description('Public access: firewall rules, an array of { name, startIpAddress, endIpAddress }. Empty (default) lets nobody connect from outside Azure; add the address of whoever runs the bootstrap step. Must be empty with VNet integration (postgresDelegatedSubnetId).')
+param postgresAllowedIpRanges array = []
+
+@description('Public access: add the 0.0.0.0-0.0.0.0 rule that lets Azure services, including Container Apps whose outbound addresses are not fixed, reach the TCP port. It opens the port to every Azure customer\'s resources; every connection still needs a valid Entra token for a database role. Default false; dev sets true. Prefer VNet integration where the network exists.')
+param postgresAllowAzureServices bool = false
+
+@description('VNet integration: resource id of a subnet delegated to Microsoft.DBforPostgreSQL/flexibleServers (not the Container Apps subnet). Needs postgresPrivateDnsZoneId, an infrastructureSubnetId environment in the same or a peered VNet, and no firewall rules; the server then has no public endpoint.')
+param postgresDelegatedSubnetId string = ''
+
+@description('VNet integration: resource id of the private DNS zone (<name>.private.postgres.database.azure.com) linked to the VNet.')
+param postgresPrivateDnsZoneId string = ''
+
+@description('Empty (default): this template creates the PostgreSQL server. Set to the name of a server in THIS resource group (for example one restored from backup, docs/operations/restore.md) to point the app at it instead: nothing about that server is created or changed. The Entra administrator, firewall rules and parameters of an adopted server are yours to maintain.')
+param postgresExistingServerName string = ''
+
+// ------------------------------------------------------------------------------------------------- durable storage: evidence
+
+@description('ORQENTIS_EVIDENCE_CONTAINER: container for evidence and incident reports.')
+@minLength(3)
+@maxLength(63)
+param evidenceContainerName string = 'evidence'
+
+@description('ORQENTIS_AUDIT_ANCHOR_CONTAINER: container for the audit-chain anchors.')
+@minLength(3)
+@maxLength(63)
+param auditAnchorContainerName string = 'audit-anchors'
+
+@description('Days every evidence and anchor blob version is immutable (default retention of the storage account).')
+@minValue(1)
+@maxValue(3650)
+param evidenceRetentionDays int = 30
+
+@description('Unlocked (default): the immutability policy can still be changed by an account owner. Locked: irreversible, retention can only be extended and the account cannot be deleted until every retention has expired. Locking needs the owner\'s approval; it can only be set on an account that already has the policy Unlocked (deploy Unlocked first).')
+@allowed([
+  'Unlocked'
+  'Locked'
+])
+param evidenceImmutabilityState string = 'Unlocked'
+
+@description('Days a deleted or overwritten evidence blob, and a deleted container, stays recoverable (soft delete).')
+@minValue(1)
+@maxValue(365)
+param evidenceSoftDeleteDays int = 14
+
+@description('Evidence storage network default action. Allow (default): reachable from the internet, every request needs an Entra token and a role. Deny: only evidenceAllowedIpRanges and evidenceAllowedSubnetIds can connect; a Container Apps environment without a VNet has no fixed address, so Deny needs ingressMode vnet and a subnet with the Microsoft.Storage service endpoint.')
+@allowed([
+  'Allow'
+  'Deny'
+])
+param evidenceNetworkDefaultAction string = 'Allow'
+
+@description('With evidenceNetworkDefaultAction Deny: IPv4 addresses or CIDR ranges allowed to connect (a single address has no mask).')
+param evidenceAllowedIpRanges array = []
+
+@description('With evidenceNetworkDefaultAction Deny: resource ids of subnets (with the Microsoft.Storage service endpoint) allowed to connect.')
+param evidenceAllowedSubnetIds array = []
 
 // ================================================================================================= variables
 
 var readerIdentityName = 'id-${prefix}-reader'
 var actorIdentityName = 'id-${prefix}-actor'
 var containerAppName = 'ca-${prefix}'
-var storageAccountName = take(toLower('st${replace(prefix, '-', '')}${uniqueString(resourceGroup().id)}'), 24)
-var fileShareName = 'orqentis-data'
-var dataMountPath = '/var/lib/orqentis'
+// "stev" marks the evidence account; it differs from the account name of earlier (Azure Files) versions of this
+// template, so an environment that ran those gets a NEW account (version-level immutability can only be switched on
+// when an account is created).
+var evidenceStorageAccountName = take(toLower('stev${replace(prefix, '-', '')}${uniqueString(resourceGroup().id)}'), 24)
+var postgresServerName = toLower('psql-${prefix}-${uniqueString(resourceGroup().id)}')
+// The container's own writable directory (ephemeral, per replica). Nothing durable is kept there: the system of
+// record is PostgreSQL and the evidence is in Blob storage.
+var dataDir = '/var/lib/orqentis'
 var appPort = 8000
-
-// Must match APP_UID / APP_GID in the Dockerfile: SMB mounts have no POSIX ownership, so the mount maps every
-// file to the non-root app user. Owner-only modes keep the share private to that user inside the container.
-// "nobrl" stops the CIFS client forwarding byte-range locks to the server, which SQLite cannot use over SMB
-// ("database is locked"). It is only acceptable because exactly one process writes (one replica, see scale).
-var dataMountOptions = 'uid=10001,gid=10001,dir_mode=0700,file_mode=0600,mfsymlinks,nobrl'
 
 var registryServer = !empty(containerRegistryName)
   ? '${containerRegistryName}${environment().suffixes.acrLoginServer}'
@@ -485,6 +643,88 @@ var ipSecurityRestrictions = [
 // Easy Auth does not authenticate these paths. Nothing under them reads the caller's identity.
 var anonymousPaths = anonymousHealthEndpoints ? ['/health', '/health/ready'] : []
 
+// Durable storage: PostgreSQL system of record + Blob evidence (ADR-0008). The estate contracts file is a Container
+// App secret mounted read-only as a file (the same pattern as the Key Vault certificate above), because the
+// container's own disk is ephemeral and there is no shared volume any more.
+var hasContracts = !empty(contractsContent)
+var contractsSecretName = 'estate-contracts'
+var contractsMountDir = '/mnt/contracts'
+var contractsFileName = 'estate.json'
+var contractsSecrets = hasContracts
+  ? [
+      {
+        name: contractsSecretName
+        value: contractsContent
+      }
+    ]
+  : []
+var contractsVolumes = hasContracts
+  ? [
+      {
+        name: contractsSecretName
+        storageType: 'Secret'
+        secrets: [
+          {
+            secretRef: contractsSecretName
+            path: contractsFileName
+          }
+        ]
+      }
+    ]
+  : []
+var contractsVolumeMounts = hasContracts
+  ? [
+      {
+        volumeName: contractsSecretName
+        mountPath: contractsMountDir
+      }
+    ]
+  : []
+
+// Durable storage inputs checked when the deployment runs (see modules/input-check.bicep): 'ok', or what is wrong.
+// Standard_B1ms allows about 50 connections (max_connections), about 15 of them reserved for the platform. During a
+// deploy the old revision (up to maxReplicas) and the new one (minReplicas) hold a pool each. Other SKUs are not
+// checked here: see SHOW max_connections.
+var postgresConnectionsNeeded = (maxReplicas + minReplicas) * postgresPoolMax + 15
+var storageCheck = length(postgresEntraAdminObjectId) != 36
+  ? 'postgresEntraAdminObjectId must be set to the object id (a GUID) of the Microsoft Entra group, user or service principal that administers PostgreSQL (pipeline variable POSTGRES_ENTRA_ADMIN_OBJECT_ID); it is empty or not a GUID'
+  : empty(postgresEntraAdminName)
+      ? 'postgresEntraAdminName must be set to the name of the Microsoft Entra principal that administers PostgreSQL (pipeline variable POSTGRES_ENTRA_ADMIN_NAME); it is empty'
+      : maxReplicas < minReplicas
+          ? 'maxReplicas must be at least minReplicas'
+          : (fabricMode == 'rest' && !hasContracts)
+              ? 'fabricMode is rest, so contractsContent (the JSON text of the estate contracts file) must be set: the pipeline reads it from the CONTRACTS_JSON variable; see infra/bicep/README.md, Estate contracts'
+              : (!empty(postgresDelegatedSubnetId) != !empty(postgresPrivateDnsZoneId))
+                  ? 'PostgreSQL VNet integration needs both postgresDelegatedSubnetId and postgresPrivateDnsZoneId, or neither'
+                  : (!empty(postgresDelegatedSubnetId) && (!empty(postgresAllowedIpRanges) || postgresAllowAzureServices))
+                      ? 'PostgreSQL VNet integration (postgresDelegatedSubnetId) has no public endpoint, so postgresAllowedIpRanges must be empty and postgresAllowAzureServices false'
+                      : (postgresHighAvailabilityMode != 'Disabled' && startsWith(postgresSkuName, 'Standard_B'))
+                          ? 'PostgreSQL high availability is not available on the Burstable tier (postgresSkuName Standard_B*): use a General Purpose SKU such as Standard_D2ds_v5 or set postgresHighAvailabilityMode to Disabled'
+                          : (postgresSkuName == 'Standard_B1ms' && postgresConnectionsNeeded > 50)
+                              ? 'Standard_B1ms allows about 50 connections but (maxReplicas + minReplicas) x postgresPoolMax + 15 reserved is ${postgresConnectionsNeeded}: lower postgresPoolMax or the replica counts, or use a larger postgresSkuName'
+                              : investigationClaimTtlSeconds < investigationPollIntervalSeconds * 3
+                                  ? 'investigationClaimTtlSeconds must be at least three times investigationPollIntervalSeconds'
+                                  : (evidenceNetworkDefaultAction == 'Deny' && empty(evidenceAllowedIpRanges) && empty(evidenceAllowedSubnetIds))
+                                      ? 'evidenceNetworkDefaultAction Deny with no evidenceAllowedIpRanges and no evidenceAllowedSubnetIds would lock the app out of its own evidence storage'
+                                      : 'ok'
+
+// The PostgreSQL role is the reader identity's NAME (the bootstrap step creates it); the connection authenticates with
+// that identity's Entra token (ORQENTIS_MANAGED_IDENTITY_CLIENT_ID selects the identity). Nothing here is a credential.
+var durableStorageEnv = [
+  { name: 'ORQENTIS_STORAGE_BACKEND', value: 'postgres' }
+  { name: 'ORQENTIS_POSTGRES_HOST', value: postgres.outputs.fqdn }
+  { name: 'ORQENTIS_POSTGRES_DATABASE', value: postgres.outputs.databaseName }
+  { name: 'ORQENTIS_POSTGRES_USER', value: readerIdentityName }
+  { name: 'ORQENTIS_POSTGRES_POOL_MAX', value: string(postgresPoolMax) }
+  { name: 'ORQENTIS_EVIDENCE_BLOB_URL', value: evidenceStorage.outputs.blobEndpoint }
+  { name: 'ORQENTIS_EVIDENCE_CONTAINER', value: evidenceStorage.outputs.evidenceContainerName }
+  { name: 'ORQENTIS_AUDIT_ANCHOR_CONTAINER', value: evidenceStorage.outputs.auditAnchorContainerName }
+  { name: 'ORQENTIS_SCHEDULER_AUDIT_ANCHOR_ENABLED', value: auditAnchorEnabled ? 'true' : 'false' }
+  { name: 'ORQENTIS_SCHEDULER_AUDIT_ANCHOR_INTERVAL_MINUTES', value: string(auditAnchorIntervalMinutes) }
+  { name: 'ORQENTIS_INVESTIGATION_POLL_INTERVAL_SECONDS', value: string(investigationPollIntervalSeconds) }
+  { name: 'ORQENTIS_INVESTIGATION_CLAIM_TTL_SECONDS', value: string(investigationClaimTtlSeconds) }
+]
+
 var appEnv = concat(
   [
     { name: 'ORQENTIS_DEPLOYMENT_ENVIRONMENT', value: deploymentEnvironment }
@@ -504,7 +744,7 @@ var appEnv = concat(
     { name: 'ORQENTIS_CONTRACTS_PATH', value: contractsPath }
     { name: 'ORQENTIS_ENABLE_WRITE_ACTIONS', value: enableWriteActions ? 'true' : 'false' }
     { name: 'ORQENTIS_REASONER', value: reasoner }
-    { name: 'ORQENTIS_DATA_DIR', value: dataMountPath }
+    { name: 'ORQENTIS_DATA_DIR', value: dataDir }
     { name: 'ORQENTIS_LOG_FORMAT', value: 'json' }
     { name: 'ORQENTIS_SCHEDULER_ENABLED', value: schedulerEnabled ? 'true' : 'false' }
     { name: 'ORQENTIS_SCHEDULER_STARTUP_DELAY_SECONDS', value: string(schedulerStartupDelaySeconds) }
@@ -537,6 +777,7 @@ var appEnv = concat(
     { name: 'ORQENTIS_API_RATE_LIMIT_EXPENSIVE_PER_MINUTE', value: string(apiRateLimitExpensivePerMinute) }
     { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: appInsightsSecretName }
   ],
+  durableStorageEnv,
   empty(azureOpenAiEndpoint) ? [] : [{ name: 'ORQENTIS_AZURE_OPENAI_ENDPOINT', value: azureOpenAiEndpoint }],
   empty(azureOpenAiDeployment) ? [] : [{ name: 'ORQENTIS_AZURE_OPENAI_DEPLOYMENT', value: azureOpenAiDeployment }],
   empty(authorityHost) ? [] : [{ name: 'ORQENTIS_AUTHORITY_HOST', value: authorityHost }],
@@ -677,53 +918,69 @@ module readerSharedAcrPull 'modules/acr-pull.bicep' = if (!empty(containerRegist
   }
 }
 
-// ================================================================================================= storage (MVP)
+// ================================================================================================= durable storage
 
-resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
-  name: storageAccountName
-  location: location
-  tags: tags
-  sku: {
-    name: storageSkuName
-  }
-  kind: 'StorageV2'
-  properties: {
-    accessTier: 'Hot'
-    minimumTlsVersion: 'TLS1_2'
-    supportsHttpsTrafficOnly: true
-    allowBlobPublicAccess: false
-    allowCrossTenantReplication: false
-    defaultToOAuthAuthentication: true
-    // Container Apps mounts Azure Files over SMB with the account key; disabling shared key access breaks the
-    // mount. The key is read at deployment time into the environment's storage definition only.
-    allowSharedKeyAccess: true
-    publicNetworkAccess: 'Enabled'
-    networkAcls: {
-      defaultAction: 'Allow'
-      bypass: 'AzureServices'
-    }
+// Fails the deployment with a readable reason when the durable storage, scale or contracts inputs cannot work (always
+// 'ok' otherwise). The modules below wait for it, so a rejected input never starts creating a database.
+module storageInputCheck 'modules/input-check.bicep' = {
+  name: 'orqentis-check-durable-storage-inputs'
+  params: {
+    result: any(storageCheck) // a literal-typed parameter on purpose: ARM, not the compiler, rejects it
   }
 }
 
-resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01' = {
-  parent: storage
-  name: 'default'
-  properties: {
-    shareDeleteRetentionPolicy: {
-      enabled: true
-      days: 14
-    }
+// PostgreSQL Flexible Server: Entra authentication only. The app identity is created as a database role by the
+// bootstrap step (infra/bicep/README.md); nothing about the roles inside the database is deployed from here.
+module postgres 'modules/postgres.bicep' = {
+  name: 'orqentis-postgres'
+  params: {
+    location: location
+    tags: tags
+    serverName: postgresServerName
+    existingServerName: postgresExistingServerName
+    skuName: postgresSkuName
+    storageSizeGiB: postgresStorageSizeGiB
+    postgresVersion: postgresVersion
+    backupRetentionDays: postgresBackupRetentionDays
+    geoRedundantBackup: postgresGeoRedundantBackup
+    highAvailabilityMode: postgresHighAvailabilityMode
+    entraAdminObjectId: postgresEntraAdminObjectId
+    entraAdminName: postgresEntraAdminName
+    entraAdminType: postgresEntraAdminType
+    tenantId: tenant().tenantId
+    databaseName: postgresDatabaseName
+    allowedIpRanges: postgresAllowedIpRanges
+    allowAzureServices: postgresAllowAzureServices
+    delegatedSubnetId: postgresDelegatedSubnetId
+    privateDnsZoneId: postgresPrivateDnsZoneId
   }
+  dependsOn: [
+    storageInputCheck
+  ]
 }
 
-resource dataShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
-  parent: fileService
-  name: fileShareName
-  properties: {
-    accessTier: 'TransactionOptimized'
-    enabledProtocols: 'SMB'
-    shareQuota: fileShareQuotaGiB
+// Evidence, reports and audit anchors: Blob storage, Entra only, version-level immutability. The reader identity gets
+// data access on the two containers only; the actor identity gets none.
+module evidenceStorage 'modules/evidence-storage.bicep' = {
+  name: 'orqentis-evidence-storage'
+  params: {
+    location: location
+    tags: tags
+    accountName: evidenceStorageAccountName
+    skuName: storageSkuName
+    evidenceContainerName: evidenceContainerName
+    auditAnchorContainerName: auditAnchorContainerName
+    retentionDays: evidenceRetentionDays
+    immutabilityState: evidenceImmutabilityState
+    softDeleteDays: evidenceSoftDeleteDays
+    networkDefaultAction: evidenceNetworkDefaultAction
+    allowedIpRanges: evidenceAllowedIpRanges
+    allowedSubnetIds: evidenceAllowedSubnetIds
+    readerPrincipalId: readerIdentity.properties.principalId
   }
+  dependsOn: [
+    storageInputCheck
+  ]
 }
 
 // ================================================================================================= container apps
@@ -753,19 +1010,6 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
           internal: true
         }
     zoneRedundant: false
-  }
-}
-
-resource environmentStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
-  parent: managedEnvironment
-  name: fileShareName
-  properties: {
-    azureFile: {
-      accountName: storage.name
-      accountKey: storage.listKeys().keys[0].value
-      shareName: dataShare.name
-      accessMode: 'ReadWrite'
-    }
   }
 }
 
@@ -810,7 +1054,8 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             value: appInsights.properties.ConnectionString
           }
         ],
-        keyVaultSecrets
+        keyVaultSecrets,
+        contractsSecrets
       )
     }
     template: {
@@ -864,12 +1109,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             }
           ]
           volumeMounts: concat(
-            [
-              {
-                volumeName: 'orqentis-data'
-                mountPath: dataMountPath
-              }
-            ],
+            contractsVolumeMounts,
             useClientCertificate
               ? [
                   {
@@ -881,26 +1121,21 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           )
         }
       ]
-      // SQLite (event store, state DB) and the hash-chained audit log allow a single writer only, and the leader
-      // lease that gates the scheduler is in-process. Do not raise maxReplicas until the stores and the lease move
-      // to the PostgreSQL system of record.
+      // The app is stateless, so it can run as several replicas: the database serialises the audit chain (one row-locked
+      // chain head), holds the scheduler's leader lease with a fencing generation, makes approvals compare-and-set and
+      // keeps the investigation jobs, so replicas never write conflicting state. activeRevisionsMode stays Single: the
+      // old and the new revision run side by side during a deploy, which is now safe for the same reasons. See
+      // postgresPoolMax for the connection budget (replicas x pool) against the PostgreSQL SKU.
       scale: {
-        minReplicas: 1
-        maxReplicas: 1
+        minReplicas: minReplicas
+        maxReplicas: maxReplicas
       }
       volumes: concat(
-        [
-          {
-            name: 'orqentis-data'
-            storageType: 'AzureFile'
-            storageName: environmentStorage.name
-            mountOptions: dataMountOptions
-          }
-        ],
+        contractsVolumes,
         useClientCertificate
           ? [
               {
-                // The Key Vault secret (PEM) as a read-only file; the private key never touches the share.
+                // The Key Vault secret (PEM) as a read-only file; the private key never touches a disk.
                 name: fabricSpCertificateName
                 storageType: 'Secret'
                 secrets: [
@@ -920,6 +1155,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     readerSharedAcrPull
     readerKeyVaultSecretsUser
     servicePrincipalInputCheck
+    storageInputCheck
   ]
 }
 
@@ -1006,8 +1242,23 @@ output logAnalyticsWorkspaceId string = logAnalytics.id
 @description('Application Insights resource name (the connection string is only stored as a Container App secret).')
 output applicationInsightsName string = appInsights.name
 
-@description('Storage account holding the MVP data share.')
-output storageAccountName string = storage.name
+@description('PostgreSQL Flexible Server name (the one the app uses; with postgresExistingServerName, that server).')
+output postgresServerName string = postgres.outputs.serverName
 
-@description('Azure Files share mounted at /var/lib/orqentis.')
-output dataFileShareName string = dataShare.name
+@description('PostgreSQL server fully qualified domain name (ORQENTIS_POSTGRES_HOST): used by the bootstrap step.')
+output postgresServerFqdn string = postgres.outputs.fqdn
+
+@description('PostgreSQL application database name (ORQENTIS_POSTGRES_DATABASE).')
+output postgresDatabaseName string = postgres.outputs.databaseName
+
+@description('Evidence storage account (evidence, reports, audit anchors).')
+output evidenceStorageAccountName string = evidenceStorage.outputs.accountName
+
+@description('Blob endpoint of the evidence storage account (ORQENTIS_EVIDENCE_BLOB_URL).')
+output evidenceBlobEndpoint string = evidenceStorage.outputs.blobEndpoint
+
+@description('Evidence container name (ORQENTIS_EVIDENCE_CONTAINER).')
+output evidenceContainerName string = evidenceStorage.outputs.evidenceContainerName
+
+@description('Audit anchor container name (ORQENTIS_AUDIT_ANCHOR_CONTAINER).')
+output auditAnchorContainerName string = evidenceStorage.outputs.auditAnchorContainerName

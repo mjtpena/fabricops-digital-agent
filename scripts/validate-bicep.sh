@@ -8,8 +8,8 @@
 # supplies obvious placeholders (never real identifiers) so the files can be compiled without a deployment.
 #
 # It also asserts, for dev, test and prod: enableWriteActions = false (production writes stay disabled), an explicit
-# ingressMode without the deprecated externalIngress, anonymous health endpoints (the smoke test needs them) and the
-# scheduler on.
+# ingressMode without the deprecated externalIngress, anonymous health endpoints (the smoke test needs them), the
+# scheduler on, and (test and prod) at least two replicas now that the database serialises every writer.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -18,6 +18,8 @@ export CONTAINER_IMAGE="${CONTAINER_IMAGE:-registry.invalid/orqentis-fabricops@s
 export ACR_LOGIN_SERVER="${ACR_LOGIN_SERVER:-registry.invalid}"
 export ACR_RESOURCE_ID="${ACR_RESOURCE_ID:-/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.ContainerRegistry/registries/crexample}"
 export ENTRA_API_CLIENT_ID="${ENTRA_API_CLIENT_ID:-00000000-0000-0000-0000-000000000000}"
+export POSTGRES_ENTRA_ADMIN_OBJECT_ID="${POSTGRES_ENTRA_ADMIN_OBJECT_ID:-00000000-0000-0000-0000-000000000000}"
+export POSTGRES_ENTRA_ADMIN_NAME="${POSTGRES_ENTRA_ADMIN_NAME:-sg-example-postgres-admins}"
 
 # `python3` is the Microsoft Store stub on Windows; use whichever interpreter actually runs.
 python_bin=""
@@ -88,8 +90,20 @@ for environment in ("dev", "test", "prod"):
         sys.exit(f"{where}: the smoke test needs anonymousHealthEndpoints = true")
     if value(params, "schedulerEnabled") is not True:
         sys.exit(f"{where} must keep the autonomous scheduler on (schedulerEnabled = true)")
+    # The app is stateless (PostgreSQL serialises the audit chain, the lease and approvals): test and prod run two
+    # replicas so a revision change or a node failure does not take the API down. dev may run one.
+    minimum, maximum = value(params, "minReplicas"), value(params, "maxReplicas")
+    if not (isinstance(minimum, int) and isinstance(maximum, int) and 1 <= minimum <= maximum):
+        sys.exit(f"{where} must set minReplicas and maxReplicas explicitly (1 <= minReplicas <= maxReplicas)")
+    if environment != "dev" and minimum < 2:
+        sys.exit(f"{where} must run at least two replicas (minReplicas >= 2)")
+    # The PostgreSQL administrator comes from the pipeline variables; the file must not hard-code an identity.
+    for name in ("postgresEntraAdminObjectId", "postgresEntraAdminName"):
+        if name not in params:
+            sys.exit(f"{where} must set {name} (from the POSTGRES_ENTRA_ADMIN_* variables)")
 print("env parameter files: deploymentEnvironment matches, enableWriteActions = false everywhere (prod included),")
-print("ingressMode explicit (no deprecated externalIngress), anonymous health endpoints, scheduler on")
+print("ingressMode explicit (no deprecated externalIngress), anonymous health endpoints, scheduler on,")
+print("replicas explicit (test and prod at least two), PostgreSQL administrator set")
 PY
 
 echo "Bicep validation passed"

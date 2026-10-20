@@ -25,7 +25,12 @@ param entraClientId = '00000000-0000-0000-0000-000000000000'
 
 param deploymentEnvironment = 'prod'
 param fabricMode = 'rest'
-param contractsPath = '/var/lib/orqentis/contracts/estate.json'
+// The estate contracts file (rest mode): its JSON text becomes the Container App secret estate-contracts, mounted
+// read-only at /mnt/contracts/estate.json. Required when fabricMode is 'rest' (the deployment fails without it):
+//   export CONTRACTS_JSON="$(cat contracts/estate.json)"
+// or, for a manual deployment, read the file directly: param contractsContent = loadTextContent('../../contracts/estate.json')
+param contractsPath = '/mnt/contracts/estate.json'
+param contractsContent = readEnvironmentVariable('CONTRACTS_JSON', '')
 
 // The WRITE capability boundary stays closed: the actor identity is created but not attached.
 param enableWriteActions = false
@@ -43,8 +48,9 @@ param azureOpenAiResourceId = ''
 // Autonomous runtime: the app collects, detects, investigates, sweeps SLAs and refreshes its catalog by itself.
 // Every value below is the default; set schedulerEnabled = false to run the app API-driven only.
 param schedulerEnabled = true
-// Seconds before the scheduler takes the lease after start, so the previous revision can drain during a deploy.
-param schedulerStartupDelaySeconds = 120
+// Seconds before the scheduler takes the lease after start. A courtesy only: the database lease already allows a single
+// holder, this just keeps a starting revision from competing for it while it warms up during a deploy.
+param schedulerStartupDelaySeconds = 30
 param schedulerTickSeconds = 5
 param schedulerLeaseTtlSeconds = 60       // at least 3x the tick
 param schedulerJobTimeoutMinutes = 30
@@ -60,6 +66,11 @@ param catalogRefreshEnabled = true
 param catalogRefreshIntervalMinutes = 60
 param investigationMaxConcurrency = 2
 param investigationTimeoutSeconds = 600
+// Audit chain anchors (immutable blobs) and durable investigation jobs shared by all replicas.
+param auditAnchorEnabled = true
+param auditAnchorIntervalMinutes = 15
+param investigationPollIntervalSeconds = 2
+param investigationClaimTtlSeconds = 120   // at least 3x the poll interval
 // Global budget for Fabric / Power BI calls (shared by every job) and incremental-collection windows.
 param fabricMaxConcurrency = 4
 param fabricRatePerSecond = 5
@@ -81,8 +92,31 @@ param infrastructureSubnetId = ''
 param anonymousHealthEndpoints = true           // /health and /health/ready answer without a token
 
 param logRetentionInDays = 30
+
+// Scale: the app is stateless (the database serialises the audit chain, the lease and approvals), so two replicas
+// are the default. Keep (maxReplicas + minReplicas) x postgresPoolMax + ~15 below the server's max_connections.
+param minReplicas = 2
+param maxReplicas = 2
+param postgresPoolMax = 8
+
+// Evidence storage account (evidence, reports, audit anchors): Blob, Entra only, version-level immutability.
 param storageSkuName = 'Standard_LRS'
-param fileShareQuotaGiB = 32
+param evidenceRetentionDays = 30
+param evidenceImmutabilityState = 'Unlocked'   // 'Locked' is irreversible: see infra/bicep/README.md, Storage
+
+// PostgreSQL Flexible Server (Microsoft Entra authentication only). The Entra administrator is REQUIRED: a group whose
+// members run the bootstrap step (infra/bicep/README.md, "PostgreSQL bootstrap"). Placeholders below.
+param postgresEntraAdminObjectId = '00000000-0000-0000-0000-000000000000'
+param postgresEntraAdminName = 'sg-fabricops-postgres-admins'
+param postgresEntraAdminType = 'Group'
+param postgresSkuName = 'Standard_B1ms'
+param postgresStorageSizeGiB = 32
+param postgresBackupRetentionDays = 7
+// Public access: nobody can connect until a firewall rule exists. Azure services = the 0.0.0.0 rule that lets Container
+// Apps (no fixed outbound address) reach the port; every connection still needs an Entra token. Alternatively use VNet
+// integration: postgresDelegatedSubnetId + postgresPrivateDnsZoneId (and ingressMode 'vnet').
+param postgresAllowAzureServices = true
+// param postgresAllowedIpRanges = [{ name: 'bootstrap-operator', startIpAddress: '203.0.113.10', endIpAddress: '203.0.113.10' }]
 
 // Time zone for time-of-day reasoning and report times (validated at startup).
 param defaultTimezone = 'Australia/Sydney'

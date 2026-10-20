@@ -16,9 +16,15 @@ param containerImage = 'crfabricops.azurecr.io/orqentis-fabricops:0.1.0'
 param containerRegistryName = 'crfabricops'
 param entraClientId = '00000000-0000-0000-0000-000000000000'
 
+// PostgreSQL (Microsoft Entra authentication only): the Entra administrator is required. Placeholders.
+param postgresEntraAdminObjectId = '00000000-0000-0000-0000-000000000000'
+param postgresEntraAdminName = 'sg-fabricops-postgres-admins'
+
 param deploymentEnvironment = 'prod'
 param fabricMode = 'rest'
-param contractsPath = '/var/lib/orqentis/contracts/estate.json'
+// The estate contracts file (JSON text) becomes the Container App secret estate-contracts, mounted at contractsPath.
+param contractsPath = '/mnt/contracts/estate.json'
+param contractsContent = readEnvironmentVariable('CONTRACTS_JSON', '')
 
 // The Fabric estate's tenant (ORQENTIS_TENANT_ID and AZURE_TENANT_ID). NOT this deployment's tenant.
 param fabricTenantId = '11111111-1111-1111-1111-111111111111'

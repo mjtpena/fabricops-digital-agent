@@ -15,7 +15,10 @@ name: Bicep what-if
 # pull-request identity any access to the shared registry's resource group. Review that module by reading the diff.
 #
 # Repository variables (docs/delivery.md): AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_LOGIN_SERVER, WHATIF_CLIENT_ID,
-# WHATIF_RESOURCE_GROUP, WHATIF_ENTRA_API_CLIENT_ID.
+# WHATIF_RESOURCE_GROUP, WHATIF_ENTRA_API_CLIENT_ID, WHATIF_POSTGRES_ENTRA_ADMIN_OBJECT_ID, WHATIF_POSTGRES_ENTRA_ADMIN_NAME
+# and, optionally, WHATIF_POSTGRES_ENTRA_ADMIN_TYPE, WHATIF_POSTGRES_EXISTING_SERVER_NAME and WHATIF_CONTRACTS_JSON: the
+# dev environment's values of the POSTGRES_ENTRA_ADMIN_* / POSTGRES_EXISTING_SERVER_NAME / CONTRACTS_JSON variables
+# (identifiers and the contracts text, never secrets).
 
 on:
   pull_request:
@@ -46,19 +49,32 @@ jobs:
       # Empty on purpose: skips the cross-resource-group AcrPull module (see above).
       ACR_RESOURCE_ID: ""
       ENTRA_API_CLIENT_ID: ${{ vars.WHATIF_ENTRA_API_CLIENT_ID }}
+      # Read by env/dev.bicepparam. The same values the dev environment deploys with, so the what-if compares like with like.
+      POSTGRES_ENTRA_ADMIN_OBJECT_ID: ${{ vars.WHATIF_POSTGRES_ENTRA_ADMIN_OBJECT_ID }}
+      POSTGRES_ENTRA_ADMIN_NAME: ${{ vars.WHATIF_POSTGRES_ENTRA_ADMIN_NAME }}
+      POSTGRES_EXISTING_SERVER_NAME: ${{ vars.WHATIF_POSTGRES_EXISTING_SERVER_NAME }}
+      CONTRACTS_JSON: ${{ vars.WHATIF_CONTRACTS_JSON }}
     steps:
       - name: Check configuration
         env:
           AZURE_TENANT_ID_VAR: ${{ vars.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID_VAR: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          POSTGRES_ENTRA_ADMIN_TYPE_VAR: ${{ vars.WHATIF_POSTGRES_ENTRA_ADMIN_TYPE }}
         run: |
           missing=()
-          for name in AZURE_TENANT_ID_VAR AZURE_SUBSCRIPTION_ID_VAR RESOURCE_GROUP ACR_LOGIN_SERVER ENTRA_API_CLIENT_ID; do
+          for name in AZURE_TENANT_ID_VAR AZURE_SUBSCRIPTION_ID_VAR RESOURCE_GROUP ACR_LOGIN_SERVER ENTRA_API_CLIENT_ID POSTGRES_ENTRA_ADMIN_OBJECT_ID POSTGRES_ENTRA_ADMIN_NAME; do
             [[ -n "${!name:-}" ]] || missing+=("${name%_VAR}")
           done
           if ((${#missing[@]} > 0)); then
             echo "::error::Missing GitHub repository variables: ${missing[*]} (see docs/delivery.md)"
             exit 1
+          fi
+          # Only set when given: an empty value must not shadow the .bicepparam default (Group).
+          if [[ -n "$POSTGRES_ENTRA_ADMIN_TYPE_VAR" ]]; then
+            case "$POSTGRES_ENTRA_ADMIN_TYPE_VAR" in
+              Group | User | ServicePrincipal) echo "POSTGRES_ENTRA_ADMIN_TYPE=${POSTGRES_ENTRA_ADMIN_TYPE_VAR}" >> "$GITHUB_ENV" ;;
+              *) echo "::error::WHATIF_POSTGRES_ENTRA_ADMIN_TYPE must be Group, User or ServicePrincipal"; exit 1 ;;
+            esac
           fi
 
       - name: Check out

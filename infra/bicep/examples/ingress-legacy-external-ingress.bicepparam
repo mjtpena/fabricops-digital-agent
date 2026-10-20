@@ -5,4 +5,12 @@ using '../main.bicep'
 
 param containerImage = 'crfabricops.azurecr.io/orqentis-fabricops:0.1.0'
 param entraClientId = '00000000-0000-0000-0000-000000000000'
+
+// PostgreSQL (Microsoft Entra authentication only): the Entra administrator is required. Placeholders; use the object
+// id and name of the group whose members run the bootstrap step (infra/bicep/README.md, "PostgreSQL bootstrap").
+param postgresEntraAdminObjectId = '00000000-0000-0000-0000-000000000000'
+param postgresEntraAdminName = 'sg-fabricops-postgres-admins'
+// Required in rest mode (the default): the JSON text of the estate contracts file, e.g. export CONTRACTS_JSON="$(cat contracts/estate.json)".
+param contractsContent = readEnvironmentVariable('CONTRACTS_JSON', '')
+
 param externalIngress = false   // maps to ingressMode 'internal'
