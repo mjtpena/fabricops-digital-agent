@@ -73,6 +73,16 @@ refusal), in the approval service and in the action gateway. Grant `FabricOps.Au
 managed identities or service principals (`allowedMemberTypes: ["Application"]`), and give approver
 roles only to people. Both are enforced by the checks above even when Entra is misconfigured.
 
+**`HUMAN` means a user token, not necessarily a person.** Password-signing service accounts, agent users and
+third-party applications acting for a consenting user also classify `HUMAN`. Do not assign approver roles to
+non-interactive accounts, and list the allowed client applications (`allowedClientApplications`). Exactly one
+`X-MS-CLIENT-PRINCIPAL` header is accepted (several: 401), the header is strictly base64, capped in size, and the
+payload cannot relabel claims as roles. Cookie sessions (WS8) additionally need CSRF protection (JSON-only
+state-changing routes plus an `Origin` check); ADR-0015 records the requirement.
+
+`orqentis serve` refuses `dev_headers` on a non-loopback address unless `ORQENTIS_DEV_HEADERS_ALLOW_REMOTE=true`
+is set, and the container image defaults to `easy_auth`, so an unconfigured `docker run` is not an open API.
+
 ### 2.2 Roles and what they unlock
 
 | Role | Read endpoints | `POST /telemetry/collect` | `POST /incidents/{id}/investigate` | Approve / reject / execute |
@@ -82,7 +92,8 @@ roles only to people. Both are enforced by the checks above even when Entra is m
 | `FabricOps.Operator` | yes | yes | yes | LOW/MEDIUM risk, human only |
 | `FabricOps.PlatformAdmin` | yes | yes | yes | HIGH_RISK, human only |
 
-Under Easy Auth a caller needs one of these roles for every endpoint except `/health`. A principal with no role
+Under Easy Auth a caller needs one of these roles for every endpoint except `/health` (liveness only: it does not
+reveal whether writes are enabled; `GET /system/info` does and needs a role). A principal with no role
 gets 403. `ORQENTIS_API_REQUIRE_READ_ROLE=false` opens the plain read endpoints only: collection, investigation and
 audit verification keep their roles, and approving stays human-only. The interactive docs and `/openapi.json` are
 not served under Easy Auth (they would answer callers with no role).
@@ -159,11 +170,15 @@ storage.
   been decided.
 * Execution requires all of the following:
   * the approval is APPROVED and unexpired;
-  * a human principal holds the required role;
+  * a human principal holds the required role, and the role the **current** policy requires;
   * the action fingerprint is unchanged;
-  * the action has not already been executed;
-  * the policy does not deny it now;
+  * the action has not already been executed: single use is claimed with a compare-and-set persisted
+    **before** the write call (concurrent executes reach the write client once), and an unknown outcome keeps
+    the claim so a retry cannot repeat the write;
+  * the policy does not deny it now, and has not reclassified it to a higher risk than was approved;
   * the write capability is enabled.
+* Decisions are atomic: approve, reject, expire and cancel are compare-and-set transitions, so of two concurrent
+  decisions exactly one is stored and the other gets 409.
 
 The critical tests in `tests/scenarios/test_security_boundary.py` and
 `tests/integration/test_agent_framework_reasoner.py` exercise these paths, including a model that

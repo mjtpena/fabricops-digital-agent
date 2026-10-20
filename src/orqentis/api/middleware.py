@@ -42,39 +42,50 @@ RequestClass = Literal["mutating", "expensive"]
 _DOC_PATHS: Final = frozenset({"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"})
 _MAX_KEY_LENGTH = 256
 _MAX_BUCKETS = 10_000
+_OVERFLOW_KEY = "\x00overflow"  # cannot collide with a principal id
 
 
 class TokenBucketLimiter:
-    """Allows ``limit_per_minute`` requests per key in a burst, refilled continuously over a minute."""
+    """Allows ``limit_per_minute`` requests per key in a burst, refilled continuously over a minute.
 
-    def __init__(self, limit_per_minute: int, *, clock: Callable[[], float] = time.monotonic) -> None:
+    Memory is bounded without letting new keys reset a bucket that is limiting someone: when the table is
+    full, only buckets that have refilled completely (idle, so dropping them loses nothing) are evicted, and if
+    none can be evicted new keys share one overflow bucket instead of displacing the existing ones.
+    """
+
+    def __init__(
+        self, limit_per_minute: int, *, clock: Callable[[], float] = time.monotonic, max_keys: int | None = None
+    ) -> None:
         self._capacity = float(limit_per_minute)
         self._refill_per_second = limit_per_minute / 60.0
         self._clock = clock
+        self._max_keys = max_keys
         self._buckets: dict[str, tuple[float, float]] = {}  # key -> (tokens, last refill)
+        self._next_sweep = 0.0
 
     def acquire(self, key: str) -> float:
         """Take one token. Returns 0.0 when allowed, else the seconds until a token is available."""
         now = self._clock()
+        if key not in self._buckets and len(self._buckets) >= (self._max_keys or _MAX_BUCKETS):
+            self._sweep(now)
+            if len(self._buckets) >= (self._max_keys or _MAX_BUCKETS):
+                key = _OVERFLOW_KEY
         tokens, last = self._buckets.get(key, (self._capacity, now))
         tokens = min(self._capacity, tokens + (now - last) * self._refill_per_second)
         if tokens >= 1.0:
             self._buckets[key] = (tokens - 1.0, now)
-            self._prune(now)
             return 0.0
         self._buckets[key] = (tokens, now)
         return (1.0 - tokens) / self._refill_per_second
 
-    def _prune(self, now: float) -> None:
-        if len(self._buckets) <= _MAX_BUCKETS:
+    def _sweep(self, now: float) -> None:
+        """Drop buckets that are full again. At most once a second, so a flood does not make every request a scan."""
+        if now < self._next_sweep:
             return
-        # A bucket idle for a full minute is full again, so dropping it loses nothing.
-        for key in [k for k, (_, last) in self._buckets.items() if now - last >= 60.0]:
-            del self._buckets[key]
-        # Still over the cap (a flood of distinct keys): evict the oldest entries down to 90 % so the scan above
-        # is not repeated on every request. This can only forget budgets, never wrongly refuse a request.
-        for key in list(self._buckets)[: max(0, len(self._buckets) - _MAX_BUCKETS * 9 // 10)]:
-            del self._buckets[key]
+        self._next_sweep = now + 1.0
+        for key, (tokens, last) in list(self._buckets.items()):
+            if key != _OVERFLOW_KEY and tokens + (now - last) * self._refill_per_second >= self._capacity:
+                del self._buckets[key]
 
 
 class RateLimits:
@@ -105,6 +116,46 @@ class RateLimits:
             f"Too many {request_class} requests; retry in {retry_after} s",
             headers={"Retry-After": str(retry_after)},
         )
+
+
+class RefusalAudit:
+    """Audit refused API calls without letting a caller flood the audit log.
+
+    A refusal is recorded at most once per principal and reason per window, and at most ``max_per_window``
+    records are written per window overall. The refusals skipped in between are counted and reported in the
+    next record that is written (``suppressed``). The refusal itself is never skipped: this only bounds how
+    much of it is written to the hash-chained log.
+    """
+
+    def __init__(
+        self,
+        *,
+        window_seconds: float = 60.0,
+        max_per_window: int = 20,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._window = window_seconds
+        self._max = max_per_window
+        self._clock = clock
+        self._window_start = clock()
+        self._written = 0
+        self._suppressed = 0
+        self._seen: dict[tuple[str, str], float] = {}
+
+    def should_record(self, principal_id: str, code: str) -> tuple[bool, int]:
+        """Whether to write a record now, and how many were suppressed since the previous one."""
+        now = self._clock()
+        if now - self._window_start >= self._window:
+            self._window_start, self._written = now, 0
+            self._seen = {k: t for k, t in self._seen.items() if now - t < self._window}
+        key = (principal_id[:_MAX_KEY_LENGTH], code)
+        if self._written >= self._max or (key in self._seen and now - self._seen[key] < self._window):
+            self._suppressed += 1
+            return False, 0
+        self._seen[key] = now
+        self._written += 1
+        suppressed, self._suppressed = self._suppressed, 0
+        return True, suppressed
 
 
 class BodyLimitMiddleware:
@@ -156,5 +207,6 @@ def install_api_hardening(app: FastAPI, settings: Settings) -> None:
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_middleware(BodyLimitMiddleware, max_body_bytes=settings.api_max_body_bytes)
     app.state.rate_limits = RateLimits(settings)
+    app.state.refusal_audit = RefusalAudit()
     if settings.api_auth_mode is ApiAuthMode.EASY_AUTH:
         app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) not in _DOC_PATHS]

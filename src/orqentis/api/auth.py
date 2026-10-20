@@ -75,16 +75,30 @@ def _from_dev_headers(user: str | None, roles: str | None) -> Principal:
     return Principal(id=principal_id, display_name=principal_id, kind=PrincipalKind.HUMAN, roles=role_set)
 
 
+def _single_header(request: Request, name: str) -> str | None:
+    """The value of a header that must be present at most once.
+
+    Starlette would silently return the first of several. A forged value placed in front of the genuine one
+    must not win, so more than one copy refuses the request.
+    """
+    values = request.headers.getlist(name)
+    if len(values) > 1:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"More than one {name} header")
+    return values[0] if values else None
+
+
 def current_principal(
     request: Request,
     x_ms_client_principal: Annotated[str | None, Header()] = None,
     x_orqentis_user: Annotated[str | None, Header()] = None,
     x_orqentis_roles: Annotated[str | None, Header()] = None,
 ) -> Principal:
+    # The Header() parameters document the inputs in OpenAPI; the values are read from the raw request so that
+    # duplicated headers can be refused.
     settings: Settings = request.app.state.settings
     if settings.api_auth_mode is ApiAuthMode.EASY_AUTH:
-        return _from_easy_auth(x_ms_client_principal)
-    return _from_dev_headers(x_orqentis_user, x_orqentis_roles)
+        return _from_easy_auth(_single_header(request, "x-ms-client-principal"))
+    return _from_dev_headers(_single_header(request, "x-orqentis-user"), _single_header(request, "x-orqentis-roles"))
 
 
 CurrentPrincipal = Annotated[Principal, Depends(current_principal)]

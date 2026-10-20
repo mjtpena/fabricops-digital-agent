@@ -12,7 +12,7 @@ from starlette.types import Message, Receive, Scope, Send
 
 from orqentis.api.app import create_app
 from orqentis.api.errors import ApiError
-from orqentis.api.middleware import BodyLimitMiddleware, RateLimits, TokenBucketLimiter
+from orqentis.api.middleware import BodyLimitMiddleware, RateLimits, RefusalAudit, TokenBucketLimiter
 from orqentis.config.settings import ApiAuthMode
 from tests.conftest import make_settings
 from tests.support import easy_auth as ea
@@ -262,24 +262,45 @@ def test_token_bucket_bursts_then_refills_continuously() -> None:
     assert limiter.acquire("a") > 0
 
 
-def test_token_bucket_keys_are_independent_and_idle_buckets_are_pruned(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_token_bucket_keys_are_independent() -> None:
     clock = FakeClock()
     limiter = TokenBucketLimiter(1, clock=clock)
     assert limiter.acquire("a") == 0.0
     assert limiter.acquire("b") == 0.0
     assert limiter.acquire("a") > 0
-    monkeypatch.setattr("orqentis.api.middleware._MAX_BUCKETS", 2)
-    clock.now += 61
-    assert limiter.acquire("c") == 0.0  # triggers pruning of the idle buckets a and b
-    assert set(limiter._buckets) == {"c"}
+    assert limiter.acquire("b") > 0
 
 
-def test_token_bucket_memory_is_bounded_under_a_flood_of_distinct_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("orqentis.api.middleware._MAX_BUCKETS", 100)
-    limiter = TokenBucketLimiter(5, clock=FakeClock())  # the clock never advances: nothing is idle
+def test_a_flood_of_new_keys_cannot_reset_a_bucket_that_is_limiting() -> None:
+    """Regression: FIFO eviction let 10k distinct keys evict a drained bucket, which then refilled to full."""
+    clock = FakeClock()
+    limiter = TokenBucketLimiter(2, clock=clock, max_keys=100)
+    assert [limiter.acquire("victim") for _ in range(2)] == [0.0, 0.0]
+    assert limiter.acquire("victim") > 0  # drained
     for index in range(1000):
-        assert limiter.acquire(f"principal:{index}") == 0.0
-        assert len(limiter._buckets) <= 100
+        limiter.acquire(f"attacker-{index}")
+        assert len(limiter._buckets) <= 101  # the cap plus the shared overflow bucket
+    assert limiter.acquire("victim") > 0  # still limited: it was never evicted
+    clock.now += 31
+    assert limiter.acquire("victim") == 0.0  # and it refills normally
+
+
+def test_new_keys_share_an_overflow_bucket_when_the_table_is_full_of_active_buckets() -> None:
+    limiter = TokenBucketLimiter(2, clock=FakeClock(), max_keys=3)
+    for key in ("a", "b", "c"):
+        assert limiter.acquire(key) == 0.0  # three active buckets fill the table
+    results = [limiter.acquire(f"new-{index}") for index in range(4)]
+    assert results[:2] == [0.0, 0.0] and all(r > 0 for r in results[2:])  # one shared bucket of 2 tokens
+
+
+def test_idle_buckets_are_evicted_to_make_room() -> None:
+    clock = FakeClock()
+    limiter = TokenBucketLimiter(1, clock=clock, max_keys=2)
+    limiter.acquire("a")
+    limiter.acquire("b")
+    clock.now += 61  # both refilled completely
+    assert limiter.acquire("c") == 0.0
+    assert set(limiter._buckets) == {"c"}
 
 
 def test_rate_limits_report_retry_after_from_the_refill_time_and_recover(tmp_path: Path) -> None:
@@ -301,3 +322,19 @@ def test_disabled_rate_limits_never_refuse(tmp_path: Path) -> None:
     limits = RateLimits(make_settings(tmp_path, api_rate_limit_enabled=False, api_rate_limit_mutating_per_minute=1))
     for _ in range(50):
         limits.check("mutating", "oid-1")
+
+
+# ---- refusal audit ----------------------------------------------------------------------------------------
+
+
+def test_refusal_audit_writes_one_record_per_principal_and_reason_and_caps_the_total() -> None:
+    clock = FakeClock()
+    audit = RefusalAudit(window_seconds=60, max_per_window=3, clock=clock)
+    assert audit.should_record("oid-1", "ROLE_REQUIRED") == (True, 0)
+    assert audit.should_record("oid-1", "ROLE_REQUIRED") == (False, 0)  # repeat within the window
+    assert audit.should_record("oid-1", "PRINCIPAL_NOT_HUMAN") == (True, 1)  # another reason; reports the skip
+    assert audit.should_record("oid-2", "ROLE_REQUIRED") == (True, 0)
+    assert audit.should_record("oid-3", "ROLE_REQUIRED") == (False, 0)  # over the window cap
+    clock.now += 61
+    assert audit.should_record("oid-3", "ROLE_REQUIRED") == (True, 1)  # the next record reports what was skipped
+    assert audit.should_record("oid-1", "ROLE_REQUIRED") == (True, 0)

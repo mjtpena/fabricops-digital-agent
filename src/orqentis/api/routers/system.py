@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query
 from orqentis import __version__
 from orqentis.api.authz import CollectPrincipal, ReadPrincipal, VerifyPrincipal
 from orqentis.api.deps import ContainerDep
-from orqentis.api.schemas import CollectionResult, Health
+from orqentis.api.schemas import CollectionResult, Health, SystemInfo
 from orqentis.observability.audit import AuditRecord, AuditVerification
 
 router = APIRouter(tags=["system"])
@@ -16,6 +16,18 @@ router = APIRouter(tags=["system"])
 @router.get("/health", response_model=Health)
 async def health(c: ContainerDep) -> Health:
     return Health(
+        status="ok",
+        version=__version__,
+        fabric_mode=c.settings.fabric_mode.value,
+        reasoner=c.investigator.reasoner_name,
+        time=c.clock.now(),
+    )
+
+
+@router.get("/system/info", response_model=SystemInfo)
+async def system_info(c: ContainerDep, _: ReadPrincipal) -> SystemInfo:
+    """Like /health, plus the write-capability flag. Authenticated: /health may be reachable anonymously."""
+    return SystemInfo(
         status="ok",
         version=__version__,
         fabric_mode=c.settings.fabric_mode.value,

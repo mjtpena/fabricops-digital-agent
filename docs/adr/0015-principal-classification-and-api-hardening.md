@@ -104,7 +104,7 @@ as before (any authenticated caller), which local development and the demo rely 
   comment). A declared `Content-Length` over the limit is refused with 413 before the app runs. Chunked or
   under-declared bodies are counted while read and stop with 413 (an `HTTPException` subclass, because FastAPI
   rewrites any other exception raised while reading the body to 400). An invalid `Content-Length` is 400.
-* **Rate.** Token bucket per *authenticated* principal and request class, in memory. `mutating` (approve, reject,
+* **Rate.** Token bucket per *authenticated* principal and request class, in memory (bounded, see section 5). `mutating` (approve, reject,
   execute; default 30 per minute) and `expensive` (collection, investigation, audit verification; default 6 per
   minute). Beyond the budget: 429 with `Retry-After` (whole seconds until a token is available). Plain reads
   are not limited. The budget is charged by the route guards (`orqentis.api.authz`) after `current_principal`
@@ -133,9 +133,70 @@ deployments that never set `externalIngress`; the README states it and `allowedI
 
 **Health endpoints.** `/health` and `/health/ready` are excluded from authentication by default
 (`anonymousHealthEndpoints`) so uptime checks and smoke tests work without a token. They return the version,
-mode flags and the time. Container Apps does not say whether `excludedPaths` matches exactly or by prefix; the
+mode (`fabric_mode`, `reasoner`) and the time. The write-capability flag is not disclosed anonymously (`GET /system/info`). Container Apps does not say whether `excludedPaths` matches exactly or by prefix; the
 app does not depend on it: all other routes need the identity header, and nothing under `/health` reads it.
 Set the parameter to `false` where version disclosure matters more than anonymous probes.
+
+### 5. Hardening of the approval boundary and the request path (review round 2)
+
+* **Decisions and execution are atomic.** `ApprovalProvider.transition` is a compare-and-set on a revision
+  counter kept on every approval (SQLite: a conditional `UPDATE`; WS6's PostgreSQL adapter implements the same
+  port with a row lock or `WHERE revision = $n`). Approve, reject, expire and cancel go through it, so of two
+  concurrent decisions, even from two processes, exactly one is stored and the other gets 409. A per-approval
+  lock in the service spares same-process callers the conflict. Reproduced before the fix: five concurrent
+  executes made five write calls, and a concurrent approve and reject both returned 200.
+* **Single use is claimed before the write.** `execute` persists `EXECUTING` with a compare-and-set before the write
+  client is called and finalises `SUCCEEDED`/`FAILED` afterwards. If the write raises anything but a `FabricError`
+  the outcome is unknown, the claim stays `EXECUTING` and an `UNKNOWN` audit record is written: a retry must not
+  repeat a write that may have happened, so a person reconciles it. (At-most-once; the write client still
+  receives the approval id as its idempotency key.)
+* **Execution re-evaluates the current policy.** Besides a DENY, the current decision's risk and required role
+  are enforced: an approval granted at one risk is not executed after the action was reclassified higher
+  (`POLICY_RISK_ESCALATED`), and the executor must hold the role the current policy requires **and** the role
+  recorded with the approval (the stricter of the two). Reproduced before the fix: after the policy was tightened
+  to PlatformAdmin an Operator still executed.
+* **Deciding routes check the role before the approval is looked up** (`require_decider`, behind the kind-only
+  `require_human`). A caller without an approver role gets the same 403 whether the approval exists or not, and
+  cannot probe approvals. Collection and investigation roles are on whenever `action_roles_required` holds
+  (always under Easy Auth).
+* **Refusals are audited with a bound.** Every refusal is logged. The hash-chained audit trail gets one record per
+  principal and reason per minute and at most 20 per minute overall, with a count of the skipped ones in the
+  next record, so an authenticated caller cannot fill the log with refusals.
+* **Exactly one `X-MS-CLIENT-PRINCIPAL` header** is accepted (two or more: 401), and the same for the dev headers.
+  A forged principal placed before the genuine one used to win. The header is decoded with strict base64
+  (no comma-joined or whitespace-padded pairs), is capped at 32 KiB, and a parse failure of any kind, including a
+  deeply nested document (`RecursionError`), is a 401, never a 500.
+* **The payload cannot relabel claims.** `role_typ` and `name_typ` are honoured only for the claim types Easy Auth
+  uses (`roles` and the ws/2008 role URI; `name`, `preferred_username`, `upn`, `email` and the xmlsoap name URI).
+  `role_typ = "idtyp"` used to fold `idtyp = app` into the roles and made the principal `HUMAN`.
+* **Rate-limit tables are bounded without a bypass.** When the table is full only buckets that have refilled are
+  evicted, and otherwise new principals share one overflow bucket; a flood of new keys can no longer reset a
+  bucket that is limiting someone.
+* **`dev_headers` fails closed.** `orqentis serve` refuses it on a non-loopback address unless
+  `ORQENTIS_DEV_HEADERS_ALLOW_REMOTE=true`, and the container image defaults to `ORQENTIS_API_AUTH_MODE=easy_auth`
+  (every route but `/health` answers 401), so `docker run` without configuration is not an open API. `make serve`
+  and `make demo` are unchanged (127.0.0.1). For a throwaway local container: `-e ORQENTIS_API_AUTH_MODE=dev_headers
+  -e ORQENTIS_DEV_HEADERS_ALLOW_REMOTE=true`, published on loopback only.
+* **`/health` is liveness only.** The write-capability flag moved to `GET /system/info`, which needs a FabricOps
+  role. The anonymous answer is `status`, `version`, `fabric_mode`, `reasoner` and `time`.
+* **The route-guard test walks the live app**: routes placed directly on the app, the OpenAPI surface and the
+  doc routes are all inspected, and a kind-only guard no longer counts as a role guard.
+
+### 6. What `HUMAN` means, and what it does not
+
+`HUMAN` means **the token is a user token**, not that a person is at the keyboard. These also classify `HUMAN`:
+service accounts that sign in with a password (ROPC), Entra "agent users", and third-party client applications that
+act for a user who consented to them. The classifier cannot see the difference, and `scp`/`sub` do not carry it.
+Mitigations that exist: `allowedClientApplications` (Easy Auth admits only listed client applications),
+assignment-required with user/group assignment of the approver roles (only assigned users can hold them), and the
+human-only, requester-is-not-approver and role checks in the service. Requiring an `amr` such as MFA for deciders is a
+possible follow-up. Record: do not assign approver roles to non-interactive accounts.
+
+**CSRF is a WS8 requirement, not a current risk** (the API has no login flow configured, so browsers never
+send a cookie to it). When the UI adds cookie sessions, an ID-token session is `HUMAN` (row 8), so a foreign page
+could make a signed-in browser POST `/approvals/{id}/approve`. Before WS8 ships: state-changing routes accept
+`application/json` only (a form post gets 415), check `Origin`/`Sec-Fetch-Site` against the app's own origin,
+and keep `SameSite` cookies. No code is needed in this ADR's scope.
 
 **Residual risk: trust-the-header.** The app trusts `X-MS-CLIENT-PRINCIPAL` and never validates a bearer token.
 With an externally reachable endpoint, any window without active Easy Auth (the first deployment before the

@@ -332,15 +332,22 @@ def test_reserved_object_ids_are_refused() -> None:
         assert refused.value.status_code == 403 and refused.value.code == "RESERVED_PRINCIPAL"
 
 
-def test_display_name_comes_from_name_typ_and_is_bounded() -> None:
-    claims = [*ea.user_access_token(OID), ("http://example/display", "D" * 500)]
-    principal, _ = classify_client_principal(ea.encode(claims, name_typ="http://example/display"))
+def test_display_name_comes_from_an_allowed_name_typ_and_is_bounded() -> None:
+    claims = [c for c in ea.user_access_token(OID) if c[0] not in {"name", "preferred_username"}]
+    claims.append(("preferred_username", "D" * 500))
+    principal, _ = classify_client_principal(ea.encode(claims, name_typ="preferred_username"))
     assert principal.display_name == "D" * 200
     principal, _ = classify_client_principal(ea.encode(ea.user_access_token(OID, name="Olivia Operator")))
     assert principal.display_name == "Olivia Operator"
     # No name claim at all: fall back to the object id.
     bare = [(ea.OID_URI, OID), (ea.SUB_URI, "pairwise"), (ea.SCOPE_URI, "x")]
     assert classify_client_principal(ea.encode(bare))[0].display_name == OID
+
+
+def test_a_name_typ_outside_the_allow_list_is_ignored() -> None:
+    claims = [*ea.user_access_token(OID), ("http://example/display", "Mallory")]
+    principal, _ = classify_client_principal(ea.encode(claims, name_typ="http://example/display"))
+    assert principal.display_name == "Olivia Operator"
 
 
 def test_name_and_role_claim_types_follow_the_principal_payload() -> None:
@@ -353,3 +360,44 @@ def test_name_and_role_claim_types_follow_the_principal_payload() -> None:
     ]
     principal, _ = classify_client_principal(ea.encode(claims, role_typ=ea.ROLE_URI))
     assert principal.roles == {ROLE_OPERATOR, ROLE_PLATFORM_ADMIN}
+
+
+@pytest.mark.parametrize("role_typ", ["idtyp", "sub", "scp", "oid", "http://example/roles", "azp"])
+def test_the_payload_cannot_relabel_a_claim_as_roles(role_typ: str) -> None:
+    """Regression: role_typ = "idtyp" folded idtyp=app into the roles and the principal became HUMAN."""
+    claims = [*ea.user_id_token(OID, [ROLE_PLATFORM_ADMIN]), ("idtyp", "app"), ("azp", "client")]
+    header = ea.encode(claims, role_typ=role_typ)
+    client = parse_client_principal(header)
+    assert classify(client).kind is PrincipalKind.SERVICE
+    assert "app" not in client.roles and role_typ not in client.roles
+    assert classify(parse_client_principal(ea.encode(claims))).kind is PrincipalKind.SERVICE
+
+
+def test_only_the_known_role_claim_types_are_roles() -> None:
+    claims = [
+        (ea.OID_URI, OID),
+        (ea.SUB_URI, "pairwise"),
+        (ea.SCOPE_URI, "x"),
+        ("http://example/roles", "FabricOps.PlatformAdmin"),
+    ]
+    client = parse_client_principal(ea.encode(claims, role_typ="http://example/roles"))
+    assert client.roles == frozenset()
+
+
+def test_oversized_or_deeply_nested_principals_are_401_not_500() -> None:
+    nested = "[" * 5000 + "]" * 5000
+    deep = base64.b64encode(nested.encode()).decode()
+    huge = base64.b64encode(json.dumps({"claims": [{"typ": "x", "val": "y" * 40_000}]}).encode()).decode()
+    for header in (deep, huge, "A" * 100_000):
+        with pytest.raises(HTTPException) as refused:
+            classify_client_principal(header)
+        assert refused.value.status_code == 401
+
+
+def test_a_comma_joined_pair_of_headers_is_not_decoded_as_one() -> None:
+    genuine = ea.encode(ea.app_token(OID, [ROLE_OPERATOR]))
+    forged = ea.encode(ea.user_access_token("oid-forged", [ROLE_PLATFORM_ADMIN]))
+    for joined in (f"{forged}, {genuine}", f"{forged},{genuine}", forged + "\n" + genuine, f"{forged} {genuine}"):
+        with pytest.raises(HTTPException) as refused:
+            classify_client_principal(joined)
+        assert refused.value.status_code == 401

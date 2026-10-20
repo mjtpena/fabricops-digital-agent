@@ -124,7 +124,8 @@ On a machine where `python3` is older than 3.12, use `make demo PYTHON=python3.1
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health` | Liveness and mode |
+| GET | `/health` | Liveness (anonymous; version and mode) |
+| GET | `/system/info` | Like `/health` plus whether the write capability is enabled (needs a FabricOps role) |
 | GET | `/incidents` | List incidents (`?status=`) |
 | GET | `/incidents/{id}` | Full incident: evidence, findings, root causes, blast radius, timeline |
 | POST | `/incidents/{id}/investigate` | Run the investigation workflow |

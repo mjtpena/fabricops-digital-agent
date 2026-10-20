@@ -39,7 +39,15 @@ _ALIASES = {
     "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress": "email",
     "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name": "name",
 }
+# The only claim types Easy Auth uses for roles and the display name. The principal payload also names them
+# (``role_typ``, ``name_typ``), but the payload is not trusted to relabel arbitrary claims: ``role_typ = "idtyp"``
+# would otherwise fold ``idtyp = app`` into the roles and hide the app signal.
 _ROLE_CLAIM_TYPES = frozenset({"roles", "http://schemas.microsoft.com/ws/2008/06/identity/claims/role"})
+_NAME_CLAIM_TYPES = frozenset(
+    {"name", "preferred_username", "upn", "email", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"}
+)
+# Easy Auth forwards the claims of one token: a few KB. A larger header is refused before it is decoded.
+_MAX_HEADER_CHARS = 32_768
 # Claims only a user token carries. Used as corroboration for ID-token sessions, never as an identity.
 _USER_IDENTITY_CLAIMS = ("preferred_username", "upn", "email", "unique_name", "name")
 _SUPPORTED_IDTYP = frozenset({"app", "user"})
@@ -108,14 +116,16 @@ class ClientPrincipal(DomainModel):
 
 
 def parse_client_principal(header: str) -> ClientPrincipal:
+    if len(header) > _MAX_HEADER_CHARS:
+        raise MalformedClientPrincipalError("header too large")
     try:
-        payload = json.loads(base64.b64decode(header))
-    except (binascii.Error, ValueError) as exc:
+        # validate=True: no characters outside the base64 alphabet (a comma-joined pair of headers, whitespace).
+        payload = json.loads(base64.b64decode(header, validate=True))
+    except (binascii.Error, ValueError, RecursionError) as exc:  # RecursionError: a deeply nested document
         raise MalformedClientPrincipalError("not base64 JSON") from exc
     if not isinstance(payload, dict):
         raise MalformedClientPrincipalError("not a JSON object")
-    role_typ = payload.get("role_typ")
-    role_types = _ROLE_CLAIM_TYPES | ({role_typ} if isinstance(role_typ, str) else set())
+    role_types = _ROLE_CLAIM_TYPES  # the payload's own role_typ is only honoured when it names one of these
     name_typ = payload.get("name_typ")
     claims: dict[str, list[str]] = {}
     raw_claims = payload.get("claims")
@@ -127,7 +137,9 @@ def parse_client_principal(header: str) -> ClientPrincipal:
             continue
         name = "roles" if typ in role_types else _ALIASES.get(typ, typ)
         claims.setdefault(name, []).append(value.strip())
-    name_claim = _ALIASES.get(name_typ, name_typ) if isinstance(name_typ, str) else "name"
+    name_claim = "name"
+    if isinstance(name_typ, str) and name_typ in _NAME_CLAIM_TYPES:
+        name_claim = _ALIASES.get(name_typ, name_typ)
     return ClientPrincipal(claims={k: tuple(v) for k, v in claims.items()}, name_claim=name_claim)
 
 

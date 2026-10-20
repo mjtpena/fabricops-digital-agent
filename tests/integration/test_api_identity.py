@@ -11,17 +11,20 @@ from __future__ import annotations
 import importlib
 import pkgutil
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from starlette.routing import Route
 
 from orqentis.api import authz
 from orqentis.api import routers as api_routers
 from orqentis.api.app import create_app
-from orqentis.api.auth import current_principal
+from orqentis.api.auth import CurrentPrincipal, current_principal
 from orqentis.api.roles import ROLE_AUTOMATION, ROLE_OPERATOR, ROLE_PLATFORM_ADMIN, ROLE_READER
 from orqentis.bootstrap import Container, build_container
 from orqentis.config.settings import ApiAuthMode, Settings
@@ -37,6 +40,8 @@ ADMIN_SESSION = ea.header(ea.user_id_token("oid-admin", [ROLE_OPERATOR, ROLE_PLA
 AUTOMATION = ea.header(ea.app_token("oid-scheduler", [ROLE_AUTOMATION]))
 READER = ea.header(ea.user_access_token("oid-reader", [ROLE_READER]))
 NO_ROLE = ea.header(ea.user_access_token("oid-norole"))
+# Holds an approver role, but not the Operator role the schema-drift approvals require.
+ADMIN_ONLY = ea.header(ea.user_access_token("oid-admin-only", [ROLE_PLATFORM_ADMIN]))
 ALL_ROLES = [ROLE_READER, ROLE_AUTOMATION, ROLE_OPERATOR, ROLE_PLATFORM_ADMIN]
 
 Headers = dict[str, str]
@@ -168,10 +173,13 @@ def test_users_are_human_and_can_approve_with_their_roles(client: TestClient, cl
     assert approved.json()["approved_by"] == claims[0][1]
 
 
-def test_human_without_the_approver_role_is_still_refused_by_the_service(client: TestClient) -> None:
+def test_human_with_the_wrong_approver_role_is_still_refused_by_the_service(client: TestClient) -> None:
     approvals = investigate(client)
-    response = client.post(f"/approvals/{approvals[0]}/approve", headers=READER)
+    response = client.post(f"/approvals/{approvals[0]}/approve", headers=ADMIN_ONLY)
     assert response.status_code == 403 and response.json()["error"] == "APPROVAL_FORBIDDEN"
+    # A human with no approver role at all is stopped earlier, before the approval is looked up.
+    refused = client.post(f"/approvals/{approvals[0]}/approve", headers=READER)
+    assert refused.status_code == 403 and refused.json()["error"] == "ROLE_REQUIRED"
 
 
 def test_ambiguous_claims_are_refused_everywhere(client: TestClient) -> None:
@@ -226,8 +234,8 @@ def test_dev_headers_mean_nothing_under_easy_auth(client: TestClient) -> None:
     approvals = investigate(client)
     assert client.post(f"/approvals/{approvals[0]}/approve", headers=forged).status_code == 401
     # They also cannot upgrade a real principal: the roles still come from the token alone.
-    reader_with_forged_roles = {**READER, **forged}
-    refused = client.post(f"/approvals/{approvals[0]}/approve", headers=reader_with_forged_roles)
+    admin_only_with_forged_roles = {**ADMIN_ONLY, **forged}
+    refused = client.post(f"/approvals/{approvals[0]}/approve", headers=admin_only_with_forged_roles)
     assert refused.status_code == 403 and refused.json()["error"] == "APPROVAL_FORBIDDEN"
 
 
@@ -304,10 +312,111 @@ def test_read_role_default_follows_the_auth_mode(tmp_path: Path) -> None:
     )
 
 
-# ---- structural guard: a new route cannot silently skip authentication or the human-only check ---------------
+# ---- review round 2: headers, role-first deciding routes, concurrency over HTTP, system info ------------------
 
-PUBLIC_PATHS = {"/health", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
-GUARDED_MUTATIONS = {authz.require_collect, authz.require_investigate, authz.require_decider}
+
+def test_two_principal_headers_are_refused_whichever_comes_first(client: TestClient, spy: SpyWriteClient) -> None:
+    """Regression: the first header won, so a forged admin principal in front of the genuine one was approved."""
+    approvals = investigate(client)
+    forged = ea.encode(ea.user_access_token("oid-forged", [ROLE_OPERATOR, ROLE_PLATFORM_ADMIN]))
+    genuine = ea.encode(ea.app_token("oid-app", [ROLE_AUTOMATION]))
+    for pair in ((forged, genuine), (genuine, forged), (forged, forged)):
+        headers = [("X-MS-CLIENT-PRINCIPAL", value) for value in pair]
+        for method, path in (("post", f"/approvals/{approvals[0]}/approve"), ("get", "/incidents")):
+            response = getattr(client, method)(path, headers=headers)
+            assert response.status_code == 401, (path, response.text)
+    assert approval_status(client, approvals[0]) == "PENDING" and spy.calls == []
+
+
+def test_duplicate_dev_headers_are_refused_too(tmp_path: Path) -> None:
+    with TestClient(create_app(make_settings(tmp_path))) as local:
+        assert (
+            local.get(
+                "/incidents", headers=[("X-Orqentis-User", "a@c.com"), ("X-Orqentis-User", "b@c.com")]
+            ).status_code
+            == 401
+        )
+        assert (
+            local.get("/incidents", headers=[("X-Orqentis-Roles", "x"), ("X-Orqentis-Roles", "y")]).status_code == 401
+        )
+        assert local.get("/incidents", headers={"X-Orqentis-User": "a@c.com"}).status_code == 200
+
+
+def test_a_caller_without_an_approver_role_cannot_probe_approvals(client: TestClient) -> None:
+    """Regression: 404 for an unknown id vs 403/409 for a real one told a role-less caller what exists."""
+    approvals = investigate(client)
+    for caller in (NO_ROLE, READER, AUTOMATION):
+        seen = set()
+        for approval_id in (approvals[0], "APR-does-not-exist"):
+            for verb in ("approve", "reject", "execute"):
+                response = client.post(f"/approvals/{approval_id}/{verb}", headers=caller)
+                assert response.status_code == 403, (caller, verb, response.text)
+                seen.add((response.json()["error"], response.json()["message"]))
+        assert len(seen) <= 3  # the answer does not depend on whether the approval exists
+
+
+def test_refusals_are_audited_but_cannot_flood_the_audit_log(client: TestClient) -> None:
+    approvals = investigate(client)
+    before = len(
+        [
+            r
+            for r in client.get("/audit", headers=OPERATOR, params={"limit": 5000}).json()
+            if r["action"] == "api.authorize"
+        ]
+    )
+    for index in range(60):
+        stranger = ea.header(ea.user_access_token(f"oid-stranger-{index}", []))
+        assert client.post(f"/approvals/{approvals[0]}/approve", headers=stranger).status_code == 403
+    after = [
+        r
+        for r in client.get("/audit", headers=OPERATOR, params={"limit": 5000}).json()
+        if r["action"] == "api.authorize"
+    ]
+    assert 0 < len(after) - before <= 20
+    assert client.get("/audit/verify", headers=OPERATOR).json()["valid"] is True
+
+
+def test_concurrent_executes_over_http_reach_the_write_client_once(client: TestClient, spy: SpyWriteClient) -> None:
+    approvals = investigate(client)
+    assert client.post(f"/approvals/{approvals[0]}/approve", headers=OPERATOR).status_code == 200
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        codes = list(
+            pool.map(
+                lambda _: client.post(f"/approvals/{approvals[0]}/execute", headers=ADMIN_SESSION).status_code, range(5)
+            )
+        )
+    assert sorted(codes) == [200, 403, 403, 403, 403]
+    assert len(spy.calls) == 1
+
+
+def test_concurrent_approve_and_reject_over_http_one_wins(client: TestClient) -> None:
+    approvals = investigate(client)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        approve = pool.submit(client.post, f"/approvals/{approvals[0]}/approve", headers=OPERATOR)
+        reject = pool.submit(client.post, f"/approvals/{approvals[0]}/reject", headers=ADMIN_SESSION)
+        codes = sorted([approve.result().status_code, reject.result().status_code])
+    assert codes == [200, 409]
+    final = approval_status(client, approvals[0])
+    assert final == ("APPROVED" if approve.result().status_code == 200 else "REJECTED")
+
+
+def test_health_is_anonymous_and_does_not_disclose_the_write_flag_but_system_info_does(client: TestClient) -> None:
+    health = client.get("/health").json()
+    assert health["status"] == "ok" and "write_actions_enabled" not in health
+    assert client.get("/system/info").status_code == 401
+    assert client.get("/system/info", headers=NO_ROLE).status_code == 403
+    info = client.get("/system/info", headers=READER).json()
+    assert info["write_actions_enabled"] is True and info["fabric_mode"] == "mock"
+    assert client.get("/system/info", headers=AUTOMATION).status_code == 200
+
+
+# ---- structural guard: a new route cannot silently skip authentication, a role check or the human-only check ---
+
+PUBLIC_PATHS = {"/health"}
+DOC_PATHS = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
+# A kind-only guard (require_human) is deliberately not a role guard.
+MUTATION_GUARDS = {authz.require_collect, authz.require_investigate, authz.require_decider}
 DECIDING_ROUTES = {
     "/approvals/{approval_id}/approve",
     "/approvals/{approval_id}/reject",
@@ -326,7 +435,7 @@ def dependency_calls(route: APIRoute) -> set[Any]:
     return found
 
 
-def api_routes() -> list[APIRoute]:
+def router_module_routes() -> list[APIRoute]:
     """Every route of every router module, found without FastAPI internals."""
     routes: list[APIRoute] = []
     for module_info in pkgutil.iter_modules(api_routers.__path__):
@@ -337,18 +446,58 @@ def api_routes() -> list[APIRoute]:
     return routes
 
 
-def test_every_route_authenticates_and_every_mutation_is_role_guarded() -> None:
-    routes = api_routes()
-    assert len(routes) >= 15
-    for route in routes:
+def route_violations(app: FastAPI) -> list[str]:
+    """Everything wrong with the routes of a live app: unauthenticated, no role guard, loose mutations."""
+    violations: list[str] = []
+    reviewed = router_module_routes()
+    direct = [r for r in app.routes if isinstance(r, APIRoute)]  # an @app.post() placed on the app itself
+    for route in [*reviewed, *direct]:
         if route.path in PUBLIC_PATHS:
             continue
         calls = dependency_calls(route)
-        assert current_principal in calls, f"{route.path} does not authenticate"
-        # A bare CurrentPrincipal authenticates but applies no role model: every route needs an authz guard.
-        assert calls & set(authz.ROUTE_GUARDS), f"{route.methods} {route.path} has no authz guard"
-        if route.methods & {"POST", "PUT", "PATCH", "DELETE"}:
-            assert calls & GUARDED_MUTATIONS, f"{route.methods} {route.path} has no role guard"
-        if route.path in DECIDING_ROUTES:
-            assert authz.require_decider in calls, route.path
-    assert {r.path for r in routes if r.path in DECIDING_ROUTES} == DECIDING_ROUTES
+        label = f"{sorted(route.methods)} {route.path}"
+        if current_principal not in calls:
+            violations.append(f"{label} does not authenticate")
+        if not calls & set(authz.ROLE_GUARDS):
+            violations.append(f"{label} has no role guard")
+        if route.methods & MUTATIONS and not calls & MUTATION_GUARDS:
+            violations.append(f"{label} is a mutation without a collect, investigate or decider guard")
+        if route.path in DECIDING_ROUTES and not {authz.require_human, authz.require_decider} <= calls:
+            violations.append(f"{label} lost the human-only or approver-role guard")
+    # Everything the live app documents must have been inspected above (no operation outside the reviewed set).
+    inspected = {(r.path, m) for r in [*reviewed, *direct] for m in r.methods}
+    documented = {(path, m.upper()) for path, item in app.openapi()["paths"].items() for m in item}
+    violations += [f"{m} {path} is served but was not inspected" for path, m in sorted(documented - inspected)]
+    return violations
+
+
+def test_every_route_is_authenticated_and_role_guarded(tmp_path: Path) -> None:
+    for mode in (ApiAuthMode.DEV_HEADERS, ApiAuthMode.EASY_AUTH):
+        app = create_app(make_settings(tmp_path, api_auth_mode=mode))
+        assert route_violations(app) == []
+    assert len(router_module_routes()) >= 15
+    assert {r.path for r in router_module_routes() if r.path in DECIDING_ROUTES} == DECIDING_ROUTES
+
+
+def test_the_route_walk_catches_a_route_added_straight_to_the_app(tmp_path: Path) -> None:
+    app = create_app(make_settings(tmp_path))
+
+    @app.post("/rogue")
+    async def rogue() -> dict[str, bool]:
+        return {"ok": True}
+
+    @app.get("/rogue-authenticated-only")
+    async def rogue_read(_: CurrentPrincipal) -> dict[str, bool]:
+        return {"ok": True}
+
+    found = "\n".join(route_violations(app))
+    assert "/rogue does not authenticate" in found and "/rogue has no role guard" in found
+    assert "/rogue-authenticated-only has no role guard" in found  # a bare CurrentPrincipal is not enough
+
+
+def test_only_the_documented_doc_routes_exist_and_not_under_easy_auth(tmp_path: Path) -> None:
+    local = create_app(make_settings(tmp_path))
+    easy = create_app(make_settings(tmp_path, api_auth_mode=ApiAuthMode.EASY_AUTH))
+    plain = lambda app: {r.path for r in app.routes if type(r) is Route}  # noqa: E731
+    assert plain(local) == DOC_PATHS
+    assert plain(easy) == set()

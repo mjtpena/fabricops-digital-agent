@@ -34,7 +34,10 @@ def investigated(client: TestClient) -> dict[str, object]:
 
 def test_health_and_openapi(client: TestClient) -> None:
     health = client.get("/health").json()
-    assert health["status"] == "ok" and health["fabric_mode"] == "mock" and health["write_actions_enabled"] is False
+    assert health["status"] == "ok" and health["fabric_mode"] == "mock"
+    # The anonymous answer does not disclose the write capability; the authenticated one does.
+    assert "write_actions_enabled" not in health
+    assert client.get("/system/info", headers=VIEWER).json()["write_actions_enabled"] is False
     paths = client.get("/openapi.json").json()["paths"]
     for path in (
         "/health",

@@ -1,10 +1,16 @@
 # Orqentis FabricOps API image.
 #
 #   docker build -t orqentis-fabricops:local .
-#   docker run --rm -p 8000:8000 orqentis-fabricops:local   # local smoke test: mock Fabric estate, dev headers
+#   docker run --rm -p 8000:8000 orqentis-fabricops:local   # smoke test: GET /health; every other route is 401
+#
+# To call the API from a throwaway container on your own machine, opt in to self-asserted identities (dev
+# headers) explicitly. They let any caller pick its own roles, so publish the port on loopback only:
+#   docker run --rm -p 127.0.0.1:8000:8000 -e ORQENTIS_API_AUTH_MODE=dev_headers \
+#       -e ORQENTIS_DEV_HEADERS_ALLOW_REMOTE=true orqentis-fabricops:local
 #
 # The image contains no credentials and no environment-specific configuration. With no ORQENTIS_* overrides
-# it runs as deployment_environment=local against the synthetic mock estate in /app/fixtures. In Azure the
+# it runs as deployment_environment=local against the synthetic mock estate in /app/fixtures, with the
+# fail-closed ORQENTIS_API_AUTH_MODE=easy_auth (no identity header: 401). In Azure the
 # Bicep template (infra/bicep) sets ORQENTIS_DEPLOYMENT_ENVIRONMENT, ORQENTIS_API_AUTH_MODE=easy_auth,
 # ORQENTIS_FABRIC_MODE=rest and the managed identity variables; the operating identity comes from the
 # platform (user-assigned managed identity), never from the image.
@@ -46,6 +52,7 @@ LABEL org.opencontainers.image.title="orqentis-fabricops" \
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}" \
+    ORQENTIS_API_AUTH_MODE=easy_auth \
     ORQENTIS_DATA_DIR=/var/lib/orqentis \
     ORQENTIS_RUNBOOKS_DIR=/app/runbooks \
     ORQENTIS_FIXTURES_DIR=/app/fixtures
