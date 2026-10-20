@@ -65,7 +65,27 @@ WORKFLOWS = REPO / ".github" / "workflows"
 EVIDENCE_MODULE = (INFRA / "modules" / "evidence-storage.bicep").read_text(encoding="utf-8")
 POSTGRES_MODULE = (INFRA / "modules" / "postgres.bicep").read_text(encoding="utf-8")
 STORAGE_BLOB_DATA_CONTRIBUTOR = "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
-STORAGE_BLOB_DATA_READER = "2a2b9908-6b94-4b4a-bb09-aaf3bc7f7a58"
+STORAGE_BLOB_DATA_READER = "2a2b9908-6ea1-4ae2-8e65-a410df84e7d1"
+# Built-in role definitions the templates may grant to the app identity (data-plane or narrowly scoped, no management).
+ACR_PULL = "7f951dda-4ed3-4680-a7ca-43fe172d538d"
+OPENAI_USER = "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"
+KEY_VAULT_SECRETS_USER = "4633458b-17de-408a-b874-0445c86b69e6"
+GRANTABLE_ROLES = {
+    ACR_PULL,
+    OPENAI_USER,
+    KEY_VAULT_SECRETS_USER,
+    STORAGE_BLOB_DATA_CONTRIBUTOR,
+    STORAGE_BLOB_DATA_READER,
+}
+# Roles that can change a policy, a key, a network rule or a role assignment, or bypass immutability.
+FORBIDDEN_FOR_THE_APP = {
+    "8e3af657-a8ff-443c-a75c-2fe8c4bcb635": "Owner",
+    "b24988ac-6180-42a0-ab88-20f7382dd24c": "Contributor",
+    "17d1049b-9a84-46fb-8f53-869881c3d3ab": "Storage Account Contributor",
+    "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9": "User Access Administrator",
+    "f58310d9-a9f6-439a-9e8d-f62e7b41a168": "Role Based Access Control Administrator",
+    "b7e6dc6d-f1e8-4753-8033-0f276bb0955b": "Storage Blob Data Owner (runAsSuperUser bypasses immutability)",
+}
 
 
 def _code(text: str) -> str:
@@ -130,7 +150,7 @@ def test_the_evidence_account_has_no_shared_key_and_is_immutable() -> None:
     ):
         assert setting in code, f"evidence-storage.bicep lacks {setting}"
     # Version-level immutability on the account (a default retention policy) and on both containers; soft delete.
-    assert code.count("immutableStorageWithVersioning: {") == 4, "the account and each of the three containers"
+    assert code.count("immutableStorageWithVersioning: {") == 5, "the account and each of the four containers"
     assert "immutabilityPeriodSinceCreationInDays: retentionDays" in code
     assert "deleteRetentionPolicy" in code
     assert "containerDeleteRetentionPolicy" in code
@@ -140,46 +160,157 @@ def test_the_evidence_account_has_no_shared_key_and_is_immutable() -> None:
     assert re.search(r"^param evidenceRetentionDays int = 30$", _code(BICEP), re.M)
 
 
-def test_prod_keeps_the_immutability_policy_unlocked_until_the_owner_approves() -> None:
-    """Locked is irreversible. Change this test in the same pull request that carries the owner's approval."""
+def test_the_immutability_lock_is_an_explicit_decision_and_one_mapping_sets_it() -> None:
+    """Locked is irreversible for the retention period: prod has no default, dev and test default to Unlocked."""
+    mapping = (
+        "param evidenceImmutabilityState = evidenceLocked == 'true' ? 'Locked' : "
+        "(evidenceLocked == 'false' ? 'Unlocked' : 'EVIDENCE_IMMUTABILITY_LOCKED must be true or false')"
+    )
+    assert "var evidenceLocked = readEnvironmentVariable('EVIDENCE_IMMUTABILITY_LOCKED')\n" in ENV_FILES["prod"], (
+        "prod must read the decision with NO default"
+    )
+    for environment in ("dev", "test"):
+        assert (
+            "var evidenceLocked = readEnvironmentVariable('EVIDENCE_IMMUTABILITY_LOCKED', 'false')\n"
+            in (ENV_FILES[environment])
+        ), f"{environment} defaults to Unlocked"
     for environment, text in ENV_FILES.items():
-        assert _param_value(text, "evidenceImmutabilityState") == "'Unlocked'", (
-            f"{environment}: Locked is irreversible and needs the owner's approval (docs/delivery.md, README Storage)"
+        assert mapping in _code(text), (
+            f"{environment}: only 'true' and 'false' are valid, anything else fails the build"
         )
+    # The mapping is the only place that sets 'Locked': no parameter file (env, main, examples) names it anywhere else.
+    for path in sorted(INFRA.rglob("*.bicepparam")):
+        locked = [line for line in _code(path.read_text(encoding="utf-8")).splitlines() if "'Locked'" in line]
+        expected = [mapping] if path.parent.name == "env" else []
+        assert locked == expected, f"{path.name} sets 'Locked' outside the mapping"
+    # The template keeps Unlocked as its own default; the deploy job passes the decision through (prod must set it).
+    assert re.search(r"^param evidenceImmutabilityState string = 'Unlocked'$", _code(BICEP), re.M)
+    deploy = (WORKFLOWS / "deploy-environment.yml").read_text(encoding="utf-8")
+    assert "EVIDENCE_IMMUTABILITY_LOCKED_VAR: ${{ vars.EVIDENCE_IMMUTABILITY_LOCKED }}" in deploy
+    assert (
+        'true | false) echo "EVIDENCE_IMMUTABILITY_LOCKED=${EVIDENCE_IMMUTABILITY_LOCKED_VAR}" >> "$GITHUB_ENV"'
+        in deploy
+    )
+    decision = deploy.split('case "$EVIDENCE_IMMUTABILITY_LOCKED_VAR" in')[1].split("esac")[0]
+    assert '"$DEPLOY_ENVIRONMENT" == "prod"' in decision, "an empty variable is an error on prod"
+    # Placeholders for the validator and the snapshot are never Locked.
+    for script in ("validate-bicep.sh", "bicep-snapshot.sh"):
+        text = (REPO / "scripts" / script).read_text(encoding="utf-8")
+        assert re.search(r'export EVIDENCE_IMMUTABILITY_LOCKED="(?:\$\{EVIDENCE_IMMUTABILITY_LOCKED:-)?false', text), (
+            script
+        )
+    # What the owner must know, in both documents.
+    delivery = (REPO / "docs" / "delivery.md").read_text(encoding="utf-8")
+    for document in (BICEP_README, delivery):
+        assert "EVIDENCE_IMMUTABILITY_LOCKED" in document
+        assert re.search(r"irreversible", document, re.I)
+        assert "Storage Account Contributor" in document, "an Unlocked policy can be removed by those roles"
+        assert "sign-off" in document
 
 
-def test_the_reader_identity_gets_blob_access_on_the_containers_only_and_read_only_on_contracts() -> None:
+def test_the_reader_identity_gets_blob_access_on_the_containers_only_and_read_only_on_epochs_and_contracts() -> None:
     code = _code(EVIDENCE_MODULE)
     assert f"'{STORAGE_BLOB_DATA_CONTRIBUTOR}'" in code
     assert f"'{STORAGE_BLOB_DATA_READER}'" in code
     assignments = re.findall(
-        r"resource (\w+) 'Microsoft.Authorization/roleAssignments@[^']+' = \{(.*?)\n\}", code, re.S
+        r"resource (\w+) 'Microsoft.Authorization/roleAssignments@[^']+' = (?:if (\(.*?\)) )?\{(.*?)\n\}",
+        code,
+        re.S,
     )
-    assert len(assignments) == 3, "one role assignment per container, nothing else"
-    roles: dict[str, str] = {}
-    for _, body in assignments:
+    assert len(assignments) == 5, "one per container for the app, plus the optional operators group, nothing else"
+    roles: dict[str, tuple[str, str]] = {}
+    for name, condition, body in assignments:
         scope = re.search(r"scope: (\w+)", body)
         role = re.search(r"roleDefinitions', (\w+)\)", body)
+        principal = re.search(r"principalId: (\w+)", body)
         assert scope is not None
         assert role is not None
-        roles[scope.group(1)] = role.group(1)
-        assert "principalType: 'ServicePrincipal'" in body
+        assert principal is not None
+        roles[name] = (scope.group(1), role.group(1))
         assert "name: guid(" in body, "deterministic role assignment names"
-        assert "principalId: readerPrincipalId" in body, "only the reader identity is granted anything"
-    # Scoped to the containers, never to the account; the contracts container is read-only for the app.
+        if principal.group(1) == "readerPrincipalId":
+            assert "principalType: 'ServicePrincipal'" in body
+            assert not condition
+        else:
+            assert principal.group(1) == "auditOperatorsPrincipalId"
+            assert "principalType: 'Group'" in body
+            assert "!empty(auditOperatorsPrincipalId)" in condition, "nothing is assigned unless the group is given"
+    # Scoped to the containers, never to the account. The app can only READ audit-epochs and contracts; only the
+    # optional operators group can write audit-epochs, and nobody is granted contracts uploads by the template.
     assert roles == {
-        "evidenceContainer": "storageBlobDataContributorRoleId",
-        "auditAnchorContainer": "storageBlobDataContributorRoleId",
-        "contractsContainer": "storageBlobDataReaderRoleId",
+        "readerEvidenceAccess": ("evidenceContainer", "storageBlobDataContributorRoleId"),
+        "readerAuditAnchorAccess": ("auditAnchorContainer", "storageBlobDataContributorRoleId"),
+        "readerAuditEpochAccess": ("auditEpochContainer", "storageBlobDataReaderRoleId"),
+        "readerContractsAccess": ("contractsContainer", "storageBlobDataReaderRoleId"),
+        "operatorsAuditEpochAccess": ("auditEpochContainer", "storageBlobDataContributorRoleId"),
     }
-    assert "var storageBlobDataReaderRoleId = '2a2b9908-6b94-4b4a-bb09-aaf3bc7f7a58'" in code
-    # The module is handed the reader identity only; the actor (WRITE) identity gets nothing on storage, and the
-    # template assigns no uploader: the owner grants that on the contracts container (README, Estate contracts).
+    assert "var storageBlobDataReaderRoleId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'" in code
+    assert "var storageBlobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'" in code
+    # The module is handed the reader identity only; the actor (WRITE) identity gets nothing on storage.
     call = re.search(r"module evidenceStorage 'modules/evidence-storage.bicep' = \{(.*?)\n\}", BICEP, re.S)
     assert call is not None
     assert "readerPrincipalId: readerIdentity.properties.principalId" in call.group(1)
+    assert "auditOperatorsPrincipalId: auditOperatorsPrincipalId" in call.group(1)
     assert "actorIdentity" not in call.group(1)
     assert "listKeys" not in code
+
+
+def test_the_audit_epoch_container_is_immutable_and_only_the_operators_can_write_it() -> None:
+    code = _code(EVIDENCE_MODULE)
+    container = re.search(
+        r"resource auditEpochContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@[^']+' = \{(.*?)\n\}",
+        code,
+        re.S,
+    )
+    assert container is not None, "the audit-epochs container is missing"
+    assert "parent: blobService" in container.group(1)
+    assert "name: auditEpochContainerName" in container.group(1)
+    assert "publicAccess: 'None'" in container.group(1)
+    assert "immutableStorageWithVersioning: {" in container.group(1), "version-level immutability like the others"
+    assert re.search(r"^param auditEpochContainerName string = 'audit-epochs'$", code, re.M)
+    assert re.search(r"^param auditOperatorsPrincipalId string = ''$", code, re.M), "nothing is assigned by default"
+    assert "output auditEpochContainerName string = auditEpochContainer.name" in code
+    main = _code(BICEP)
+    assert re.search(r"^param auditEpochContainerName string = 'audit-epochs'$", main, re.M)
+    assert re.search(r"^param auditOperatorsPrincipalId string = ''$", main, re.M)
+    assert "{ name: 'ORQENTIS_AUDIT_EPOCH_CONTAINER', value: evidenceStorage.outputs.auditEpochContainerName }" in main
+    assert "audit_epoch_container" in Settings.model_fields
+    # The operators group comes from the pipeline, optional, empty by default; the deploy job passes it through.
+    for environment, text in ENV_FILES.items():
+        assert "readEnvironmentVariable('AUDIT_OPERATORS_OBJECT_ID', '')" in text, environment
+    deploy = (WORKFLOWS / "deploy-environment.yml").read_text(encoding="utf-8")
+    assert "AUDIT_OPERATORS_OBJECT_ID: ${{ vars.AUDIT_OPERATORS_OBJECT_ID }}" in deploy
+    delivery = (REPO / "docs" / "delivery.md").read_text(encoding="utf-8")
+    for token in ("AUDIT_OPERATORS_OBJECT_ID", "audit-epochs"):
+        assert token in delivery
+        assert token in BICEP_README
+    for token in ("auditEpochContainerName", "auditOperatorsPrincipalId", "ORQENTIS_AUDIT_EPOCH_CONTAINER"):
+        assert f"`{token}`" in BICEP_README, f"{token} is not documented in infra/bicep/README.md"
+    # Who may write where is documented once, as a table, in the README.
+    assert "Who may write where" in BICEP_README
+    assert "nothing" in BICEP_README.split("Who may write where")[1].split("Audit epoch markers")[0]
+
+
+def test_the_app_identity_has_no_role_that_could_change_a_policy_a_key_or_a_role() -> None:
+    """The reader identity must not be able to change the immutability policies: it holds data-plane roles on
+    containers (and one narrow role per secret, registry and OpenAI account), never a role on the account, the resource
+    group or the subscription, and none of the management roles that could change a policy, a key or a role."""
+    granted: set[str] = set()
+    for path in [INFRA / "main.bicep", *MODULES]:
+        code = _code(path.read_text(encoding="utf-8"))
+        for guid in re.findall(r"= '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'", code):
+            granted.add(guid)
+            assert guid not in FORBIDDEN_FOR_THE_APP, f"{path.name} grants {FORBIDDEN_FOR_THE_APP.get(guid)}"
+        # No role assignment at the resource group, the subscription or the tenant.
+        for body in re.findall(r"'Microsoft.Authorization/roleAssignments@[^']+' = [^{]*\{(.*?)\n\}", code, re.S):
+            scope = re.search(r"scope: (\S+)", body)
+            if scope is not None:
+                assert not scope.group(1).startswith(("resourceGroup(", "subscription(", "tenant("))
+    assert granted == GRANTABLE_ROLES, (
+        f"unexpected role definitions in the templates: {sorted(granted ^ GRANTABLE_ROLES)}"
+    )
+    # Every storage role assignment is on a container, never on the account that holds the immutability policies.
+    assert not re.search(r"scope: account\b", _code(EVIDENCE_MODULE))
 
 
 def test_postgres_is_entra_only_with_a_required_administrator() -> None:
@@ -237,16 +368,30 @@ def test_replicas_are_parameters_and_the_environments_set_them() -> None:
 
 
 def test_the_connection_budget_fits_the_sku_of_every_environment() -> None:
-    """Mirrors the template's check: (maxReplicas + minReplicas) x pool + 15 reserved <= 50 on Standard_B1ms."""
+    """The template's budget: 2 x maxReplicas x pool + 15 platform + 5 migration and operator connections."""
     found = re.search(r"^param postgresPoolMax int = (\d+)$", BICEP, re.M)
     assert found is not None
     pool = int(found.group(1))
-    assert pool == 8
+    assert pool == 6
+    main = _code(BICEP)
+    assert "var postgresConnectionsNeeded = 2 * maxReplicas * postgresPoolMax + " in main
+    assert "var postgresPlatformConnections = 15" in main
+    assert "var postgresMigrationAndOperatorConnections = 5" in main
+    assert "(maxReplicas + minReplicas)" not in main, "the old budget assumed the new revision at minReplicas only"
+    # The minimum matches the app: Settings.postgres_pool_max has ge=2 (a migration holds a connection under its lock).
+    field = Settings.model_fields["postgres_pool_max"]
+    minimum = next(m.ge for m in field.metadata if hasattr(m, "ge"))
+    assert minimum == 2
+    assert re.search(rf"@minValue\({minimum}\)\n@maxValue\(\d+\)\nparam postgresPoolMax int = 6$", main, re.M)
     for environment, text in ENV_FILES.items():
         if _param_value(text, "postgresSkuName") != "'Standard_B1ms'":
             continue
-        replicas = int(str(_param_value(text, "maxReplicas"))) + int(str(_param_value(text, "minReplicas")))
-        assert replicas * pool + 15 <= 50, f"{environment}: {replicas * pool + 15} connections do not fit Standard_B1ms"
+        replicas = int(str(_param_value(text, "maxReplicas")))
+        needed = 2 * replicas * pool + 15 + 5
+        assert needed <= 50, f"{environment}: {needed} connections do not fit Standard_B1ms"
+    # The template default (Standard_B1ms, 2 replicas) fits too.
+    assert 2 * 2 * pool + 20 <= 50
+    assert "old and new revision both at maxReplicas" in main
 
 
 def test_the_estate_contracts_file_is_a_blob_not_a_secret_a_volume_or_a_share() -> None:
@@ -339,6 +484,7 @@ def test_the_storage_environment_variables_are_set_and_documented() -> None:
         "ORQENTIS_EVIDENCE_BLOB_URL": "evidenceStorage.outputs.blobEndpoint",
         "ORQENTIS_EVIDENCE_CONTAINER": "evidenceStorage.outputs.evidenceContainerName",
         "ORQENTIS_AUDIT_ANCHOR_CONTAINER": "evidenceStorage.outputs.auditAnchorContainerName",
+        "ORQENTIS_AUDIT_EPOCH_CONTAINER": "evidenceStorage.outputs.auditEpochContainerName",
         "ORQENTIS_SCHEDULER_AUDIT_ANCHOR_ENABLED": "auditAnchorEnabled ? 'true' : 'false'",
         "ORQENTIS_SCHEDULER_AUDIT_ANCHOR_INTERVAL_MINUTES": "string(auditAnchorIntervalMinutes)",
         "ORQENTIS_INVESTIGATION_POLL_INTERVAL_SECONDS": "string(investigationPollIntervalSeconds)",
@@ -400,7 +546,125 @@ def test_the_deploy_identity_may_assign_the_storage_role_the_template_grants() -
     delivery = (REPO / "docs" / "delivery.md").read_text(encoding="utf-8")
     assert STORAGE_BLOB_DATA_CONTRIBUTOR in delivery, "the RBAC Administrator condition must allow the storage role"
     assert STORAGE_BLOB_DATA_READER in delivery, "... and the read-only role on the contracts container"
-    assert "${STORAGE_BLOB_DATA_READER}" in delivery.split("CONDITION=")[1].split("\n")[0]
+    condition = delivery.split("CONDITION=")[1].split("\n")[0]
+    assert "${STORAGE_BLOB_DATA_READER}" in condition
+    # The optional audit operators are an Entra group: the constrained administrator must be allowed to assign to one.
+    assert "{'ServicePrincipal', 'Group'}" in condition
+    assert "2a2b9908-6b94-4b4a" not in delivery, "the wrong Storage Blob Data Reader id must not come back"
     assert STORAGE_BLOB_DATA_CONTRIBUTOR in EVIDENCE_MODULE
     assert STORAGE_BLOB_DATA_READER in EVIDENCE_MODULE
     assert "Microsoft.DBforPostgreSQL" in delivery, "the resource provider must be registered once"
+
+
+# --------------------------------------------------------------------------------------------- private networking (M4)
+
+
+def test_test_and_prod_use_private_networking_and_never_open_postgres_to_azure() -> None:
+    private = {
+        "infrastructureSubnetId": "CONTAINER_APPS_SUBNET_ID",
+        "postgresDelegatedSubnetId": "POSTGRES_DELEGATED_SUBNET_ID",
+        "postgresPrivateDnsZoneId": "POSTGRES_PRIVATE_DNS_ZONE_ID",
+    }
+    for environment in ("test", "prod"):
+        text = ENV_FILES[environment]
+        code = _code(text)
+        assert "postgresAllowAzureServices" not in code, (
+            f"{environment}: Allow Azure services opens 5432 to every tenant"
+        )
+        assert "postgresAllowedIpRanges" not in code, f"{environment}: no firewall rule, the server is private"
+        assert _param_value(text, "ingressMode") == "'externalAuthenticated'", (
+            "the API keeps its authenticated endpoint"
+        )
+        for param, variable in private.items():
+            assert _param_value(text, param) == f"readEnvironmentVariable('{variable}')", f"{environment}: {param}"
+    # dev is the only environment with public access.
+    assert _param_value(ENV_FILES["dev"], "postgresAllowAzureServices") == "true"
+    assert _param_value(ENV_FILES["dev"], "infrastructureSubnetId") == "''"
+    assert "postgresDelegatedSubnetId" not in _code(ENV_FILES["dev"])
+
+
+def test_main_bicep_rejects_a_public_database_outside_dev() -> None:
+    main = _code(BICEP)
+    check = main.split("var storageCheck")[1].split("// The PostgreSQL role is the reader identity")[0]
+    assert (
+        "deploymentEnvironment != 'dev' && (empty(postgresDelegatedSubnetId) || empty(postgresPrivateDnsZoneId))"
+        in check
+    )
+    assert "deploymentEnvironment != 'dev' && empty(infrastructureSubnetId)" in check
+    assert "deploymentEnvironment != 'dev' && postgresAllowAzureServices" in check
+    assert "postgresDelegatedSubnetId == infrastructureSubnetId" in check, "the two subnets are different subnets"
+    assert "public access with a firewall is for dev only" in check
+    # The module that builds the checked sentence is what makes the deployment fail, and everything waits for it.
+    assert re.search(r"result: any\(storageCheck\)", main)
+    # externalAuthenticated + a subnet is a VNet-integrated environment with a public endpoint (not an error any more).
+    assert "(effectiveIngressMode == 'externalAuthenticated' && !empty(infrastructureSubnetId))" not in main
+    assert "internal: effectiveIngressMode != 'externalAuthenticated'" in main
+    # The README says what to provision, and the delivery guide how.
+    delivery = (REPO / "docs" / "delivery.md").read_text(encoding="utf-8")
+    for document in (BICEP_README, delivery):
+        for token in ("snet-apps", "snet-postgres", "Private DNS Zone Contributor", "Network Contributor"):
+            assert token in document or document is BICEP_README, f"{token} is not in docs/delivery.md"
+    for token in (
+        "Private networking",
+        "VNet integration",
+        "private endpoint",
+        "snet-postgres",
+        "virtual network link",
+    ):
+        assert token in BICEP_README, f"{token} is not in infra/bicep/README.md"
+    for variable in ("CONTAINER_APPS_SUBNET_ID", "POSTGRES_DELEGATED_SUBNET_ID", "POSTGRES_PRIVATE_DNS_ZONE_ID"):
+        assert variable in delivery
+        assert variable in (WORKFLOWS / "deploy-environment.yml").read_text(encoding="utf-8")
+
+
+def test_every_parameter_file_is_private_unless_it_is_a_dev_deployment() -> None:
+    """A file that does not say dev is a prod deployment (the template's default), so it must be private."""
+    checked = 0
+    for path in sorted(INFRA.rglob("*.bicepparam")):
+        text = path.read_text(encoding="utf-8")
+        if (_param_value(text, "deploymentEnvironment") or "'prod'") == "'dev'":
+            continue
+        checked += 1
+        code = _code(text)
+        assert "postgresAllowAzureServices" not in code, path.name
+        for param in ("infrastructureSubnetId", "postgresDelegatedSubnetId", "postgresPrivateDnsZoneId"):
+            assert _param_value(text, param) not in (None, "''"), f"{path.name} does not set {param}"
+    assert checked >= 5, "main.bicepparam, test, prod and the examples that show a prod deployment"
+
+
+# --------------------------------------------------------------------------------------------- bootstrap script (m2)
+
+BOOTSTRAP_SQL = (REPO / "scripts" / "postgres-bootstrap.sql").read_text(encoding="utf-8")
+
+
+def test_the_bootstrap_script_verifies_the_server_and_the_principal_and_gives_public_nothing() -> None:
+    # A token travels over this connection: the certificate is verified everywhere psql is shown.
+    delivery = (REPO / "docs" / "delivery.md").read_text(encoding="utf-8")
+    for name, text in (("script", BOOTSTRAP_SQL), ("README", BICEP_README), ("delivery.md", delivery)):
+        assert "sslmode=require" not in text, f"{name} shows sslmode=require"
+    assert "sslmode=verify-full" in BOOTSTRAP_SQL
+    assert "sslmode=verify-full sslrootcert=system" in BICEP_README
+    assert "DigiCert Global Root G2" in BICEP_README, "the README carries the Azure CA note"
+    # The role check matches the Entra principal (name AND object id), not just a role of that name.
+    assert "pgaadauth_list_principals(false)" in BOOTSTRAP_SQL
+    assert "strpos(lower(p::text), lower(:'app_oid'))" in BOOTSTRAP_SQL
+    assert "\\if :name_taken" in BOOTSTRAP_SQL, "a plain role of the same name stops the script"
+    # PUBLIC keeps nothing extra, and the application gets only CONNECT on the database.
+    assert "REVOKE ALL ON DATABASE %I FROM PUBLIC" in BOOTSTRAP_SQL
+    assert "REVOKE ALL ON SCHEMA public FROM PUBLIC" in BOOTSTRAP_SQL
+    assert 'GRANT CONNECT ON DATABASE :"app_db" TO :"app_role";' in BOOTSTRAP_SQL
+    assert "GRANT ALL" not in BOOTSTRAP_SQL
+    statements = "\n".join(line for line in BOOTSTRAP_SQL.splitlines() if not line.lstrip().startswith("--")).upper()
+    assert not re.search(r"(ALTER|CREATE) ROLE", statements), "the script creates the principal, never a plain role"
+    # The operators block is optional (skipped without the variable) and grants without inheritance.
+    optional = BOOTSTRAP_SQL.split("\\if :{?operator_role}")[1]
+    assert "WITH INHERIT FALSE, SET TRUE" in optional
+    before = "\n".join(
+        line for line in BOOTSTRAP_SQL.split("\\if :{?operator_role}")[0].splitlines() if not line.startswith("--")
+    )
+    assert "INHERIT FALSE, SET TRUE" not in before, "only the optional block grants the role to an operators group"
+    # Every step that creates something checks first, so the script can be run again.
+    assert BOOTSTRAP_SQL.count("WHERE NOT") + BOOTSTRAP_SQL.count("WHERE EXISTS") >= 5
+    for token in ("operator_role", "ORQENTIS_POSTGRES_SET_ROLE", "REVOKE", "pgaadauth_list_principals"):
+        assert token in BICEP_README or token == "REVOKE", f"{token} is not explained in the README"
+    assert "PUBLIC" in BICEP_README

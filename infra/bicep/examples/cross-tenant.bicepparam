@@ -19,6 +19,10 @@ param entraClientId = '00000000-0000-0000-0000-000000000000'
 // PostgreSQL (Microsoft Entra authentication only): the Entra administrator is required. Placeholders.
 param postgresEntraAdminObjectId = '00000000-0000-0000-0000-000000000000'
 param postgresEntraAdminName = 'sg-fabricops-postgres-admins'
+// A prod deployment: private networking, as in main.bicepparam (a VNet-integrated environment and a private PostgreSQL server).
+param infrastructureSubnetId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-fabricops/subnets/snet-aca'
+param postgresDelegatedSubnetId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-fabricops/subnets/snet-postgres'
+param postgresPrivateDnsZoneId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/privateDnsZones/fabricops.private.postgres.database.azure.com'
 
 param deploymentEnvironment = 'prod'
 param fabricMode = 'rest'

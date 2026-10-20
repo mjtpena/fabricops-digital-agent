@@ -228,20 +228,22 @@ accept wildcards, so each subject is registered exactly. Add one more only while
 |---|---|---|---|
 | build `fabricops-cicd-dev` | `AcrPush` | the registry | Push images and add tags. Nothing else; it cannot deploy (exists) |
 | each `fabricops-deploy-<env>` | `Contributor` | `rg-fabricops-<env>` | Create the template's resources |
-| each `fabricops-deploy-<env>` | `Role Based Access Control Administrator`, **constrained** | `rg-fabricops-<env>`, the registry, and the Azure OpenAI account when one is used | The template grants the reader identity `AcrPull` on the registry (`modules/acr-pull.bicep`), optionally `Cognitive Services OpenAI User` on the account (`modules/openai-role.bicep`), `Storage Blob Data Contributor` on the evidence and audit-anchor containers it creates and `Storage Blob Data Reader` on the `contracts` container (`modules/evidence-storage.bicep`, inside the environment's own resource group) |
+| each `fabricops-deploy-<env>` | `Role Based Access Control Administrator`, **constrained** | `rg-fabricops-<env>`, the registry, and the Azure OpenAI account when one is used | The template grants the reader identity `AcrPull` on the registry (`modules/acr-pull.bicep`), optionally `Cognitive Services OpenAI User` on the account (`modules/openai-role.bicep`), `Storage Blob Data Contributor` on the evidence and audit-anchor containers it creates and `Storage Blob Data Reader` on the `audit-epochs` and `contracts` containers, and, when `AUDIT_OPERATORS_OBJECT_ID` is set, `Storage Blob Data Contributor` on `audit-epochs` for that **group** (`modules/evidence-storage.bicep`, inside the environment's own resource group) |
 | each `fabricops-deploy-<env>` | custom `FabricOps Nested Deployment` | `rg-fabricops-shared` (and the resource group of an Azure OpenAI account elsewhere) | Those two modules deploy into the registry's / account's resource group, which creates a nested ARM deployment there |
 
 **The constrained RBAC Administrator** is the built-in role plus an ABAC condition. With it an identity can create role
-assignments only for the four role definitions below and only for service principals (a managed identity is one), and
+assignments only for the four role definitions below and only for service principals (a managed identity is one) and groups (the audit operators), and
 it **cannot delete any role assignment**, so it cannot grant itself or anyone Owner, Contributor or any other role, and
-cannot remove anyone's access. (The syntax follows Microsoft's *Constrain roles and principal types* example.)
+cannot remove anyone's access. (The syntax follows Microsoft's *Constrain roles and principal types* example, whose principal-type
+set is also a list; `Group` is there because the optional audit operators are an Entra group, which a service-principal-only
+condition would refuse. I could not verify the condition offline: `az role assignment create` rejects a malformed one.)
 
 ```bash
 ACR_PULL=7f951dda-4ed3-4680-a7ca-43fe172d538d       # AcrPull
 OPENAI_USER=5e0bd9bd-7b93-4f28-af87-19fc36ad61bd    # Cognitive Services OpenAI User
-STORAGE_BLOB_DATA_CONTRIBUTOR=ba92f5b4-2d11-453d-a403-e96b0029c9fe   # Storage Blob Data Contributor (the evidence and audit-anchor containers)
-STORAGE_BLOB_DATA_READER=2a2b9908-6b94-4b4a-bb09-aaf3bc7f7a58         # Storage Blob Data Reader (the contracts container; confirm both ids on the first deployment)
-CONDITION="((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {${ACR_PULL}, ${OPENAI_USER}, ${STORAGE_BLOB_DATA_CONTRIBUTOR}, ${STORAGE_BLOB_DATA_READER}} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {'ServicePrincipal'})) AND (!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'}))"
+STORAGE_BLOB_DATA_CONTRIBUTOR=ba92f5b4-2d11-453d-a403-e96b0029c9fe   # Storage Blob Data Contributor (evidence, audit anchors; audit epochs for the operators group)
+STORAGE_BLOB_DATA_READER=2a2b9908-6ea1-4ae2-8e65-a410df84e7d1         # Storage Blob Data Reader (audit epochs and contracts, read-only for the app)
+CONDITION="((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {${ACR_PULL}, ${OPENAI_USER}, ${STORAGE_BLOB_DATA_CONTRIBUTOR}, ${STORAGE_BLOB_DATA_READER}} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {'ServicePrincipal', 'Group'})) AND (!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'}))"
 ```
 
 **The nested-deployment role** carries one permission, `Microsoft.Resources/deployments/*`, and no access to any
@@ -288,9 +290,9 @@ When an Azure OpenAI account is added (ADR-0012), repeat for each deploy identit
 for the constrained role (the same `$CONDITION`), and the `FabricOps Nested Deployment` role on its resource group if
 that is not `rg-fabricops-shared`.
 
-**Deploy identities created before the PostgreSQL release** still carry the two-role condition (`AcrPull` and `Cognitive
-Services OpenAI User` only), so a deployment would fail with `AuthorizationFailed ... roleAssignments/write` when it grants
-`Storage Blob Data Contributor` and `Storage Blob Data Reader`. Replace the
+**Deploy identities created before the PostgreSQL release** still carry the two-role, service-principal-only condition
+(`AcrPull` and `Cognitive Services OpenAI User` only), so a deployment would fail with `AuthorizationFailed ... roleAssignments/write` when it grants
+`Storage Blob Data Contributor` and `Storage Blob Data Reader`, or (with `AUDIT_OPERATORS_OBJECT_ID`) assigns a group. Replace the
 assignment on the environment's resource group with one that carries the new `$CONDITION` (run it as Owner or User Access
 Administrator, after the `CONDITION` above is defined; a role assignment's condition cannot be edited in place):
 
@@ -360,6 +362,61 @@ real what-if runs in the deploy job, with that environment's deploy identity, ri
 the old `fabricops-whatif` app, its custom role (`FabricOps Deployment What-If`), their role assignments or the old
 what-if repository variables (`gh variable list --repo $REPO` shows them), delete them; nothing reads them any more.
 
+### 5b. Private networking for test and prod
+
+`test` and `prod` are private: the template **refuses** to deploy them with a public PostgreSQL server (`postgresAllowAzureServices`
+opens port 5432 to every Azure tenant and is for `dev` only). The Container Apps environment is VNet-integrated and the
+PostgreSQL server is VNet-integrated with a private DNS zone. The design, the reason for choosing VNet integration over a private
+endpoint, and how people reach the server are in [`infra/bicep/README.md`](../infra/bicep/README.md), *Private networking*. The
+API keeps its public, authenticated endpoint, so the smoke test from a GitHub-hosted runner keeps working.
+
+Nothing here is created by the pipeline or the template. Per private environment (shown for `test`; repeat for `prod` with its
+own address space), a person with rights on the network resource group:
+
+```bash
+ENV=test
+NET_RG=rg-fabricops-network                 # any resource group for the network; create it first (az group create)
+VNET=vnet-fabricops-$ENV
+ZONE=fabricops-$ENV.private.postgres.database.azure.com     # the name must end in postgres.database.azure.com
+az network vnet create -g "$NET_RG" -n "$VNET" -l "$LOCATION" --address-prefixes 10.20.0.0/22
+az network vnet subnet create -g "$NET_RG" --vnet-name "$VNET" -n snet-apps --address-prefixes 10.20.0.0/27 \
+  --delegations Microsoft.App/environments
+az network vnet subnet create -g "$NET_RG" --vnet-name "$VNET" -n snet-postgres --address-prefixes 10.20.1.0/28 \
+  --delegations Microsoft.DBforPostgreSQL/flexibleServers
+az network private-dns zone create -g "$NET_RG" -n "$ZONE"
+az network private-dns link vnet create -g "$NET_RG" -z "$ZONE" -n "link-$VNET" -v "$VNET" -e false
+
+# The three resource ids the environment's variables need (section 7).
+APPS_SUBNET_ID=$(az network vnet subnet show -g "$NET_RG" --vnet-name "$VNET" -n snet-apps --query id -o tsv)
+POSTGRES_SUBNET_ID=$(az network vnet subnet show -g "$NET_RG" --vnet-name "$VNET" -n snet-postgres --query id -o tsv)
+ZONE_ID=$(az network private-dns zone show -g "$NET_RG" -n "$ZONE" --query id -o tsv)
+
+# The environment's deploy identity must be able to attach the environment and the server to those subnets and that zone.
+# These are assignments you make as Owner, outside the template and outside the constrained condition of section 5.
+DEPLOY_SP=$(az ad sp show --id "$DEPLOY_TEST_APP_ID" --query id -o tsv)      # $DEPLOY_PROD_APP_ID for prod
+az role assignment create --assignee-object-id "$DEPLOY_SP" --assignee-principal-type ServicePrincipal \
+  --role "Network Contributor" --scope "$(az network vnet show -g "$NET_RG" -n "$VNET" --query id -o tsv)"
+az role assignment create --assignee-object-id "$DEPLOY_SP" --assignee-principal-type ServicePrincipal \
+  --role "Private DNS Zone Contributor" --scope "$ZONE_ID"
+```
+
+The address ranges above are examples: the Container Apps subnet needs at least `/27`, the PostgreSQL subnet at least `/28` (check
+the current minimum), and neither may hold anything else. Network security groups, if you add them, must allow TCP 5432 from
+`snet-apps` to `snet-postgres`. The role names are the built-in ones; *not verified offline:* if the first deployment reports an
+authorization failure on `subnets/join` or on the zone, grant exactly the action it names.
+
+People reach the server (the bootstrap of `infra/bicep/README.md` section 3a, restore checks, `orqentis audit` from a workstation)
+from a client inside the network: a small Linux VM in the VNet, reached through Azure Bastion or a VPN, with the Azure CLI, `psql`
+16 or later and a checkout of the repository. Plan this before the first deployment, because the app is not ready until the bootstrap
+has run. A restore of a private server needs `--vnet`, `--subnet` and `--private-dns-zone` on the restore command
+([operations/restore.md](operations/restore.md)).
+
+Who may write where in the evidence storage account (the app reads `audit-epochs` and `contracts`, writes `evidence` and
+`audit-anchors`; the people who upload contracts, and the audit operators group, are granted their one container by the owner;
+nobody but the deploy identity has management-plane rights on the account) is the table in `infra/bicep/README.md`, *Storage*.
+Create the audit operators group like the PostgreSQL administrator groups of section 5a if you want one, and give its object id
+to the environment as `AUDIT_OPERATORS_OBJECT_ID`.
+
 ### 6. Smoke-test identity
 
 The post-deployment smoke test calls the API with a token for the environment's own **deploy** service principal, so
@@ -420,6 +477,14 @@ set_env_vars dev  "$DEPLOY_DEV_APP_ID"  "$DEV_API_APP_ID"  "$DEV_PG_ADMIN_OID"  
 set_env_vars test "$DEPLOY_TEST_APP_ID" "$TEST_API_APP_ID" "$TEST_PG_ADMIN_OID" "$TEST_PG_ADMIN_NAME"
 set_env_vars prod "$DEPLOY_PROD_APP_ID" "$PROD_API_APP_ID" "$PROD_PG_ADMIN_OID" "$PROD_PG_ADMIN_NAME"
 
+# test and prod only (section 5b): the resource ids of the private network. dev uses public access and does not set them.
+set_network_vars() {   # set_network_vars <env> <Container Apps subnet id> <PostgreSQL subnet id> <private DNS zone id>
+  gh variable set CONTAINER_APPS_SUBNET_ID     --repo $REPO --env "$1" --body "$2"
+  gh variable set POSTGRES_DELEGATED_SUBNET_ID --repo $REPO --env "$1" --body "$3"
+  gh variable set POSTGRES_PRIVATE_DNS_ZONE_ID --repo $REPO --env "$1" --body "$4"
+}
+set_network_vars test "$APPS_SUBNET_ID" "$POSTGRES_SUBNET_ID" "$ZONE_ID"      # and the same for prod, with its own ids
+
 # The release job re-tags an image in the registry, so it uses the build (push-only) identity.
 gh variable set AZURE_CLIENT_ID --repo $REPO --env release --body "$BUILD_APP_ID"
 ```
@@ -436,14 +501,17 @@ gh variable set AZURE_CLIENT_ID --repo $REPO --env release --body "$BUILD_APP_ID
 | `POSTGRES_ENTRA_ADMIN_OBJECT_ID`, `POSTGRES_ENTRA_ADMIN_NAME` | environment (`dev`, `test`, `prod`) | object id and name of that environment's PostgreSQL administrator group (section 5a). Identifiers | `.bicepparam` (`postgresEntraAdminObjectId`, `postgresEntraAdminName`); the deploy job stops without them, and so does the template |
 | `POSTGRES_ENTRA_ADMIN_TYPE` | environment, optional | `Group` (default), `User` or `ServicePrincipal` | `.bicepparam` (`postgresEntraAdminType`) |
 | `POSTGRES_EXISTING_SERVER_NAME` | environment, optional | the name of a server in the environment's resource group to use instead of the one the template creates, for example after a point-in-time restore ([restore runbook](operations/restore.md)). Empty: the template manages its own server | `.bicepparam` (`postgresExistingServerName`) |
+| `CONTAINER_APPS_SUBNET_ID`, `POSTGRES_DELEGATED_SUBNET_ID`, `POSTGRES_PRIVATE_DNS_ZONE_ID` | environment, **required for `test` and `prod`** (unused by `dev`) | resource ids of the subnet that VNet-integrates the Container Apps environment, of the subnet delegated to PostgreSQL, and of the PostgreSQL private DNS zone (section 5b). Identifiers | `.bicepparam` (`infrastructureSubnetId`, `postgresDelegatedSubnetId`, `postgresPrivateDnsZoneId`); the deploy job stops without them, and so does the template |
+| `EVIDENCE_IMMUTABILITY_LOCKED` | environment: **required on `prod`, no default**; optional on `dev` and `test` (default `false`) | `true` or `false` (anything else fails the build): whether the evidence storage account's version-level immutability policy is **Locked**. **Locked is irreversible for the retention period** and needs the owner's sign-off; the first `prod` deployment must say `false` (a policy cannot be created Locked). While it is Unlocked, a holder of `Owner` or `Storage Account Contributor` can delete anchors, audit epoch markers and evidence, so keep those roles minimal until it is locked | `.bicepparam` (`evidenceImmutabilityState`): `true` -> `Locked`, `false` -> `Unlocked` |
+| `AUDIT_OPERATORS_OBJECT_ID` | environment, optional | object id of the Entra group of operators who may open an audit epoch after a restore. Empty: the template assigns nobody and the owner grants it | `.bicepparam` (`auditOperatorsPrincipalId`); the group gets `Storage Blob Data Contributor` on the `audit-epochs` container only |
 | `SMOKE_HEALTH_AUTHENTICATED` | repository or environment, optional | `true` only if `/health` is **not** excluded from Container Apps authentication (`anonymousHealthEndpoints = false`) | smoke test |
 
 Per-environment settings that are not variables (image reference, tags, CPU, retention, replicas, the PostgreSQL SKU
-and backup window, the evidence retention and immutability state, `enableWriteActions`) live in
+and backup window, private networking versus dev's public access, the evidence retention and immutability state, `enableWriteActions`) live in
 `infra/bicep/env/<env>.bicepparam` and change through a reviewed pull request. `prod` keeps `enableWriteActions =
-false`; CI fails if it changes. `evidenceImmutabilityState` is `Unlocked` in every environment; `Locked` is
-irreversible and needs the owner's approval ([`infra/bicep/README.md`](../infra/bicep/README.md), *Storage*; a unit test
-guards the value).
+false`; CI fails if it changes. Whether the evidence immutability policy is `Locked` is not in the file but in the
+`EVIDENCE_IMMUTABILITY_LOCKED` variable above, so locking a policy is a deliberate act with no default (`infra/bicep/README.md`,
+*Storage*), and a unit test checks that the file's mapping is the only place that can set `Locked`.
 
 ### 8. Protect `main`, the release tags and the dry-run branches
 
@@ -518,6 +586,10 @@ diff is informational and not required. Verify with
 
 ### 9. First deployment of each environment
 
+* `prod` also needs `EVIDENCE_IMMUTABILITY_LOCKED` (section 7), which has no default: set it to `false` for the first
+  deployment, and to `true` only with the owner's sign-off (irreversible for the retention period).
+* `test` and `prod` need their private network (section 5b) and its three variables (section 7) before the first deployment;
+  the deploy job stops, naming the missing variable, and the template refuses a public PostgreSQL server. `dev` needs none of it.
 * `dev` and `test` use `fabricMode = 'mock'` by default and need no contracts file.
 * `prod` defaults to `rest`, which needs Fabric access and the estate contracts file before the app can become ready. The
   contracts file is a **blob** in the environment's evidence storage account, uploaded after the first deployment
@@ -529,8 +601,8 @@ diff is informational and not required. Verify with
   $REPO --env prod`) and promote again.
 * **PostgreSQL bootstrap, once per environment.** The first deployment creates the PostgreSQL server and the evidence
   storage account, which takes several minutes more than before. The app cannot become ready until a member of the
-  environment's administrator group has created the app's database role (`infra/bicep/README.md`, section 3a), so the
-  smoke test of that first deployment fails (`/health/ready` is 503). That is expected: run the bootstrap, then use
+  environment's administrator group has created the app's database role (`infra/bicep/README.md`, section 3a, from a host that
+  can reach the private server in `test` and `prod`), so the smoke test of that first deployment fails (`/health/ready` is 503). That is expected: run the bootstrap, then use
   *Re-run failed jobs* on the deploy job; the deployment itself is idempotent. Later deployments need no bootstrap.
 * The first revision pulls with a fresh managed identity whose `AcrPull` assignment can take a few minutes to
   propagate. The template creates the assignment before the app, but if the first revision shows an image-pull error,
@@ -664,6 +736,8 @@ bump it, change `ACTIONLINT_VERSION` and `ACTIONLINT_SHA256` together (the check
 | `AuthorizationFailed ... roleAssignments/write` during deployment | The deploy identity lacks the constrained RBAC Administrator on the registry (or OpenAI account) scope, or the template tried to assign a role or principal type outside the condition |
 | Job fails with `Missing GitHub variables` | Section 7. The message lists the names (the PostgreSQL administrator variables are required, section 5a) |
 | `The subscription is not registered to use namespace 'Microsoft.DBforPostgreSQL'` | Register the provider once (section 5a) |
+| The input check fails with `outside dev PostgreSQL must be private ...` or `outside dev the Container Apps environment must be VNet-integrated ...` | `test` and `prod` need the private network of section 5b and the three network variables of section 7; public access is for `dev` only |
+| `AuthorizationFailed ... Microsoft.Network/virtualNetworks/subnets/join/action` (or on the private DNS zone) when the environment or the server is created | The deploy identity lacks `Network Contributor` on the VNet or `Private DNS Zone Contributor` on the zone (section 5b) |
 | The deployment fails in `orqentis-check-durable-storage-inputs` (or `orqentis-check-service-principal-inputs`), the error saying a value is not in the allowed list | That module exists to fail with a sentence: the offending *value* in the error is the reason, for example an empty `postgresEntraAdminObjectId` |
 | First deployment of an environment: smoke test fails, `/health/ready` is 503 | The PostgreSQL bootstrap has not run yet (`infra/bicep/README.md`, section 3a); run it and re-run the failed deploy job |
 | A `rest` environment: `/health/ready` is 503 `build_failed` with `ContractsFileNotFoundError` or `ContractsInvalidError` | The estate contracts blob is missing or invalid (`infra/bicep/README.md`, section 4). The app retries by itself; upload a valid file, no redeployment is needed |

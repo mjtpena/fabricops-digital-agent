@@ -49,7 +49,13 @@ export ENTRA_API_CLIENT_ID="00000000-0000-0000-0000-000000000001"
 # The PostgreSQL administrator group (an object id and a name, no secrets), required by every env file.
 export POSTGRES_ENTRA_ADMIN_OBJECT_ID="00000000-0000-0000-0000-000000000003"
 export POSTGRES_ENTRA_ADMIN_NAME="grp-fabricops-example-postgres-admins"
-unset FABRIC_MODE POSTGRES_ENTRA_ADMIN_TYPE POSTGRES_EXISTING_SERVER_NAME
+# Whether the evidence immutability policy is Locked (prod has no default). Never Locked in a snapshot.
+export EVIDENCE_IMMUTABILITY_LOCKED="false"
+# The private network of test and prod: resource ids of the two subnets and the private DNS zone (fake).
+export CONTAINER_APPS_SUBNET_ID="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/virtualNetworks/vnet-example/subnets/snet-example-apps"
+export POSTGRES_DELEGATED_SUBNET_ID="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/virtualNetworks/vnet-example/subnets/snet-example-postgres"
+export POSTGRES_PRIVATE_DNS_ZONE_ID="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/privateDnsZones/example.private.postgres.database.azure.com"
+unset FABRIC_MODE POSTGRES_ENTRA_ADMIN_TYPE POSTGRES_EXISTING_SERVER_NAME AUDIT_OPERATORS_OBJECT_ID
 
 subscription_id="00000000-0000-0000-0000-000000000000"
 tenant_id="00000000-0000-0000-0000-000000000002"

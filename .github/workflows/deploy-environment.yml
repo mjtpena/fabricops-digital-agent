@@ -16,6 +16,14 @@ name: Deploy environment
 #   POSTGRES_ENTRA_ADMIN_NAME       its name (for a group, the display name)
 #   POSTGRES_ENTRA_ADMIN_TYPE       optional: Group (default), User or ServicePrincipal
 #   POSTGRES_EXISTING_SERVER_NAME   optional: use this existing server (for example a restore) instead of creating one
+#   EVIDENCE_IMMUTABILITY_LOCKED    'true' or 'false': whether the evidence immutability policy is Locked. REQUIRED in prod
+#                        (an explicit decision: Locked is irreversible for the retention period and needs the owner's
+#                        sign-off; the first deployment says 'false'), optional elsewhere (default 'false')
+#   AUDIT_OPERATORS_OBJECT_ID       optional: object id of the Entra group of operators who may open an audit epoch after a
+#                        restore (Storage Blob Data Contributor on the audit-epochs container only)
+#   CONTAINER_APPS_SUBNET_ID, POSTGRES_DELEGATED_SUBNET_ID, POSTGRES_PRIVATE_DNS_ZONE_ID   test and prod only (required there):
+#                        resource ids of the subnet that VNet-integrates the Container Apps environment, of the subnet delegated
+#                        to PostgreSQL, and of the PostgreSQL private DNS zone (docs/delivery.md, "Private networking")
 #   SMOKE_HEALTH_AUTHENTICATED  optional: 'true' only if /health is NOT excluded from Container Apps authentication
 #                        (anonymousHealthEndpoints = false); the default deployment excludes it
 # Repository variables: AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_LOGIN_SERVER, ACR_RESOURCE_ID.
@@ -59,6 +67,11 @@ jobs:
       POSTGRES_ENTRA_ADMIN_OBJECT_ID: ${{ vars.POSTGRES_ENTRA_ADMIN_OBJECT_ID }}
       POSTGRES_ENTRA_ADMIN_NAME: ${{ vars.POSTGRES_ENTRA_ADMIN_NAME }}
       POSTGRES_EXISTING_SERVER_NAME: ${{ vars.POSTGRES_EXISTING_SERVER_NAME }}
+      AUDIT_OPERATORS_OBJECT_ID: ${{ vars.AUDIT_OPERATORS_OBJECT_ID }}
+      # Resource ids of the private network (identifiers, not secrets); test and prod read them, dev does not.
+      CONTAINER_APPS_SUBNET_ID: ${{ vars.CONTAINER_APPS_SUBNET_ID }}
+      POSTGRES_DELEGATED_SUBNET_ID: ${{ vars.POSTGRES_DELEGATED_SUBNET_ID }}
+      POSTGRES_PRIVATE_DNS_ZONE_ID: ${{ vars.POSTGRES_PRIVATE_DNS_ZONE_ID }}
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,6 +84,7 @@ jobs:
         env:
           FABRIC_MODE_VAR: ${{ vars.FABRIC_MODE }}
           POSTGRES_ENTRA_ADMIN_TYPE_VAR: ${{ vars.POSTGRES_ENTRA_ADMIN_TYPE }}
+          EVIDENCE_IMMUTABILITY_LOCKED_VAR: ${{ vars.EVIDENCE_IMMUTABILITY_LOCKED }}
           AZURE_CLIENT_ID_VAR: ${{ vars.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID_VAR: ${{ vars.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID_VAR: ${{ vars.AZURE_SUBSCRIPTION_ID }}
@@ -96,11 +110,46 @@ jobs:
             exit 1
           fi
 
+          # Outside dev the network is private (the template refuses a public PostgreSQL server there): the ids of the two
+          # subnets and of the private DNS zone must be set, and must be resource ids.
+          if [[ "$DEPLOY_ENVIRONMENT" != "dev" ]]; then
+            for name in CONTAINER_APPS_SUBNET_ID POSTGRES_DELEGATED_SUBNET_ID POSTGRES_PRIVATE_DNS_ZONE_ID; do
+              if [[ -z "${!name:-}" ]]; then
+                echo "::error::Missing GitHub variable for environment '${DEPLOY_ENVIRONMENT}': ${name} (private networking is required outside dev, docs/delivery.md)"
+                exit 1
+              fi
+              if [[ ! "${!name}" =~ ^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.Network/ ]]; then
+                echo "::error::${name} must be an Azure resource id under Microsoft.Network, got '${!name}'"
+                exit 1
+              fi
+            done
+          fi
+
+          # The optional audit operators group is an Entra object id (a GUID) when it is set.
+          if [[ -n "$AUDIT_OPERATORS_OBJECT_ID" && ! "$AUDIT_OPERATORS_OBJECT_ID" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::AUDIT_OPERATORS_OBJECT_ID must be empty or the object id (a GUID) of the Entra group of audit operators"
+            exit 1
+          fi
+
           # The PostgreSQL administrator is an Entra object id (a GUID) and a name, never a credential.
           if [[ ! "$POSTGRES_ENTRA_ADMIN_OBJECT_ID" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
             echo "::error::POSTGRES_ENTRA_ADMIN_OBJECT_ID must be the object id (a GUID) of the Entra group, user or service principal that administers PostgreSQL"
             exit 1
           fi
+
+          # Whether the evidence immutability policy is Locked: an explicit decision in prod (no default, because Locked is
+          # irreversible for the retention period), optional elsewhere. Exported only when set, so an empty variable never
+          # shadows the .bicepparam default; anything but true or false is refused.
+          case "$EVIDENCE_IMMUTABILITY_LOCKED_VAR" in
+            true | false) echo "EVIDENCE_IMMUTABILITY_LOCKED=${EVIDENCE_IMMUTABILITY_LOCKED_VAR}" >> "$GITHUB_ENV" ;;
+            "")
+              if [[ "$DEPLOY_ENVIRONMENT" == "prod" ]]; then
+                echo "::error::EVIDENCE_IMMUTABILITY_LOCKED must be set to true or false on the prod environment: whether the evidence immutability policy is Locked is an explicit decision (docs/delivery.md, section 7)"
+                exit 1
+              fi
+              ;;
+            *) echo "::error::EVIDENCE_IMMUTABILITY_LOCKED must be true or false, got '${EVIDENCE_IMMUTABILITY_LOCKED_VAR}'"; exit 1 ;;
+          esac
 
           if [[ -n "$FABRIC_MODE_VAR" ]]; then
             echo "FABRIC_MODE=${FABRIC_MODE_VAR}" >> "$GITHUB_ENV"

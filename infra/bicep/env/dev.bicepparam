@@ -13,6 +13,10 @@
 //     POSTGRES_ENTRA_ADMIN_TYPE       optional: Group (default), User or ServicePrincipal
 //     POSTGRES_EXISTING_SERVER_NAME   optional: use this existing server (for example a restore) instead of the one the
 //                          template creates (docs/operations/restore.md)
+//     EVIDENCE_IMMUTABILITY_LOCKED    optional, default 'false': 'true' locks the evidence immutability policy (IRREVERSIBLE
+//                          for the retention period; infra/bicep/README.md, Storage). Any other value fails the build.
+//     AUDIT_OPERATORS_OBJECT_ID       optional: object id of the Entra group of operators who may open an audit epoch after a
+//                          restore; it gets Storage Blob Data Contributor on the audit-epochs container only
 //   There are no defaults for CONTAINER_IMAGE, ACR_LOGIN_SERVER, ACR_RESOURCE_ID, ENTRA_API_CLIENT_ID,
 //   POSTGRES_ENTRA_ADMIN_OBJECT_ID and POSTGRES_ENTRA_ADMIN_NAME: a missing variable fails the deployment instead of
 //   deploying a wrong value. `bash scripts/validate-bicep.sh` supplies placeholders so the file can be compiled locally.
@@ -44,6 +48,10 @@ param postgresEntraAdminType = readEnvironmentVariable('POSTGRES_ENTRA_ADMIN_TYP
 // Normally empty. After a point-in-time restore, the name of the restored server: the app is then pointed at it and the
 // template changes nothing about it (docs/operations/restore.md).
 param postgresExistingServerName = readEnvironmentVariable('POSTGRES_EXISTING_SERVER_NAME', '')
+
+// Audit epoch markers (README, Storage): the app can only READ the audit-epochs container. Operators who may open an epoch
+// after a restore are an Entra group; empty assigns nothing and the owner grants it.
+param auditOperatorsPrincipalId = readEnvironmentVariable('AUDIT_OPERATORS_OBJECT_ID', '')
 
 param deploymentEnvironment = 'dev'
 // 'mock' serves the synthetic estate baked into the image, so dev needs no Fabric access or contracts file.
@@ -102,7 +110,10 @@ param maxReplicas = 1
 // evidence can be cleaned up by an account owner.
 param storageSkuName = 'Standard_LRS'
 param evidenceRetentionDays = 7
-param evidenceImmutabilityState = 'Unlocked'
+// The policy is Unlocked unless the optional variable EVIDENCE_IMMUTABILITY_LOCKED says 'true'. Locking is irreversible
+// for the retention period, so it is never done here by accident: this mapping is the only place that sets 'Locked'.
+var evidenceLocked = readEnvironmentVariable('EVIDENCE_IMMUTABILITY_LOCKED', 'false')
+param evidenceImmutabilityState = evidenceLocked == 'true' ? 'Locked' : (evidenceLocked == 'false' ? 'Unlocked' : 'EVIDENCE_IMMUTABILITY_LOCKED must be true or false')
 
 // PostgreSQL: the smallest Burstable server, 7 days of point-in-time restore.
 param postgresSkuName = 'Standard_B1ms'

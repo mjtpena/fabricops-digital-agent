@@ -9,7 +9,8 @@
 #
 # It also asserts, for dev, test and prod: enableWriteActions = false (production writes stay disabled), an explicit
 # ingressMode without the deprecated externalIngress, anonymous health endpoints (the smoke test needs them), the
-# scheduler on, and (test and prod) at least two replicas now that the database serialises every writer.
+# scheduler on, (test and prod) at least two replicas now that the database serialises every writer, and (test and
+# prod) a private PostgreSQL server in a VNet-integrated environment, with no public firewall rule.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -20,6 +21,12 @@ export ACR_RESOURCE_ID="${ACR_RESOURCE_ID:-/subscriptions/00000000-0000-0000-000
 export ENTRA_API_CLIENT_ID="${ENTRA_API_CLIENT_ID:-00000000-0000-0000-0000-000000000000}"
 export POSTGRES_ENTRA_ADMIN_OBJECT_ID="${POSTGRES_ENTRA_ADMIN_OBJECT_ID:-00000000-0000-0000-0000-000000000000}"
 export POSTGRES_ENTRA_ADMIN_NAME="${POSTGRES_ENTRA_ADMIN_NAME:-sg-example-postgres-admins}"
+# prod has no default for it: whether the evidence immutability policy is Locked is an explicit decision. Never Locked here.
+export EVIDENCE_IMMUTABILITY_LOCKED="${EVIDENCE_IMMUTABILITY_LOCKED:-false}"
+# The private network of test and prod (resource ids of the subnets and the private DNS zone, obviously fake here).
+export CONTAINER_APPS_SUBNET_ID="${CONTAINER_APPS_SUBNET_ID:-/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/virtualNetworks/vnet-example/subnets/snet-example-apps}"
+export POSTGRES_DELEGATED_SUBNET_ID="${POSTGRES_DELEGATED_SUBNET_ID:-/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/virtualNetworks/vnet-example/subnets/snet-example-postgres}"
+export POSTGRES_PRIVATE_DNS_ZONE_ID="${POSTGRES_PRIVATE_DNS_ZONE_ID:-/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/privateDnsZones/example.private.postgres.database.azure.com}"
 
 # `python3` is the Microsoft Store stub on Windows; use whichever interpreter actually runs.
 python_bin=""
@@ -46,6 +53,16 @@ for file in "${param_files[@]}"; do
   echo "az bicep build-params ${file}"
   az bicep build-params --file "$file" --stdout > "${out_dir}/$(basename "$file").json"
 done
+
+# prod must not guess whether the immutability policy is Locked (irreversible): a missing or invalid variable has to fail.
+if (unset EVIDENCE_IMMUTABILITY_LOCKED; az bicep build-params --file infra/bicep/env/prod.bicepparam --stdout > /dev/null 2>&1); then
+  echo "infra/bicep/env/prod.bicepparam compiled without EVIDENCE_IMMUTABILITY_LOCKED: it must have no default" >&2
+  exit 1
+fi
+if (EVIDENCE_IMMUTABILITY_LOCKED=maybe az bicep build-params --file infra/bicep/env/prod.bicepparam --stdout > /dev/null 2>&1); then
+  echo "infra/bicep/env/prod.bicepparam accepted EVIDENCE_IMMUTABILITY_LOCKED=maybe: only true and false are valid" >&2
+  exit 1
+fi
 
 for env in dev test prod; do
   if [[ ! -f "infra/bicep/env/${env}.bicepparam" ]]; then
@@ -97,13 +114,21 @@ for environment in ("dev", "test", "prod"):
         sys.exit(f"{where} must set minReplicas and maxReplicas explicitly (1 <= minReplicas <= maxReplicas)")
     if environment != "dev" and minimum < 2:
         sys.exit(f"{where} must run at least two replicas (minReplicas >= 2)")
+    # Outside dev the database is private: a delegated subnet and a private DNS zone, never the "Allow Azure services"
+    # firewall rule or any firewall range, and a VNet-integrated Container Apps environment to reach it.
+    if environment != "dev":
+        for name in ("postgresDelegatedSubnetId", "postgresPrivateDnsZoneId", "infrastructureSubnetId"):
+            if not value(params, name):
+                sys.exit(f"{where} must set {name} (private networking is required outside dev)")
+        if value(params, "postgresAllowAzureServices") or value(params, "postgresAllowedIpRanges"):
+            sys.exit(f"{where} must not open PostgreSQL to public access (postgresAllowAzureServices, postgresAllowedIpRanges)")
     # The PostgreSQL administrator comes from the pipeline variables; the file must not hard-code an identity.
     for name in ("postgresEntraAdminObjectId", "postgresEntraAdminName"):
         if name not in params:
             sys.exit(f"{where} must set {name} (from the POSTGRES_ENTRA_ADMIN_* variables)")
 print("env parameter files: deploymentEnvironment matches, enableWriteActions = false everywhere (prod included),")
 print("ingressMode explicit (no deprecated externalIngress), anonymous health endpoints, scheduler on,")
-print("replicas explicit (test and prod at least two), PostgreSQL administrator set")
+print("replicas explicit (test and prod at least two), PostgreSQL administrator set, test and prod private")
 PY
 
 echo "Bicep validation passed"

@@ -11,4 +11,10 @@ param entraClientId = '00000000-0000-0000-0000-000000000000'
 param postgresEntraAdminObjectId = '00000000-0000-0000-0000-000000000000'
 param postgresEntraAdminName = 'sg-fabricops-postgres-admins'
 
+// No VNet in this example, so it is a dev deployment: outside dev PostgreSQL must be private (see
+// ingress-external-authenticated.bicepparam), and the Container Apps outbound addresses are not fixed, so the
+// "Allow Azure services" firewall rule is what lets the app reach PostgreSQL. It opens the port to every Azure tenant.
+param deploymentEnvironment = 'dev'
+param postgresAllowAzureServices = true
+
 param externalIngress = false   // maps to ingressMode 'internal'

@@ -273,7 +273,7 @@ param ingressMode string?
 @description('DEPRECATED, use ingressMode. When set (and ingressMode is not) it keeps the old behaviour so that existing parameter files do not change: false = "internal", true = "externalAuthenticated" (or "vnet" when infrastructureSubnetId is set). Setting both this and ingressMode fails the deployment, so a stale value cannot silently override an explicit mode. Remove it from your parameter files.')
 param externalIngress bool?
 
-@description('Optional: resource id of a subnet (delegated to Microsoft.App/environments, /27 or larger) for an internal, VNet-integrated environment with no public endpoint. Required for ingressMode "vnet", must be empty for "externalAuthenticated" (a mismatch fails the deployment), optional for "internal".')
+@description('Optional: resource id of a subnet (delegated to Microsoft.App/environments, /27 or larger) that VNet-integrates the Container Apps environment. With ingressMode "vnet" (required) or "internal" (optional) the environment is internal, with no public endpoint. With "externalAuthenticated" the environment is VNet-integrated but keeps its public, authenticated endpoint: outbound traffic leaves through the VNet, which is what lets the app reach a VNet-integrated PostgreSQL server privately. test and prod must set it (the deployment fails otherwise).')
 param infrastructureSubnetId string = ''
 
 @description('Optional IPv4 CIDR ranges (e.g. 203.0.113.0/24) allowed to reach the ingress. Empty: no address restriction. When set, every other address is denied before authentication; GitHub-hosted runners and other callers outside the ranges cannot connect.')
@@ -413,10 +413,10 @@ param maxReplicas int = 2
 
 // ------------------------------------------------------------------------------------------------- durable storage: PostgreSQL
 
-@description('ORQENTIS_POSTGRES_POOL_MAX: database connections per replica. During a deploy the old revision (up to maxReplicas) and the new one (minReplicas) run together, so keep (maxReplicas + minReplicas) x postgresPoolMax plus about 15 reserved connections below the server\'s max_connections (about 50 on Standard_B1ms; the deployment checks that SKU and fails when the budget is exceeded; for other SKUs check SHOW max_connections).')
-@minValue(1)
+@description('ORQENTIS_POSTGRES_POOL_MAX: database connections per replica (at least 2: one is held by the schema migration lock). During a deploy the old and the new revision can both run at maxReplicas, so the budget is 2 x maxReplicas x postgresPoolMax plus 15 connections the platform reserves plus 5 for the migration and operators (psql, restore checks); keep it at or below the server\'s max_connections (about 50 on Standard_B1ms). The deployment checks that SKU and fails when the budget is exceeded; for other SKUs check SHOW max_connections.')
+@minValue(2)
 @maxValue(100)
-param postgresPoolMax int = 8
+param postgresPoolMax int = 6
 
 @description('Compute SKU of the PostgreSQL Flexible Server. Standard_B* is Burstable (dev, test), Standard_D* General Purpose (prod); the tier is derived from the name.')
 param postgresSkuName string = 'Standard_B1ms'
@@ -484,13 +484,13 @@ param postgresDatabaseName string = 'orqentis'
 @description('Public access: firewall rules, an array of { name, startIpAddress, endIpAddress }. Empty (default) lets nobody connect from outside Azure; add the address of whoever runs the bootstrap step. Must be empty with VNet integration (postgresDelegatedSubnetId).')
 param postgresAllowedIpRanges array = []
 
-@description('Public access: add the 0.0.0.0-0.0.0.0 rule that lets Azure services, including Container Apps whose outbound addresses are not fixed, reach the TCP port. It opens the port to every Azure customer\'s resources; every connection still needs a valid Entra token for a database role. Default false; dev sets true. Prefer VNet integration where the network exists.')
+@description('Public access: add the 0.0.0.0-0.0.0.0 rule that lets Azure services, including Container Apps whose outbound addresses are not fixed, reach the TCP port. It opens the port to resources of EVERY Azure tenant (every connection still needs a valid Entra token for a database role). For dev only: the deployment fails outside dev. Default false; env/dev.bicepparam sets it. test and prod use private networking (postgresDelegatedSubnetId).')
 param postgresAllowAzureServices bool = false
 
-@description('VNet integration: resource id of a subnet delegated to Microsoft.DBforPostgreSQL/flexibleServers (not the Container Apps subnet). Needs postgresPrivateDnsZoneId, an infrastructureSubnetId environment in the same or a peered VNet, and no firewall rules; the server then has no public endpoint.')
+@description('VNet integration (required outside dev): resource id of a subnet delegated to Microsoft.DBforPostgreSQL/flexibleServers, not the Container Apps subnet. Needs postgresPrivateDnsZoneId, a VNet-integrated Container Apps environment (infrastructureSubnetId) in the same or a peered VNet, and no firewall rules; the server then has no public endpoint. Cannot be changed on an existing server.')
 param postgresDelegatedSubnetId string = ''
 
-@description('VNet integration: resource id of the private DNS zone (<name>.private.postgres.database.azure.com) linked to the VNet.')
+@description('VNet integration (required outside dev): resource id of the private DNS zone, whose name ends in postgres.database.azure.com (for example <name>.private.postgres.database.azure.com), linked to the VNet.')
 param postgresPrivateDnsZoneId string = ''
 
 @description('Empty (default): this template creates the PostgreSQL server. Set to the name of a server in THIS resource group (for example one restored from backup, docs/operations/restore.md) to point the app at it instead: nothing about that server is created or changed. The Entra administrator, firewall rules and parameters of an adopted server are yours to maintain.')
@@ -507,6 +507,14 @@ param evidenceContainerName string = 'evidence'
 @minLength(3)
 @maxLength(63)
 param auditAnchorContainerName string = 'audit-anchors'
+
+@description('ORQENTIS_AUDIT_EPOCH_CONTAINER: container for the audit epoch-start markers an operator writes after a restore. The app can only READ it (Storage Blob Data Reader), so a compromised app identity cannot open or close an epoch.')
+@minLength(3)
+@maxLength(63)
+param auditEpochContainerName string = 'audit-epochs'
+
+@description('Optional: object id of the Entra group of operators who may open an audit epoch after a restore (`orqentis audit start-epoch`). When set, the group gets Storage Blob Data Contributor on the audit-epochs container ONLY. Empty (default): the template assigns nothing and the owner grants it (infra/bicep/README.md, Storage). env files read it from AUDIT_OPERATORS_OBJECT_ID.')
+param auditOperatorsPrincipalId string = ''
 
 @description('Days every evidence and anchor blob version is immutable (default retention of the storage account).')
 @minValue(1)
@@ -716,9 +724,10 @@ var effectiveIngressMode = externalIngress == null ? (ingressMode ?? 'externalAu
 // Fail the deployment instead of silently choosing an exposure that differs from what was asked for:
 // * both ingressMode and the deprecated externalIngress are set (a stale externalIngress = true must not
 //   override an explicit ingressMode = 'internal');
-// * "vnet" without a subnet, or "externalAuthenticated" with one.
+// * "vnet" without a subnet. ("externalAuthenticated" with a subnet is valid: a VNet-integrated environment that
+//   keeps its public, authenticated endpoint; only "vnet" and "internal" make the environment itself internal.)
 // The failure is an invalid subnet id fed into the environment (the Bicep language has no assert).
-var ingressMisconfigured = (externalIngress != null && ingressMode != null) || (effectiveIngressMode == 'vnet' && empty(infrastructureSubnetId)) || (effectiveIngressMode == 'externalAuthenticated' && !empty(infrastructureSubnetId))
+var ingressMisconfigured = (externalIngress != null && ingressMode != null) || (effectiveIngressMode == 'vnet' && empty(infrastructureSubnetId))
 var environmentSubnetId = ingressMisconfigured
   ? 'INVALID-conflicting-ingressMode-externalIngress-infrastructureSubnetId-see-README-Network-exposure'
   : infrastructureSubnetId
@@ -734,24 +743,38 @@ var ipSecurityRestrictions = [
 var anonymousPaths = anonymousHealthEndpoints ? ['/health', '/health/ready'] : []
 
 // Durable storage inputs checked when the deployment runs (see modules/input-check.bicep): 'ok', or what is wrong.
-// Standard_B1ms allows about 50 connections (max_connections), about 15 of them reserved for the platform. During a
-// deploy the old revision (up to maxReplicas) and the new one (minReplicas) hold a pool each. Other SKUs are not
-// checked here: see SHOW max_connections.
-var postgresConnectionsNeeded = (maxReplicas + minReplicas) * postgresPoolMax + 15
+// Connection budget. Standard_B1ms allows about 50 connections (max_connections). The worst case during a deploy is
+// the old revision AND the new revision both running at maxReplicas (the new one scales up while the old one drains),
+// each replica holding a full pool: 2 x maxReplicas x postgresPoolMax. On top of that: about 15 connections the
+// platform reserves (replication, monitoring) and 5 for the schema migration and for operators (psql, restore checks).
+// Other SKUs are not checked here: see SHOW max_connections.
+var postgresPlatformConnections = 15
+var postgresMigrationAndOperatorConnections = 5
+var postgresConnectionsNeeded = 2 * maxReplicas * postgresPoolMax + postgresPlatformConnections + postgresMigrationAndOperatorConnections
 var storageCheck = length(postgresEntraAdminObjectId) != 36
   ? 'postgresEntraAdminObjectId must be set to the object id (a GUID) of the Microsoft Entra group, user or service principal that administers PostgreSQL (pipeline variable POSTGRES_ENTRA_ADMIN_OBJECT_ID); it is empty or not a GUID'
   : empty(postgresEntraAdminName)
       ? 'postgresEntraAdminName must be set to the name of the Microsoft Entra principal that administers PostgreSQL (pipeline variable POSTGRES_ENTRA_ADMIN_NAME); it is empty'
       : maxReplicas < minReplicas
           ? 'maxReplicas must be at least minReplicas'
-          : (!empty(postgresDelegatedSubnetId) != !empty(postgresPrivateDnsZoneId))
+          : (deploymentEnvironment != 'dev' && (empty(postgresDelegatedSubnetId) || empty(postgresPrivateDnsZoneId)))
+              ? 'deploymentEnvironment is ${deploymentEnvironment}: outside dev PostgreSQL must be private, so set postgresDelegatedSubnetId and postgresPrivateDnsZoneId (public access with a firewall is for dev only; infra/bicep/README.md, Private networking)'
+              : (deploymentEnvironment != 'dev' && empty(infrastructureSubnetId))
+                  ? 'deploymentEnvironment is ${deploymentEnvironment}: outside dev the Container Apps environment must be VNet-integrated to reach PostgreSQL privately, so set infrastructureSubnetId (a subnet delegated to Microsoft.App/environments)'
+                  : (deploymentEnvironment != 'dev' && postgresAllowAzureServices)
+                      ? 'deploymentEnvironment is ${deploymentEnvironment}: postgresAllowAzureServices opens the PostgreSQL port to every Azure tenant and is for dev only'
+                      : (!empty(postgresDelegatedSubnetId) && postgresDelegatedSubnetId == infrastructureSubnetId)
+                          ? 'postgresDelegatedSubnetId must not be the Container Apps subnet (infrastructureSubnetId): each needs its own subnet, with its own delegation'
+                          : (!empty(auditOperatorsPrincipalId) && length(auditOperatorsPrincipalId) != 36)
+                              ? 'auditOperatorsPrincipalId must be empty or the object id (a GUID) of the Entra group of audit operators'
+                              : (!empty(postgresDelegatedSubnetId) != !empty(postgresPrivateDnsZoneId))
                   ? 'PostgreSQL VNet integration needs both postgresDelegatedSubnetId and postgresPrivateDnsZoneId, or neither'
                   : (!empty(postgresDelegatedSubnetId) && (!empty(postgresAllowedIpRanges) || postgresAllowAzureServices))
                       ? 'PostgreSQL VNet integration (postgresDelegatedSubnetId) has no public endpoint, so postgresAllowedIpRanges must be empty and postgresAllowAzureServices false'
                       : (postgresHighAvailabilityMode != 'Disabled' && startsWith(postgresSkuName, 'Standard_B'))
                           ? 'PostgreSQL high availability is not available on the Burstable tier (postgresSkuName Standard_B*): use a General Purpose SKU such as Standard_D2ds_v5 or set postgresHighAvailabilityMode to Disabled'
                           : (postgresSkuName == 'Standard_B1ms' && postgresConnectionsNeeded > 50)
-                              ? 'Standard_B1ms allows about 50 connections but (maxReplicas + minReplicas) x postgresPoolMax + 15 reserved is ${postgresConnectionsNeeded}: lower postgresPoolMax or the replica counts, or use a larger postgresSkuName'
+                              ? 'Standard_B1ms allows about 50 connections but 2 x maxReplicas x postgresPoolMax (old and new revision both at maxReplicas) + 15 platform + 5 migration and operator connections is ${postgresConnectionsNeeded}: lower postgresPoolMax or maxReplicas, or use a larger postgresSkuName'
                               : investigationClaimTtlSeconds < investigationPollIntervalSeconds * 3
                                   ? 'investigationClaimTtlSeconds must be at least three times investigationPollIntervalSeconds'
                                   : (evidenceNetworkDefaultAction == 'Deny' && empty(evidenceAllowedIpRanges) && empty(evidenceAllowedSubnetIds))
@@ -769,6 +792,8 @@ var durableStorageEnv = [
   { name: 'ORQENTIS_EVIDENCE_BLOB_URL', value: evidenceStorage.outputs.blobEndpoint }
   { name: 'ORQENTIS_EVIDENCE_CONTAINER', value: evidenceStorage.outputs.evidenceContainerName }
   { name: 'ORQENTIS_AUDIT_ANCHOR_CONTAINER', value: evidenceStorage.outputs.auditAnchorContainerName }
+  // Read-only for the app: only the operators group (auditOperatorsPrincipalId) can write epoch-start markers.
+  { name: 'ORQENTIS_AUDIT_EPOCH_CONTAINER', value: evidenceStorage.outputs.auditEpochContainerName }
   // The estate contracts file is a blob in the evidence account (ORQENTIS_EVIDENCE_BLOB_URL): no volume, no secret.
   { name: 'ORQENTIS_CONTRACTS_CONTAINER', value: evidenceStorage.outputs.contractsContainerName }
   { name: 'ORQENTIS_CONTRACTS_BLOB_NAME', value: contractsBlobName }
@@ -1039,6 +1064,8 @@ module evidenceStorage 'modules/evidence-storage.bicep' = {
     skuName: storageSkuName
     evidenceContainerName: evidenceContainerName
     auditAnchorContainerName: auditAnchorContainerName
+    auditEpochContainerName: auditEpochContainerName
+    auditOperatorsPrincipalId: auditOperatorsPrincipalId
     contractsContainerName: contractsContainerName
     retentionDays: evidenceRetentionDays
     immutabilityState: evidenceImmutabilityState
@@ -1077,7 +1104,9 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
       ? null
       : {
           infrastructureSubnetId: environmentSubnetId
-          internal: true
+          // internal: no public IP for the environment. externalAuthenticated keeps the public endpoint (the app still
+          // requires a valid Entra token on every path); the subnet then only carries the environment's outbound traffic.
+          internal: effectiveIngressMode != 'externalAuthenticated'
         }
     zoneRedundant: false
   }
@@ -1361,6 +1390,9 @@ output evidenceContainerName string = evidenceStorage.outputs.evidenceContainerN
 
 @description('Audit anchor container name (ORQENTIS_AUDIT_ANCHOR_CONTAINER).')
 output auditAnchorContainerName string = evidenceStorage.outputs.auditAnchorContainerName
+
+@description('Audit epoch container name (ORQENTIS_AUDIT_EPOCH_CONTAINER): the audit operators group writes epoch-start markers here after a restore.')
+output auditEpochContainerName string = evidenceStorage.outputs.auditEpochContainerName
 
 @description('Estate contracts container name (ORQENTIS_CONTRACTS_CONTAINER): upload the contracts file here (infra/bicep/README.md, Estate contracts).')
 output contractsContainerName string = evidenceStorage.outputs.contractsContainerName

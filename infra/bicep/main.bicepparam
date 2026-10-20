@@ -85,7 +85,9 @@ param buildRetryMaxSeconds = 60
 // 'vnet' (internal environment, needs infrastructureSubnetId) or 'internal' (environment-internal only).
 // See infra/bicep/README.md "Network exposure" and the examples in infra/bicep/examples/.
 param ingressMode = 'externalAuthenticated'
-param infrastructureSubnetId = ''
+// Outside dev the Container Apps environment is VNet-integrated (a subnet delegated to Microsoft.App/environments), which
+// is how the app reaches PostgreSQL privately. The API keeps its public, authenticated endpoint with this mode.
+param infrastructureSubnetId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-fabricops/subnets/snet-aca'
 // param allowedIpRanges = ['203.0.113.0/24']   // optional address allow list in front of authentication
 param anonymousHealthEndpoints = true           // /health and /health/ready answer without a token
 
@@ -102,15 +104,17 @@ param uiEnabled = true
 param logRetentionInDays = 30
 
 // Scale: the app is stateless (the database serialises the audit chain, the lease and approvals), so two replicas
-// are the default. Keep (maxReplicas + minReplicas) x postgresPoolMax + ~15 below the server's max_connections.
+// are the default. Keep 2 x maxReplicas x postgresPoolMax + 20 below the server's max_connections.
 param minReplicas = 2
 param maxReplicas = 2
-param postgresPoolMax = 8
+param postgresPoolMax = 6
 
 // Evidence storage account (evidence, reports, audit anchors): Blob, Entra only, version-level immutability.
 param storageSkuName = 'Standard_LRS'
 param evidenceRetentionDays = 30
-param evidenceImmutabilityState = 'Unlocked'   // 'Locked' is irreversible: see infra/bicep/README.md, Storage
+// Unlocked: an account owner can still change the policy. 'Locked' is IRREVERSIBLE for the retention period and needs the
+// owner's sign-off (infra/bicep/README.md, Storage); the env/*.bicepparam files take the decision from a pipeline variable.
+param evidenceImmutabilityState = 'Unlocked'
 
 // PostgreSQL Flexible Server (Microsoft Entra authentication only). The Entra administrator is REQUIRED: a group whose
 // members run the bootstrap step (infra/bicep/README.md, "PostgreSQL bootstrap"). Placeholders below.
@@ -120,11 +124,14 @@ param postgresEntraAdminType = 'Group'
 param postgresSkuName = 'Standard_B1ms'
 param postgresStorageSizeGiB = 32
 param postgresBackupRetentionDays = 7
-// Public access: nobody can connect until a firewall rule exists. Azure services = the 0.0.0.0 rule that lets Container
-// Apps (no fixed outbound address) reach the port; every connection still needs an Entra token. Alternatively use VNet
-// integration: postgresDelegatedSubnetId + postgresPrivateDnsZoneId (and ingressMode 'vnet').
-param postgresAllowAzureServices = true
-// param postgresAllowedIpRanges = [{ name: 'bootstrap-operator', startIpAddress: '203.0.113.10', endIpAddress: '203.0.113.10' }]
+// Private networking (required outside dev): the server has no public endpoint. A subnet delegated to
+// Microsoft.DBforPostgreSQL/flexibleServers (not the Container Apps subnet) and a private DNS zone linked to the VNet.
+// Dev can use public access instead: postgresAllowAzureServices = true (the template refuses it anywhere else).
+param postgresDelegatedSubnetId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-fabricops/subnets/snet-postgres'
+param postgresPrivateDnsZoneId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/privateDnsZones/fabricops.private.postgres.database.azure.com'
+
+// Optional: the Entra group of operators who may open an audit epoch after a restore (empty assigns nothing).
+// param auditOperatorsPrincipalId = '<object id of the group>'
 
 // Time zone for time-of-day reasoning and report times (validated at startup).
 param defaultTimezone = 'Australia/Sydney'

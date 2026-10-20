@@ -9,12 +9,18 @@
 //     deleting the account until every retention has run out. Locking is a deliberate production step.
 //   * Versioning, blob soft delete and container soft delete are on, so an overwrite or delete leaves a recoverable
 //     version for softDeleteDays.
-//   * Three containers: evidence and reports, the periodic audit-chain anchors, and the estate contracts file. The
-//     reader identity (the app's operating identity) gets "Storage Blob Data Contributor" on the evidence and anchor
-//     containers and only "Storage Blob Data Reader" on the contracts container, never a role on the account. The
-//     actor (WRITE) identity gets nothing here. Nobody who UPLOADS contracts is granted anything by this template: the
-//     owner assigns "Storage Blob Data Contributor" on the contracts container to the people or identities that do
-//     (infra/bicep/README.md, Estate contracts).
+//   * Four containers: evidence and reports, the periodic audit-chain anchors, the audit epoch-start markers, and the
+//     estate contracts file. Who may write where (always at container scope, never a role on the account):
+//       - the reader identity (the app): Storage Blob Data Contributor on evidence and audit-anchors; only Storage Blob
+//         Data Reader on audit-epochs and contracts, so a compromised app cannot open an audit epoch or rewrite the
+//         declared estate;
+//       - the audit operators group (auditOperatorsPrincipalId, optional): Storage Blob Data Contributor on audit-epochs
+//         ONLY, to write the marker `orqentis audit start-epoch` needs after a restore. Nothing is assigned when the
+//         parameter is empty;
+//       - whoever uploads the estate contracts: nothing from this template. The owner assigns Storage Blob Data
+//         Contributor on the contracts container to the people or identities that do (infra/bicep/README.md);
+//       - the actor (WRITE) identity: nothing.
+//     Nobody but the deploy identity has management-plane rights on the account (and so on its immutability policy).
 //   * hierarchical namespace is off: the Blob API is what the Azurite emulator speaks, and the same client adapter can
 //     target a OneLake blob URL instead (ORQENTIS_EVIDENCE_BLOB_URL).
 
@@ -47,6 +53,14 @@ param evidenceContainerName string = 'evidence'
 @minLength(3)
 @maxLength(63)
 param auditAnchorContainerName string = 'audit-anchors'
+
+@description('Name of the container for the audit epoch-start markers. The app reads it; the audit operators group writes to it.')
+@minLength(3)
+@maxLength(63)
+param auditEpochContainerName string = 'audit-epochs'
+
+@description('Optional: object id of the Entra group of operators who may open an audit epoch after a restore. Gets Storage Blob Data Contributor on the audit-epochs container only. Empty: no role is assigned.')
+param auditOperatorsPrincipalId string = ''
 
 @description('Name of the container for the estate contracts file. The app reads it; people upload to it.')
 @minLength(3)
@@ -88,10 +102,8 @@ param readerPrincipalId string
 
 // Built-in role: Storage Blob Data Contributor (read, write and delete blobs; it cannot change policies or keys).
 var storageBlobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
-// Built-in role: Storage Blob Data Reader (read and list blobs). The id was taken from the built-in role list and
-// could not be checked offline: confirm it on the first deployment (az role definition list --name "Storage Blob Data
-// Reader" --query "[0].name" -o tsv).
-var storageBlobDataReaderRoleId = '2a2b9908-6b94-4b4a-bb09-aaf3bc7f7a58'
+// Built-in role: Storage Blob Data Reader (read and list blobs; it cannot write or delete).
+var storageBlobDataReaderRoleId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
 
 resource account 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: accountName
@@ -182,6 +194,17 @@ resource auditAnchorContainer 'Microsoft.Storage/storageAccounts/blobServices/co
   }
 }
 
+resource auditEpochContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: auditEpochContainerName
+  properties: {
+    publicAccess: 'None'
+    immutableStorageWithVersioning: {
+      enabled: true
+    }
+  }
+}
+
 resource contractsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   parent: blobService
   name: contractsContainerName
@@ -217,6 +240,33 @@ resource readerAuditAnchorAccess 'Microsoft.Authorization/roleAssignments@2022-0
   }
 }
 
+// The audit epoch container is READ-ONLY for the app: an epoch-start marker records that the audit history was cut
+// by a restore, and it must be something a compromised app identity cannot forge or remove. The app reads the markers;
+// only the operators group below can write them.
+resource readerAuditEpochAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(auditEpochContainer.id, readerPrincipalId, storageBlobDataReaderRoleId)
+  scope: auditEpochContainer
+  properties: {
+    description: 'Orqentis FabricOps reader identity: read the audit epoch-start markers (this container only, read-only).'
+    principalId: readerPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataReaderRoleId)
+  }
+}
+
+// The people who may open an audit epoch after a restore: Contributor on this one container, only when a group is given.
+// Nothing is assigned by default; the owner decides who is an audit operator.
+resource operatorsAuditEpochAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(auditOperatorsPrincipalId)) {
+  name: guid(auditEpochContainer.id, auditOperatorsPrincipalId, storageBlobDataContributorRoleId)
+  scope: auditEpochContainer
+  properties: {
+    description: 'Orqentis FabricOps audit operators: write audit epoch-start markers after a restore (this container only).'
+    principalId: auditOperatorsPrincipalId
+    principalType: 'Group'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleId)
+  }
+}
+
 // The contracts container is READ-ONLY for the app: a compromised reader identity cannot rewrite the declared estate
 // (topology, SLAs). Uploading is a human or pipeline task that the owner grants separately; this template assigns
 // nothing to an uploader.
@@ -242,6 +292,9 @@ output evidenceContainerName string = evidenceContainer.name
 
 @description('Audit anchor container name (ORQENTIS_AUDIT_ANCHOR_CONTAINER).')
 output auditAnchorContainerName string = auditAnchorContainer.name
+
+@description('Audit epoch container name (ORQENTIS_AUDIT_EPOCH_CONTAINER).')
+output auditEpochContainerName string = auditEpochContainer.name
 
 @description('Estate contracts container name (ORQENTIS_CONTRACTS_CONTAINER).')
 output contractsContainerName string = contractsContainer.name
