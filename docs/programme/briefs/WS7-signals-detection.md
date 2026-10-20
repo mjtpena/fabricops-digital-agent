@@ -51,6 +51,13 @@ access with proven minimum grants.
    to approve read access to the Capacity Metrics app workspace (ledger R4); build and test it against fixtures.
 6. **Signatures and redaction follow-ups**: an error signature for generic notebook exceptions (Python/Spark traceback
    shapes) mapped to a sensible category; fix the `signature_match` redaction over-match without weakening redaction.
+6a. **Known permission gaps are not collector errors (ledger R13).** In rest mode the semantic-model refresh collector
+   gets a by-design 403 every run (refresh history needs dataset Write, D9), which keeps the WS9 collector-errors alert
+   permanently fired. Report a 403 the deployment expects (configured, documented) as a *capability unavailable* state
+   with its own metric and readiness detail, not as a collector error; keep real, unexpected 401/403s as errors. Once
+   workspace monitoring provides refresh failures, the Power BI refresh-history call is disabled by default.
+   Also from the live run: a pipeline-triggered semantic-model refresh that fails surfaces as a pipeline activity failure;
+   make sure the refresh-failure workflow handles both paths.
 7. Optional: deployment-drift detection only if a read-only path exists with the reader's grants; otherwise document
    why not.
 8. Docs: `docs/architecture.md` (ports, collectors, rules), `docs/security.md` (new untrusted inputs: Delta logs,
