@@ -23,11 +23,8 @@ from orqentis.bootstrap import Container, build_container
 from orqentis.config.settings import Settings
 from orqentis.incidents.investigation import InvestigationNotPossibleError
 from orqentis.incidents.service import IncidentNotFoundError, InvalidTransitionError
-from orqentis.observability.logging import get_logger
 from orqentis.runtime.investigations import InvestigationJobNotFoundError
 from orqentis.runtime.service import Runtime
-
-_log = get_logger(__name__)
 
 _APPROVAL_STATUS = {
     ApprovalNotFoundError: status.HTTP_404_NOT_FOUND,

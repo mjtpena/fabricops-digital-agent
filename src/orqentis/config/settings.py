@@ -144,6 +144,11 @@ class Settings(BaseSettings):
             self.scheduler_enabled = self.deployment_environment != "local"
         if self.build_retry_max_seconds < self.build_retry_initial_seconds:
             raise ValueError("ORQENTIS_BUILD_RETRY_MAX_SECONDS must be >= ORQENTIS_BUILD_RETRY_INITIAL_SECONDS")
+        if self.scheduler_tick_seconds * 2 > self.scheduler_lease_ttl_seconds:
+            # The lease is renewed once less than half its TTL is left; a slower tick would let it lapse between ticks.
+            raise ValueError(
+                "ORQENTIS_SCHEDULER_LEASE_TTL_SECONDS must be at least twice ORQENTIS_SCHEDULER_TICK_SECONDS"
+            )
         if self.reasoner is ReasonerKind.AGENT_FRAMEWORK:
             if self.llm_provider is LlmProvider.AZURE_OPENAI and not (
                 self.azure_openai_endpoint and self.azure_openai_deployment

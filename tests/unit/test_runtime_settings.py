@@ -62,6 +62,7 @@ def test_defaults_are_conservative() -> None:
         {"collection_max_lookback_hours": 0},
         {"investigation_timeout_seconds": 5},
         {"build_retry_initial_seconds": 10, "build_retry_max_seconds": 5},
+        {"scheduler_tick_seconds": 30, "scheduler_lease_ttl_seconds": 40},  # the lease would lapse between ticks
     ],
 )
 def test_nonsensical_values_are_rejected(bad: dict[str, object]) -> None:

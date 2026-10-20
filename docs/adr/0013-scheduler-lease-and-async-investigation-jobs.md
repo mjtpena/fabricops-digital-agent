@@ -97,7 +97,7 @@ rewrite when that happens.
   and lease state; the API would need to be exposed to it. Rejected for now.
 * **A job framework** (APScheduler, Celery, Dramatiq): a broker or its own persistence, and a wider
   dependency surface, for four jobs and an in-memory job table. Rejected: the scheduler is
-  ~300 lines and the lease/job store ports are what matter for WS6.
+  a few hundred lines and the lease/job store ports are what matter for WS6.
 * **A database lease and durable jobs now:** WS6 owns the database. The port is the hand-off.
 * **Keeping the container build in the lifespan with a longer startup probe:** it still crash-loops
   on a persistent build error and holds the port closed. Rejected.
