@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import Field
+from pydantic import ConfigDict, Field, JsonValue, model_validator
 
 from orqentis.domain.common import DomainModel, Environment, ItemType, Metadata
 
@@ -126,3 +126,58 @@ class DataProduct(DomainModel):
     item_type: Literal[ItemType.DATA_PRODUCT] = ItemType.DATA_PRODUCT
     source: str = "declared"
     metadata: Metadata = Field(default_factory=dict)
+
+
+_ENVIRONMENT_SELECTOR_SCHEMA: dict[str, JsonValue] = {
+    # Exactly one selector is present (a null value does not count as present).
+    "oneOf": [
+        {"required": [key], "properties": {key: {"type": "string"}}}
+        for key in ("workspace_id", "workspace_name_pattern", "item_id", "capacity_id")
+    ]
+}
+
+
+class EnvironmentDeclaration(DomainModel):
+    """A declared environment that takes precedence over inference from names.
+
+    Exactly one selector identifies what is classified: a workspace by ``workspace_id``, workspaces by
+    ``workspace_name_pattern`` (``*`` and ``?`` wildcards, case-insensitive; every other character is
+    literal, so ``Sales [PROD]`` matches that name exactly), one item by ``item_id`` or one capacity by
+    ``capacity_id``. Items inherit the environment of their workspace unless an ``item_id`` entry says
+    otherwise.
+
+    Only a *reviewed* declaration is enforced. An entry with ``inferred: true`` (a draft that
+    ``orqentis contracts scaffold`` pre-filled from naming conventions) or with environment ``UNKNOWN`` is
+    not applied: the workspace keeps its name-based classification, so a stale or unfinished draft can
+    never pin a workspace to a guess. ``contracts validate`` warns about both until a human edits them.
+
+    A declaration that lowers a workspace whose name says PROD (or an item below its workspace) weakens
+    severity and production-only policy rules for it. Startup logs and audits every such override, and
+    ``contracts validate`` warns about it; ``accepts_downgrade: true`` records that a reviewer confirmed it
+    and silences that one warning (the log and audit records remain).
+    """
+
+    model_config = ConfigDict(json_schema_extra=_ENVIRONMENT_SELECTOR_SCHEMA)  # merged with DomainModel's
+
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    workspace_name_pattern: str | None = Field(default=None, min_length=1, max_length=128)
+    item_id: str | None = Field(default=None, min_length=1, max_length=128)
+    capacity_id: str | None = Field(default=None, min_length=1, max_length=128)
+    environment: Environment
+    inferred: bool = False
+    accepts_downgrade: bool = False
+    note: str | None = Field(default=None, max_length=300)
+
+    @model_validator(mode="after")
+    def _exactly_one_selector(self) -> Self:
+        selectors = [
+            s for s in (self.workspace_id, self.workspace_name_pattern, self.item_id, self.capacity_id) if s is not None
+        ]
+        if len(selectors) != 1:
+            raise ValueError("declare exactly one of workspace_id, workspace_name_pattern, item_id or capacity_id")
+        return self
+
+    @property
+    def enforced(self) -> bool:
+        """Whether the declaration takes effect: reviewed (not ``inferred``) and a real environment."""
+        return not self.inferred and self.environment is not Environment.UNKNOWN

@@ -51,3 +51,18 @@ param anonymousHealthEndpoints = true           // /health and /health/ready ans
 param logRetentionInDays = 30
 param storageSkuName = 'Standard_LRS'
 param fileShareQuotaGiB = 32
+
+// Time zone for time-of-day reasoning and report times (validated at startup).
+param defaultTimezone = 'Australia/Sydney'
+
+// Fabric identity. managed_identity (default) reads Fabric with the reader managed identity. For a Fabric tenant
+// that is a different Entra tenant use service_principal with a Key Vault reference: see
+// infra/bicep/examples/cross-tenant.bicepparam and "Cross-tenant Fabric access" in infra/bicep/README.md.
+param fabricAuthMode = 'managed_identity'
+
+// Sovereign clouds (US Government, China): see "Sovereign clouds" in infra/bicep/README.md. Empty keeps the public cloud.
+// param authorityHost = 'https://login.microsoftonline.us'
+// param fabricApiBaseUrl = '<Fabric API base URL for your cloud>'
+// param powerbiApiBaseUrl = 'https://api.high.powerbigov.us/v1.0/myorg'
+// param fabricScope = '<Fabric API scope for your cloud>/.default'
+// param powerbiScope = 'https://high.analysis.usgovcloudapi.net/powerbi/api/.default'
