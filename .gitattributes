@@ -1,3 +1,4 @@
-# Shell scripts and their templates must keep LF line endings on Windows checkouts (core.autocrlf).
+# Shell scripts run on Linux runners and in containers, and their templates must keep LF line endings even on
+# Windows checkouts (core.autocrlf); never check them out with CRLF.
 *.sh text eol=lf
 scripts/live-estate/** text eol=lf

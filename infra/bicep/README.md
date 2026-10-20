@@ -13,6 +13,7 @@
 | Container App | `ca-<prefix>` | The API (`orqentis serve`), port 8000, 1 replica, Entra ID authentication, exposure per `ingressMode` |
 | Container App auth config | `current` | Built-in authentication (Easy Auth) with Microsoft Entra ID, `Return401`; `/health` and `/health/ready` excluded by default (`anonymousHealthEndpoints`) |
 | Role assignment (optional) | n/a | `AcrPull` for the reader identity on an ACR in the same RG (`containerRegistryName`) |
+| Role assignment (optional) | `modules/acr-pull.bicep` | `AcrPull` for the reader identity on an ACR in any resource group (`containerRegistryResourceId`), such as the shared registry used by every environment |
 | Role assignment (optional) | `modules/openai-role.bicep` | `Cognitive Services OpenAI User` for the reader identity on `azureOpenAiResourceId` (any RG/subscription) |
 | Role assignment (optional) | `modules/keyvault-role.bicep` | `Key Vault Secrets User` for the reader identity on **each referenced secret only** (not the vault), in the vault of `keyVaultResourceId` (any RG/subscription) |
 | Deployment check | `modules/input-check.bicep` | Fails the deployment with a readable reason when the `service_principal` inputs cannot work (see *Cross-tenant Fabric access*) |
@@ -82,6 +83,8 @@ Container Apps in `Single` revision mode runs the **old and the new revision sid
 Settings that fail validation (for example a missing `ORQENTIS_TENANT_ID` in rest mode, or a lease TTL shorter than three scheduler ticks) stop the app at start by design: that is deploy-time misconfiguration, and the first failed startup probe is the signal, not something to retry.
 
 ## Deploy
+
+**Pipeline.** `dev`, `test` and `prod` are deployed by GitHub Actions (`.github/workflows/cd.yml`) from `env/dev.bicepparam`, `env/test.bicepparam` and `env/prod.bicepparam`: one image is built and scanned once, then promoted by digest, with approval before `test` and `prod`. The one-time setup (OIDC identities, role assignments, GitHub environments and variables) is in [docs/delivery.md](../../docs/delivery.md). The steps below are the manual path: a first deployment, a new customer, or a repair.
 
 Prerequisites: Azure CLI with Bicep (`az bicep install`), permission to create resources and role assignments in the target resource group (Owner, or Contributor + Role Based Access Control Administrator), and the ability to create an Entra app registration.
 
@@ -208,7 +211,7 @@ az deployment group create  -g "$RG" -f infra/bicep/main.bicep -p infra/bicep/ma
 az deployment group show -g "$RG" -n fabricops --query properties.outputs
 ```
 
-When `containerRegistryName` names an ACR in the same resource group, the template grants the reader identity `AcrPull` and pulls with it. For a registry elsewhere, set `containerRegistryServer` and grant `AcrPull` to the `readerIdentityPrincipalId` output yourself. The first revision fails to pull until that grant exists. After granting, restart the revision.
+When `containerRegistryName` names an ACR in the same resource group, the template grants the reader identity `AcrPull` and pulls with it. For a registry in another resource group (the shared registry the pipeline uses), set `containerRegistryServer` to its login server and `containerRegistryResourceId` to its resource id: the template then grants the reader identity `AcrPull` on it through `modules/acr-pull.bicep` before it creates the app, so the deploying principal needs a role assignment right on that registry and the right to create deployments in the registry's resource group, because the module is a nested deployment there (docs/delivery.md, section 5). If you set only `containerRegistryServer`, grant `AcrPull` to the `readerIdentityPrincipalId` output yourself; the first revision fails to pull until that grant exists. After granting, restart the revision.
 
 ### 4. Upload the estate contracts (rest mode)
 
@@ -400,6 +403,7 @@ az bicep lint --file infra/bicep/main.bicep
 for f in infra/bicep/main.bicepparam infra/bicep/examples/*.bicepparam; do
   az bicep build-params --file "$f" --stdout > /dev/null
 done
+bash scripts/validate-bicep.sh      # main.bicep, main.bicepparam, examples and env/*.bicepparam, plus the prod write-switch check
 ```
 
-CI (`.github/workflows/ci.yml`) runs the build steps on every push and pull request.
+The `env/*.bicepparam` files read the image, registry and API client id from environment variables (`CONTAINER_IMAGE`, `ACR_LOGIN_SERVER`, `ACR_RESOURCE_ID`, `ENTRA_API_CLIENT_ID`, and optionally `FABRIC_MODE`) with no defaults; `scripts/validate-bicep.sh` supplies placeholders. CI (`.github/workflows/ci.yml`) runs the build steps and `scripts/validate-bicep.sh` on every push and pull request, and `.github/workflows/whatif.yml` shows the what-if for `dev` on pull requests.
