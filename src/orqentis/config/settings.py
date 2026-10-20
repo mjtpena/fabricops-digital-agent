@@ -15,6 +15,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Token scopes of the public cloud. Sovereign clouds use other resources (see docs/development.md).
 PUBLIC_FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 PUBLIC_POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
+# Azure Database for PostgreSQL (public cloud). Sovereign clouds use another resource (ORQENTIS_POSTGRES_SCOPE).
+PUBLIC_POSTGRES_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
 
 
 class FabricMode(StrEnum):
@@ -44,6 +46,22 @@ class AuthMode(StrEnum):
 class ApiAuthMode(StrEnum):
     DEV_HEADERS = "dev_headers"  # local development only
     EASY_AUTH = "easy_auth"  # Azure Container Apps / App Service built-in Entra authentication
+
+
+class StorageBackend(StrEnum):
+    LOCAL = "local"  # SQLite, filesystem evidence and a JSONL audit log: development, tests, mock mode, `make demo`
+    POSTGRES = "postgres"  # PostgreSQL system of record + Blob evidence and audit anchors (deployed; ADR-0008, 0017)
+
+
+class PostgresAuth(StrEnum):
+    ENTRA = "entra"  # Microsoft Entra access token as the password (managed identity in Azure). The only deployed mode
+    NONE = "none"  # no password at all, for a throwaway local container with trust authentication
+
+
+class PostgresSslMode(StrEnum):
+    VERIFY_FULL = "verify-full"  # TLS, certificate chain and host name verified (default)
+    REQUIRE = "require"  # TLS, certificate not verified
+    DISABLE = "disable"  # no TLS, for a throwaway local container only
 
 
 class ClockMode(StrEnum):
@@ -102,6 +120,36 @@ class Settings(BaseSettings):
     collection_max_lookback_hours: int = Field(default=168, ge=1, le=24 * 90)
     collection_overlap_minutes: int = Field(default=15, ge=0, le=24 * 60)
 
+    # Storage (ADR-0008, ADR-0017). ``local``: SQLite files, filesystem evidence and a JSONL audit log under data_dir.
+    # ``postgres``: the PostgreSQL system of record and Blob evidence, safe at two or more replicas. Deployed
+    # environments (dev, test, prod) must use ``postgres``. There is no password setting: the database accepts an
+    # Entra access token only.
+    storage_backend: StorageBackend = StorageBackend.LOCAL
+    postgres_host: str | None = None
+    postgres_port: int = Field(default=5432, ge=1, le=65535)
+    postgres_database: str = "orqentis"
+    # The database role of the app: for a managed identity, the identity's name (id-<prefix>-reader).
+    postgres_user: str | None = None
+    postgres_schema: str = Field(default="orqentis", pattern=r"^[a-z_][a-z0-9_]{0,62}$")
+    postgres_auth: PostgresAuth = PostgresAuth.ENTRA
+    postgres_scope: str = PUBLIC_POSTGRES_SCOPE
+    postgres_ssl_mode: PostgresSslMode = PostgresSslMode.VERIFY_FULL
+    postgres_ssl_root_cert: Path | None = None  # extra CA bundle; unset: the system trust store
+    # Connections per replica. Burstable B1ms allows roughly 50 in total, so replicas x pool_max must stay well below.
+    postgres_pool_min: int = Field(default=1, ge=0, le=100)
+    postgres_pool_max: int = Field(default=8, ge=2, le=100)  # migrations hold a lock on one connection
+    postgres_command_timeout_seconds: float = Field(default=30.0, gt=0, le=600)
+    # Apply pending schema migrations at start, behind a database advisory lock (safe with several replicas).
+    # false: run `orqentis db migrate` as a separate step; the app then refuses to start on an older schema.
+    postgres_migrate_on_start: bool = True
+    # Evidence, reports and audit anchors live in Blob storage (Entra auth, no account keys). The URL is a storage
+    # account blob endpoint, or a OneLake one (then the container is the workspace and the prefix the item path).
+    evidence_blob_url: str | None = None
+    evidence_container: str = "evidence"
+    evidence_path_prefix: str = ""
+    audit_anchor_container: str = "audit-anchors"
+    audit_anchor_path_prefix: str = ""
+
     # Agent / reasoning
     reasoner: ReasonerKind = ReasonerKind.RULE_BASED
     llm_provider: LlmProvider = LlmProvider.AZURE_OPENAI
@@ -135,8 +183,15 @@ class Settings(BaseSettings):
     scheduler_sla_sweep_interval_minutes: int = Field(default=15, ge=1, le=24 * 60)
     scheduler_catalog_refresh_enabled: bool = True
     scheduler_catalog_refresh_interval_minutes: int = Field(default=60, ge=1, le=7 * 24 * 60)
+    # Anchor the audit chain head (sequence + hash) to an immutable blob (postgres backend).
+    scheduler_audit_anchor_enabled: bool = True
+    scheduler_audit_anchor_interval_minutes: int = Field(default=15, ge=1, le=24 * 60)
     investigation_max_concurrency: int = Field(default=2, ge=1, le=16)
     investigation_timeout_seconds: int = Field(default=600, ge=30, le=6 * 3600)
+    # Durable investigation jobs (postgres backend): every replica polls for queued jobs and claims them; a claim that
+    # is not renewed within the TTL (a crashed replica) is released for another replica to take over.
+    investigation_poll_interval_seconds: float = Field(default=2.0, gt=0, le=60)
+    investigation_claim_ttl_seconds: float = Field(default=120.0, ge=10, le=3600)
 
     # Startup and readiness. The container is built in the background; /health is liveness only.
     startup_grace_seconds: float = Field(default=10.0, ge=0, le=60)
@@ -224,6 +279,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ORQENTIS_SCHEDULER_LEASE_TTL_SECONDS must be at least three times ORQENTIS_SCHEDULER_TICK_SECONDS"
             )
+        if self.postgres_pool_min > self.postgres_pool_max:
+            raise ValueError("ORQENTIS_POSTGRES_POOL_MIN must be <= ORQENTIS_POSTGRES_POOL_MAX")
+        if self.investigation_claim_ttl_seconds < self.investigation_poll_interval_seconds * 3:
+            raise ValueError(
+                "ORQENTIS_INVESTIGATION_CLAIM_TTL_SECONDS must be at least three times "
+                "ORQENTIS_INVESTIGATION_POLL_INTERVAL_SECONDS"
+            )
+        if self.storage_backend is StorageBackend.POSTGRES:
+            self._check_postgres()
         if self.reasoner is ReasonerKind.AGENT_FRAMEWORK:
             if self.llm_provider is LlmProvider.AZURE_OPENAI and not (
                 self.azure_openai_endpoint and self.azure_openai_deployment
@@ -238,6 +302,42 @@ class Settings(BaseSettings):
                     "ORQENTIS_FOUNDRY_PROJECT_ENDPOINT and ORQENTIS_FOUNDRY_MODEL"
                 )
         return self
+
+    def _check_postgres(self) -> None:
+        missing = [
+            f"ORQENTIS_{name.upper()}"
+            for name, value in (
+                ("postgres_host", self.postgres_host),
+                ("postgres_user", self.postgres_user),
+                ("evidence_blob_url", self.evidence_blob_url),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(f"ORQENTIS_STORAGE_BACKEND=postgres requires {', '.join(missing)}")
+        if self.deployment_environment != "local" and (
+            self.postgres_auth is not PostgresAuth.ENTRA or self.postgres_ssl_mode is PostgresSslMode.DISABLE
+        ):
+            raise ValueError(
+                "ORQENTIS_POSTGRES_AUTH=none and ORQENTIS_POSTGRES_SSL_MODE=disable are only permitted when "
+                "deployment_environment=local (a throwaway test container)"
+            )
+        parts = urlsplit(self.evidence_blob_url or "")
+        if parts.scheme != "https" and not (parts.scheme == "http" and _is_loopback(parts.hostname or "")):
+            raise ValueError("ORQENTIS_EVIDENCE_BLOB_URL must be an https URL (http only for a loopback emulator)")
+
+    def check_storage_for_environment(self) -> None:
+        """Deployed environments keep their state in PostgreSQL and Blob, never in local files.
+
+        Two replicas, or one replica that restarts, on SQLite files would each hold a different truth (and a
+        different audit chain). This is checked where the process starts (``orqentis serve``) and when the
+        container is built, so a misconfigured deployment stops instead of quietly losing data.
+        """
+        if self.deployment_environment != "local" and self.storage_backend is StorageBackend.LOCAL:
+            raise ValueError(
+                f"ORQENTIS_DEPLOYMENT_ENVIRONMENT={self.deployment_environment} requires "
+                "ORQENTIS_STORAGE_BACKEND=postgres: local SQLite and file storage are for development only"
+            )
 
     def check_bind_host(self, host: str) -> None:
         """Refuse to serve ``dev_headers`` (self-asserted identities and roles) on a non-loopback address."""

@@ -141,9 +141,9 @@ def _authority(settings: Settings) -> dict[str, str]:
     return {"authority": settings.authority_host} if settings.authority_host else {}
 
 
-def build_async_credential(settings: Settings) -> AsyncTokenCredential:
-    """Async credential for the FabricOps operating identity, chosen by ``settings.auth_mode``."""
-    mode, client_id = settings.auth_mode, settings.managed_identity_client_id
+def build_async_credential(settings: Settings, mode: AuthMode | None = None) -> AsyncTokenCredential:
+    """Async credential for the FabricOps operating identity, chosen by ``settings.auth_mode`` (or ``mode``)."""
+    mode, client_id = mode or settings.auth_mode, settings.managed_identity_client_id
     options = {**_async_transport_options(), **_authority(settings)}
     if mode is AuthMode.DEFAULT:
         # Passing managed_identity_client_id=None would override AZURE_CLIENT_ID, so only pass it when set.

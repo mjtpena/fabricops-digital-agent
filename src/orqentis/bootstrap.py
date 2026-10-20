@@ -12,15 +12,16 @@ import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from orqentis.actions.gateway import ActionGateway
 from orqentis.agents.investigator import FabricOpsInvestigator
 from orqentis.agents.reasoning import Reasoner
 from orqentis.agents.rule_based import RuleBasedReasoner
-from orqentis.approvals.provider import LocalApprovalProvider
+from orqentis.approvals.provider import ApprovalProvider, LocalApprovalProvider
 from orqentis.approvals.service import ApprovalService
 from orqentis.config.clock import Clock, FixedClock, SystemClock
-from orqentis.config.settings import ClockMode, FabricMode, ReasonerKind, Settings
+from orqentis.config.settings import ClockMode, FabricMode, PostgresAuth, ReasonerKind, Settings, StorageBackend
 from orqentis.contracts import ContractsNotConfiguredError, EstateContracts, load_contracts
 from orqentis.contracts.lineage import LineageScanner
 from orqentis.domain.incidents import Incident
@@ -38,7 +39,8 @@ from orqentis.incidents.service import IncidentService
 from orqentis.incidents.sla import SLAEvaluator
 from orqentis.incidents.sla_sweep import SLASweeper
 from orqentis.incidents.workflows.pipeline_failure import PipelineFailureWorkflow, WorkflowDependencies
-from orqentis.observability.audit import LocalAuditLog
+from orqentis.observability.anchors import AnchorableAudit, AuditAnchorStore, AuditAnchorTask
+from orqentis.observability.audit import AuditTrail, LocalAuditLog
 from orqentis.observability.logging import get_logger
 from orqentis.policies.engine import PolicyEngine
 from orqentis.reports.builder import ReportBuilder
@@ -46,12 +48,14 @@ from orqentis.reports.publisher import ReportPublisher
 from orqentis.runbooks.catalog import RunbookCatalog
 from orqentis.runtime.collection import CollectionService
 from orqentis.runtime.investigations import AutoInvestigationTask, InvestigationJobRunner
+from orqentis.runtime.job_store import JobStore
 from orqentis.runtime.lease import InProcessLeaderLease, LeaderLease
+from orqentis.runtime.mutex import InProcessMutex, Mutex
 from orqentis.runtime.scheduler import JobContext, JobSpec, Scheduler
 from orqentis.storage.dependency_store import SqliteDependencyStore
-from orqentis.storage.event_store import LocalEventStore
-from orqentis.storage.evidence_store import LocalEvidenceStore
-from orqentis.storage.incidents import SqliteIncidentRepository
+from orqentis.storage.event_store import EventStore, LocalEventStore
+from orqentis.storage.evidence_store import EvidenceStore, LocalEvidenceStore
+from orqentis.storage.incidents import IncidentRepository, SqliteIncidentRepository
 from orqentis.storage.sqlite import SqliteDatabase
 from orqentis.telemetry.collectors import (
     CapacityCollector,
@@ -67,8 +71,12 @@ from orqentis.tools.read_tools import ReadToolDependencies, build_read_tools
 from orqentis.tools.registry import ToolRegistry
 from orqentis.topology.catalog import EstateCatalog
 from orqentis.topology.environment_audit import EnvironmentChangeRecorder
-from orqentis.topology.graph import DependencyGraph
+from orqentis.topology.graph import DependencyGraph, DependencyStore
 from orqentis.topology.refresh import CatalogRefresher
+
+if TYPE_CHECKING:  # the adapters import their SDKs; keep them out of the import path of local runs
+    from orqentis.storage.blob import BlobStorage
+    from orqentis.storage.postgres import PostgresStorage
 
 _log = get_logger(__name__)
 
@@ -84,9 +92,9 @@ class Container:
     write_client: FabricWriteClient
     catalog: EstateCatalog
     graph: DependencyGraph
-    event_store: LocalEventStore
-    evidence_store: LocalEvidenceStore
-    audit: LocalAuditLog
+    event_store: EventStore
+    evidence_store: EvidenceStore
+    audit: AuditTrail
     runbooks: RunbookCatalog
     policy: PolicyEngine
     incidents: IncidentService
@@ -106,6 +114,8 @@ class Container:
     lease: LeaderLease
     scheduler: Scheduler
     _databases: tuple[SqliteDatabase, ...]
+    # Closers of the PostgreSQL pool, the Blob client and the credential (empty with local storage).
+    _closers: tuple[Callable[[], Awaitable[None]], ...] = ()
 
     async def collect_and_detect(self) -> tuple[IngestionResult, list[Incident]]:
         """Collect, then run detection. Serialised with the scheduled collection (see ``CollectionService``)."""
@@ -115,6 +125,165 @@ class Container:
         await self.fabric.aclose()
         for db in self._databases:
             db.close()
+        for close in reversed(self._closers):
+            await close()
+
+
+@dataclass
+class _Storage:
+    """The storage adapters one backend provides (see ``_build_local_storage`` and ``_build_postgres_storage``)."""
+
+    events: EventStore
+    incidents: IncidentRepository
+    evidence: EvidenceStore
+    audit: AuditTrail
+    approvals: ApprovalProvider
+    dependencies: DependencyStore
+    lease: LeaderLease
+    mutex: Mutex
+    # None: the investigation runner keeps its jobs in memory (one process).
+    jobs: JobStore | None = None
+    # Set with PostgreSQL: where the audit head is anchored, and the chain that is anchored.
+    anchors: AuditAnchorStore | None = None
+    audit_head: AnchorableAudit | None = None
+    databases: tuple[SqliteDatabase, ...] = ()
+    closers: tuple[Callable[[], Awaitable[None]], ...] = ()
+
+
+def _build_local_storage(
+    settings: Settings, clock: Clock, cleanup: list[Callable[[], Awaitable[None] | None]]
+) -> _Storage:
+    """SQLite files, filesystem evidence and a JSONL audit log under ``data_dir`` (development, tests, the demo)."""
+    state_db = SqliteDatabase(settings.state_db_path)
+    cleanup.append(state_db.close)
+    events_db = SqliteDatabase(settings.event_store_path)
+    cleanup.append(events_db.close)
+    return _Storage(
+        events=LocalEventStore(events_db),
+        incidents=SqliteIncidentRepository(state_db),
+        evidence=LocalEvidenceStore(settings.evidence_dir),
+        audit=LocalAuditLog(settings.audit_log_path, clock),
+        approvals=LocalApprovalProvider(state_db),
+        dependencies=SqliteDependencyStore(state_db),
+        lease=InProcessLeaderLease(clock),
+        mutex=InProcessMutex(),
+        databases=(state_db, events_db),
+    )
+
+
+@dataclass
+class PostgresSession:
+    """An open connection pool to the PostgreSQL system of record plus the Blob storage next to it."""
+
+    storage: PostgresStorage
+    blob: BlobStorage
+    _closers: tuple[Callable[[], Awaitable[None]], ...]
+
+    async def aclose(self) -> None:
+        for close in reversed(self._closers):
+            await close()
+
+
+async def open_postgres_session(
+    settings: Settings,
+    clock: Clock,
+    *,
+    migrate: bool | None,
+    cleanup: list[Callable[[], Awaitable[None] | None]] | None = None,
+) -> PostgresSession:
+    """Connect to PostgreSQL and Blob storage with the deployment's Entra identity (ADR-0008, ADR-0017).
+
+    One Entra credential serves both: the access token for PostgreSQL is the connection password (renewed per new
+    connection from the provider's cache), and the Blob client signs requests with the same credential. It follows
+    ``llm_auth_mode`` when set, because these are Azure resources of the deployment (the reader managed identity), not
+    the Fabric tenant, which a cross-tenant service principal reaches.
+
+    ``migrate``: True applies pending migrations, False insists that none are pending, None does neither
+    (``orqentis db status``).
+    """
+    from orqentis.fabric.rest.auth import AzureIdentityTokenProvider, build_async_credential
+    from orqentis.storage.blob import BlobStorage
+    from orqentis.storage.postgres import PostgresConfig, PostgresStorage
+
+    assert settings.postgres_host and settings.postgres_user and settings.evidence_blob_url  # checked by Settings
+    track = cleanup if cleanup is not None else []
+    credential = build_async_credential(settings, settings.llm_auth_mode or settings.auth_mode)
+    tokens = AzureIdentityTokenProvider(credential)
+    track.append(tokens.close)  # closes the credential
+    try:
+        blob = BlobStorage.open(
+            settings.evidence_blob_url,
+            credential,
+            evidence_container=settings.evidence_container,
+            evidence_prefix=settings.evidence_path_prefix,
+            anchor_container=settings.audit_anchor_container,
+            anchor_prefix=settings.audit_anchor_path_prefix,
+        )
+        track.append(blob.close)
+
+        async def database_token() -> str:
+            return await tokens.get_token(settings.postgres_scope)
+
+        config = PostgresConfig(
+            host=settings.postgres_host,
+            port=settings.postgres_port,
+            user=settings.postgres_user,
+            database=settings.postgres_database,
+            schema=settings.postgres_schema,
+            auth="entra" if settings.postgres_auth is PostgresAuth.ENTRA else "none",
+            ssl_mode=settings.postgres_ssl_mode.value,
+            ssl_root_cert=settings.postgres_ssl_root_cert,
+            pool_min=settings.postgres_pool_min,
+            pool_max=settings.postgres_pool_max,
+            command_timeout_seconds=settings.postgres_command_timeout_seconds,
+        )
+        pg = await PostgresStorage.open(
+            config,
+            database_token if settings.postgres_auth is PostgresAuth.ENTRA else None,
+            clock,
+            anchors=blob.anchors,
+            migrate=migrate,
+        )
+    except BaseException:
+        if cleanup is None:
+            for close in reversed(track):
+                with contextlib.suppress(Exception):
+                    outcome = close()
+                    if inspect.isawaitable(outcome):
+                        await outcome
+        raise
+    track.append(pg.close)
+    return PostgresSession(pg, blob, (tokens.close, blob.close, pg.close))
+
+
+async def _build_postgres_storage(
+    settings: Settings, clock: Clock, cleanup: list[Callable[[], Awaitable[None] | None]]
+) -> _Storage:
+    """The PostgreSQL system of record and Blob evidence; safe at two or more replicas."""
+    session = await open_postgres_session(settings, clock, migrate=settings.postgres_migrate_on_start, cleanup=cleanup)
+    pg, blob = session.storage, session.blob
+    return _Storage(
+        events=pg.events,
+        incidents=pg.incidents,
+        evidence=blob.evidence,
+        audit=pg.audit,
+        approvals=pg.approvals,
+        dependencies=pg.dependencies,
+        lease=pg.lease,
+        mutex=pg.mutex,
+        jobs=pg.jobs,
+        anchors=blob.anchors,
+        audit_head=pg.audit,
+        closers=session._closers,
+    )
+
+
+async def _build_storage(
+    settings: Settings, clock: Clock, cleanup: list[Callable[[], Awaitable[None] | None]]
+) -> _Storage:
+    if settings.storage_backend is StorageBackend.POSTGRES:
+        return await _build_postgres_storage(settings, clock, cleanup)
+    return _build_local_storage(settings, clock, cleanup)
 
 
 def reset_local_state(settings: Settings) -> None:
@@ -228,7 +397,10 @@ async def _build_container(
     clock: Clock | None,
     cleanup: list[Callable[[], Awaitable[None] | None]],
 ) -> Container:
+    settings.check_storage_for_environment()
     if reset:
+        if settings.storage_backend is not StorageBackend.LOCAL:
+            raise ValueError("reset deletes local files only; it is refused for the PostgreSQL storage backend")
         reset_local_state(settings)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -241,14 +413,9 @@ async def _build_container(
             else SystemClock()
         )
 
-    state_db = SqliteDatabase(settings.state_db_path)
-    cleanup.append(state_db.close)
-    events_db = SqliteDatabase(settings.event_store_path)
-    cleanup.append(events_db.close)
-    event_store = LocalEventStore(events_db)
-    repository = SqliteIncidentRepository(state_db)
-    evidence_store = LocalEvidenceStore(settings.evidence_dir)
-    audit = LocalAuditLog(settings.audit_log_path, clock)
+    storage = await _build_storage(settings, clock, cleanup)
+    event_store, repository = storage.events, storage.incidents
+    evidence_store, audit = storage.evidence, storage.audit
 
     recorder: EnvironmentChangeRecorder | None = None
     if contracts.source_sha256 is not None:  # rest mode: say which declared environments change a classification
@@ -262,7 +429,7 @@ async def _build_container(
     catalog = await EstateCatalog.load(fabric, contracts)
     if recorder is not None:
         await recorder.record_loaded(catalog)
-    dependency_store = SqliteDependencyStore(state_db)
+    dependency_store = storage.dependencies
     await dependency_store.replace_all(await fabric.dependencies.list_dependencies())
     graph = await DependencyGraph.from_store(dependency_store, catalog)
 
@@ -279,7 +446,7 @@ async def _build_container(
 
     incidents = IncidentService(repository, event_store, audit, clock)
     approvals = ApprovalService(
-        LocalApprovalProvider(state_db), incidents, audit, clock, ttl=timedelta(minutes=settings.approval_ttl_minutes)
+        storage.approvals, incidents, audit, clock, ttl=timedelta(minutes=settings.approval_ttl_minutes)
     )
     if write_client is None:
         write_client = (
@@ -362,7 +529,7 @@ async def _build_container(
     detection = DetectionEngine(incidents, clock, events=event_store)
 
     # Autonomous runtime: the scheduler is built here but started by the API lifespan (see runtime/service.py).
-    detection_runner = DetectionRunner(event_store, detection)
+    detection_runner = DetectionRunner(event_store, detection, mutex=storage.mutex)
     collection = CollectionService(ingestor, detection_runner)
     catalog_refresher = CatalogRefresher(fabric, contracts, catalog, graph, dependency_store, incidents, audit, clock)
     sla_sweeper = SLASweeper(
@@ -374,8 +541,11 @@ async def _build_container(
         incidents,
         audit,
         clock,
+        store=storage.jobs,
         max_concurrency=settings.investigation_max_concurrency,
         timeout=investigation_timeout,
+        poll_interval=timedelta(seconds=settings.investigation_poll_interval_seconds),
+        claim_ttl=timedelta(seconds=settings.investigation_claim_ttl_seconds),
     )
     auto_investigation = AutoInvestigationTask(
         incidents,
@@ -387,8 +557,9 @@ async def _build_container(
         orphan_after=investigation_timeout + timedelta(minutes=5),
     )
 
-    # Jobs receive a JobContext (lease holder + fencing token). Nothing here writes through a fenced store yet; the
-    # PostgreSQL work will pass it down so a deposed leader's late write is rejected.
+    # Jobs receive a JobContext (lease holder + fencing token) and run inside a Fence (runtime/fencing.py): with
+    # PostgreSQL every write they make is checked against the lease in its own transaction, so a deposed leader's late
+    # write is refused. The local adapters belong to one process and ignore it.
     async def collect_job(ctx: JobContext) -> None:
         await collection.run()
 
@@ -401,38 +572,55 @@ async def _build_container(
     async def catalog_refresh_job(ctx: JobContext) -> None:
         await catalog_refresher.refresh()
 
-    lease = InProcessLeaderLease(clock)
+    lease = storage.lease
+    job_specs = [
+        JobSpec(
+            "collect-detect",
+            timedelta(minutes=settings.scheduler_collect_interval_minutes),
+            collect_job,
+            enabled=settings.scheduler_collect_enabled,
+        ),
+        JobSpec(
+            "auto-investigate",
+            timedelta(minutes=settings.scheduler_auto_investigate_interval_minutes),
+            auto_investigate_job,
+            enabled=settings.scheduler_auto_investigate_enabled,
+        ),
+        # The next two start one interval after the scheduler: the first collection must have run before SLAs
+        # are judged, and the catalog was loaded a moment ago.
+        JobSpec(
+            "sla-sweep",
+            timedelta(minutes=settings.scheduler_sla_sweep_interval_minutes),
+            sla_sweep_job,
+            enabled=settings.scheduler_sla_sweep_enabled,
+            run_immediately=False,
+        ),
+        JobSpec(
+            "catalog-refresh",
+            timedelta(minutes=settings.scheduler_catalog_refresh_interval_minutes),
+            catalog_refresh_job,
+            enabled=settings.scheduler_catalog_refresh_enabled,
+            run_immediately=False,
+        ),
+    ]
+    if storage.anchors is not None and storage.audit_head is not None:
+        # Copies the audit chain head (sequence + hash) to an immutable blob, so that rewriting the database cannot
+        # also rewrite what the chain is checked against (observability/anchors.py).
+        anchor_task = AuditAnchorTask(storage.audit_head, storage.anchors, clock)
+
+        async def audit_anchor_job(ctx: JobContext) -> None:
+            await anchor_task.run()
+
+        job_specs.append(
+            JobSpec(
+                "audit-anchor",
+                timedelta(minutes=settings.scheduler_audit_anchor_interval_minutes),
+                audit_anchor_job,
+                enabled=settings.scheduler_audit_anchor_enabled,
+            )
+        )
     scheduler = Scheduler(
-        [
-            JobSpec(
-                "collect-detect",
-                timedelta(minutes=settings.scheduler_collect_interval_minutes),
-                collect_job,
-                enabled=settings.scheduler_collect_enabled,
-            ),
-            JobSpec(
-                "auto-investigate",
-                timedelta(minutes=settings.scheduler_auto_investigate_interval_minutes),
-                auto_investigate_job,
-                enabled=settings.scheduler_auto_investigate_enabled,
-            ),
-            # The next two start one interval after the scheduler: the first collection must have run before SLAs
-            # are judged, and the catalog was loaded a moment ago.
-            JobSpec(
-                "sla-sweep",
-                timedelta(minutes=settings.scheduler_sla_sweep_interval_minutes),
-                sla_sweep_job,
-                enabled=settings.scheduler_sla_sweep_enabled,
-                run_immediately=False,
-            ),
-            JobSpec(
-                "catalog-refresh",
-                timedelta(minutes=settings.scheduler_catalog_refresh_interval_minutes),
-                catalog_refresh_job,
-                enabled=settings.scheduler_catalog_refresh_enabled,
-                run_immediately=False,
-            ),
-        ],
+        job_specs,
         lease,
         clock,
         lease_ttl=timedelta(seconds=settings.scheduler_lease_ttl_seconds),
@@ -478,5 +666,6 @@ async def _build_container(
         investigation_jobs=investigation_jobs,
         lease=lease,
         scheduler=scheduler,
-        _databases=(state_db, events_db),
+        _databases=storage.databases,
+        _closers=storage.closers,
     )
