@@ -6,7 +6,7 @@ link to a PR, a CI run, a log or a document, never a claim.
 
 Status values: `not started`, `in progress`, `blocked`, `done`.
 
-Last updated: 2026-10-20 (Wave 1 merged).
+Last updated: 2026-10-20 (Wave 2 started).
 
 ## 1. Definition of done
 
@@ -38,10 +38,10 @@ one PR to `main`. Briefs live in [`docs/programme/briefs/`](programme/briefs/).
 | WS3 | Identity and API hardening | 1 | | merged | `ws3-identity` (Sonnet) | [#3](https://github.com/mjtpena/fabricops-digital-agent/pull/3) | Review 1 + independent red-team ([comment](https://github.com/mjtpena/fabricops-digital-agent/pull/3#issuecomment-6281103223)) → 19 findings fixed; verification: all fixed, starred fixes proven by revert, 8-process race gives exactly 1 write; 406 tests, 182 security tests |
 | WS4 | Delivery pipeline | 1 | A6 (done) for the push dry run | merged | `ws4-delivery` (Sonnet) | [#6](https://github.com/mjtpena/fabricops-digital-agent/pull/6) | f264048: review 1 (15 findings) + verification round (immutable OIDC subjects, environment-first ordering, ruleset integration_id) all fixed; Azure Linux 3 base, Trivy 0 findings; orchestrator re-ran gates green |
 | WS5 | Live sandbox estate and live test harness | 1 | D8, A3–A5 | merged | orchestrator's local subagent (Sonnet, shares the `az` login) | [#7](https://github.com/mjtpena/fabricops-digital-agent/pull/7) | d06b957: estate live (4 workspaces, idempotent create/teardown, 6 reversible injectors, 29 live tests); 4/6 injectors open incidents (refresh failure, SLA breach need WS7); 2 adapter mapping bugs + Power BI privacy-marker redaction fixed; review minors fixed; no tenant ids outside the live log; capacity paused. WS7 inputs: generic notebook-exception signature, schema-drift column extraction, signature_match redaction over-match, D9 |
-| WS6 | Durable storage and stateless app | 2 | D1, WS1 | not started | | | |
+| WS6 | Durable storage and stateless app | 2 | D1, WS1 | in progress | `ws6-storage` (Sonnet) | | |
 | WS7 | Signals and detection breadth | 2 | D2, WS1, WS5 | not started | | | |
-| WS8 | Notifications and web UI | 2 | D3, WS3 (WS6 preferred) | not started | | | |
-| WS9 | Observability and operations | 2 | WS1 (+WS6) | not started | | | |
+| WS8 | Notifications and web UI | 2 | D3, WS3 (WS6 preferred) | in progress | `ws8-notify-ui` (Sonnet) | | |
+| WS9 | Observability and operations | 2 | WS1 (+WS6) | in progress | `ws9-observability` (Sonnet) | | |
 | WS10 | LLM reasoner in production | 3 | D7, WS5, WS7 | not started | | | |
 | WS11 | Supervised write path | 3 | WS3, WS6 | not started | | | Carries forward from WS3 verification: reconcile approvals stuck in `EXECUTING` after a crash (visibility + alert); audit the execution claim before the write and record cancellation as `UNKNOWN`; claim before moving the incident to REMEDIATING; log a failed final state/version check; decide whether a policy tightening invalidates earlier lower-role approvals (as risk escalation does) |
 | WS12 | Independent security review | 3 | Waves 1–2 | not started | | | |
@@ -63,7 +63,7 @@ Hot files (additive changes only; merged in dependency order): `src/orqentis/boo
 | D5 | Monthly cost cap; approval for billable resources | Cap proposed in the kickoff message; budget with 50/80/100% alerts | Accepted: USD 750/month. Billing currency is AUD, so the budget is AUD 1,100 (≈ USD 750) with alerts at 50/80/100% actual and 100% forecast to the owner's work email. A1, A2 withdrawn (D8); A3–A6 approved | 2026-10-20 |  |
 | D6 | Merge authority | Orchestrator merges workstream PRs after green CI and the review gate; owner approves every `prod` deploy and `v1.0.0`; owner does repo-admin settings | Accepted as recommended | 2026-10-20 |  |
 | D7 | LLM resource and model | New dedicated Azure OpenAI account in Australia East; `gpt-5.5` GlobalStandard; WS10 compares newer deployments on the golden set | Accepted as recommended | 2026-10-20 | [0012](adr/0012-llm-hosting.md) |
-| D9 | How FabricOps reads semantic-model refresh failures (live finding: refresh history needs dataset **Write**, i.e. workspace Contributor; Read/Build cannot be granted to service principals; Fabric job API does not cover semantic models; Viewer can read a single refresh by request id) | Do **not** give the reader identity write. Primary: Fabric workspace monitoring (semantic-model logs in the monitoring Eventhouse, read with Viewer), validated by a WS7 spike; pipeline-triggered refreshes already surface as pipeline activity failures. Fallback: read-only admin API (refreshables) via a dedicated security group in the *SP read-only admin APIs* tenant setting (tenant change, owner approval) | pending | | |
+| D9 | How FabricOps reads semantic-model refresh failures (live finding: refresh history needs dataset **Write**, i.e. workspace Contributor; Read/Build cannot be granted to service principals; Fabric job API does not cover semantic models; Viewer can read a single refresh by request id) | Do **not** give the reader identity write. Primary: Fabric workspace monitoring (semantic-model logs in the monitoring Eventhouse, read with Viewer), validated by a WS7 spike; pipeline-triggered refreshes already surface as pipeline activity failures. Fallback: read-only admin API (refreshables) via a dedicated security group in the *SP read-only admin APIs* tenant setting (tenant change, owner approval) | **Accepted:** the reader identity never gets write. Primary source: Fabric workspace monitoring, validated by a WS7 spike. The read-only admin API is a fallback only with the owner's further approval | 2026-10-20 | |
 | D8 | Sandbox Fabric capacity | New F2 `fabricopssandbox` | **Use the existing `fabricdemocap2026` (F4, Australia East, `RG-FABRICDEMO`, *Sandbox Environment 2026*). The orchestrator may resume it for live work and pause it when idle.** Consequences: USD 0.84/h while running; pausing also takes its 4 other workspaces offline; their load is part of the capacity signals; no new capacity is created (A1 and A2 withdrawn) | 2026-10-20 | |
 
 ## 4. Blockers and risks
@@ -80,6 +80,7 @@ Hot files (additive changes only; merged in dependency order): `src/orqentis/boo
 | R6 | Cookie (ID-token) sessions in the WS8 UI need CSRF protection: JSON-only state-changing routes and an Origin check | WS8 | open |
 | R7 | Approval decisions and single-use execution were not atomic in pre-existing code (5 concurrent executes → 5 writes; approve/reject race lost the rejection), and execute did not re-check the current policy's role. Invariant 7 gap found by the WS3 red-team; being fixed in PR #3 with compare-and-set transitions. No live write was possible (rest mode holds the disabled write client) | WS3 | fixed in PR #3 (verified; merges with it) |
 | R8 | Until WS6, the old and new revisions overlap during a deploy and both run schedulers against the same files (audit chain fork risk). Nothing is deployed before WS6; interim mitigations in WS1 | WS1 / WS6 | open |
+| R10 | `infra/bicep/README.md` §1: `az ad app update --set api.requestedAccessTokenVersion=2` fails on a brand-new registration ("Couldn't find 'api'"); setting it through Microsoft Graph works. Fix the documented script before the portability rehearsal | orchestrator | open |
 | R9 | WS1 (≈4.3k lines) and WS2 (≈5.7k lines) exceed the ≈1.5k-line PR guideline (much of it tests and docs). Accepted as single PRs to avoid re-splitting cost; reviewed in full | orchestrator | accepted |
 
 ## 5. Cost
@@ -102,13 +103,14 @@ Spend to date (programme resources): ≈ USD 2: sandbox capacity ≈ 2.0 h at US
 | 2026-10-20 | Kickoff: repo verified, live tenant discovered read-only, WS0 opened, ledger created |
 | 2026-10-20 | D8: sandbox uses the existing F4 `fabricdemocap2026`, with resume/pause authorised |
 | 2026-10-20 | Wave 1 merged to `main` in dependency order: #1 WS0, #2 ledger, #3 WS3, #5 WS2, #4 WS1, #6 WS4, #7 WS5. Repository made public (B1). Base image moved to MCR Azure Linux 3 after ECR Public also rate-limited runners |
+| 2026-10-20 | Wave 2 started: owner approved B1–B9 and decided D9; WS6, WS8, WS9 sessions started; GitHub environments and rulesets, dev API registration, dev deploy and what-if identities and repository variables configured; first CD run to dev |
 | 2026-10-20 | WS5 (#7) approved pending CI; D9 raised (refresh history needs dataset Write) |
 | 2026-10-20 | All Wave 1 PRs (#3–#6) approved after review, independent red-team (WS3) and verification rounds; merges wait on CI (B1). Merge order: #1, #2, #3, #5, #4, #6 |
 | 2026-10-20 | Wave 1 first-round reviews done (4 deep reviews + independent WS3 red-team); fixes sent back to each session |
 | 2026-10-20 | Wave 1 started: WS1–WS4 sub-sessions, WS5 live subagent |
 | 2026-10-20 | D0–D7 accepted; ADRs 0008–0012; default branch set to `main`; budget, shared ACR, CI/CD OIDC identity and test service principal created (A4–A6) |
 
-## 7. Wave 2 approvals (pending owner)
+## 7. Wave 2 approvals (approved by the owner 2026-10-20)
 
 Prices: Azure retail list prices, Australia East, USD; billing in AUD.
 
