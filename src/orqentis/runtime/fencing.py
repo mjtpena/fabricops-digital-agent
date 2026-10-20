@@ -8,6 +8,12 @@ bump finds a different generation and raises :class:`FencingError`. The check an
 database, so there is no window in which a leader that lost the lease (a long pause, a network partition) can still
 change state.
 
+A **claim fence** does the same for a durable investigation: the worker that claimed the job runs the investigation
+under a :class:`ClaimFence` (job id, worker, claim number), and each write transaction checks, with a shared lock on the
+job row, that this worker still holds that claim. A worker that lost its claim (a database outage longer than the claim
+lifetime, a long pause) and whose job another replica has taken over can then no longer change the incident or request
+approvals; only the new holder can.
+
 Writes outside a job (API requests: approvals, audit records) carry no fence and are never refused by it. The local
 SQLite adapters ignore fences: they belong to one process, which cannot be deposed.
 
@@ -34,11 +40,33 @@ class Fence:
     generation: int
 
 
+@dataclass(frozen=True)
+class ClaimFence:
+    job_id: str
+    worker_id: str
+    claim: int
+
+
 _current: ContextVar[Fence | None] = ContextVar("orqentis_fence", default=None)
+_current_claim: ContextVar[ClaimFence | None] = ContextVar("orqentis_claim_fence", default=None)
 
 
 def current_fence() -> Fence | None:
     return _current.get()
+
+
+def current_claim_fence() -> ClaimFence | None:
+    return _current_claim.get()
+
+
+@contextmanager
+def claim_fenced(fence: ClaimFence | None) -> Iterator[None]:
+    """Run the enclosed code under a job-claim fence (``None`` clears an inherited one)."""
+    token = _current_claim.set(fence)
+    try:
+        yield
+    finally:
+        _current_claim.reset(token)
 
 
 @contextmanager

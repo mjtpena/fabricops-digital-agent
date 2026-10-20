@@ -3,23 +3,35 @@
 A hash chain proves that records were not *altered* without the break being visible, but whoever can rewrite the whole
 table can recompute every hash, and whoever can delete the tail leaves a shorter chain that is still internally valid.
 An **anchor** is the pair (sequence, hash) of the chain head written to an immutable blob (version-level immutability,
-write-once). Verification then also checks that the database still contains the record the latest anchor names, with the
-same hash: rewriting history or dropping the tail contradicts something the database owner cannot change.
+write-once). Verification checks **every** anchor: at each anchored sequence the database must still contain the
+record with the anchored hash. Rewriting history, dropping the tail, or dropping the tail and growing a different
+chain past it each contradict an anchor the database owner cannot change. (Checking only the latest anchor is not
+enough: whoever rewrote the chain could simply wait for the next anchor to cover the rewritten head. Old anchors are
+what stop that.)
 
-* Anchors are grouped in **epochs**. A new epoch begins only through an explicit, audited operator action after a
-  restore (``orqentis audit start-epoch``; docs/operations/restore.md); the anchors of the previous epoch stay in the
-  immutable container as the evidence of what the restore lost. The operator action also writes the first anchor of the
-  new epoch (the ``audit.epoch`` record), so the **highest epoch with an anchor** is the epoch the database must be in:
-  someone who only holds the database cannot move the epoch counter to a place no anchor reaches.
+* An anchor's object name carries the **whole hash**: ``epoch-NNNN/<sequence, 12 digits>-<64 hex>.json``. Listing the
+  container is therefore enough to verify every anchor ever written, without reading each blob.
+* Anchors are grouped in **epochs**. A new epoch begins only through an explicit operator action after a restore
+  (``orqentis audit start-epoch``; docs/operations/restore.md), which writes an *epoch marker*
+  (:mod:`orqentis.observability.epochs`) that the application's identity cannot write. The database must be in the epoch
+  of the highest marker. Anchors of an earlier epoch that lie at or beyond the sequence where the next epoch opened
+  describe records the restore lost; they stay in the container as evidence and are not held against the new chain.
 * ``put`` is write-once and idempotent: anchoring the same (epoch, sequence, hash) again is a no-op, and a *different*
-  hash for an already anchored sequence is kept as a second anchor so that ``latest`` can report the conflict.
-* The anchors are re-derived from nothing the application can edit afterwards, so the application deletes none.
+  hash for an already anchored sequence is kept as a second anchor so that verification reports the conflict.
+* The application never deletes an anchor, and the container does not let anyone before the retention ends.
+* **The window.** Tampering is detectable up to the last anchor. Records newer than it are protected by the hash chain
+  alone: someone with full database rights could rewrite that last interval before the next anchor covers it. The
+  interval (``ORQENTIS_SCHEDULER_AUDIT_ANCHOR_INTERVAL_MINUTES``) bounds that window; it cannot be zero.
+
+The :class:`AuditAnchorTask` also refuses to anchor a chain that contradicts what is already anchored (so a tampered
+head never enters the immutable record, where it would be permanent), and says so loudly.
 """
 
 from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -27,15 +39,33 @@ from typing import Protocol
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 from orqentis.config.clock import Clock
+from orqentis.observability.epochs import EpochMarkerStore, current_epoch
 from orqentis.observability.logging import get_logger
 
 _log = get_logger(__name__)
 
-_NAME = re.compile(r"^epoch-(\d{4})/(\d{12})-([0-9a-f]{16})\.json$")
+_NAME = re.compile(r"^epoch-(\d{4})/(\d{12})-([0-9a-f]{64})\.json$")
+
+# The scheduled audit verification (WS9) alerts on this log message; the anchor task uses the same words for the same
+# condition, so one alert covers "the audit chain does not match what was anchored".
+AUDIT_VERIFICATION_FAILURE_MESSAGE = "audit chain verification failed"
 
 
 class AnchorConflictError(Exception):
     """Two different hashes are anchored for the same sequence: the chain was rewritten, or two chains were mixed."""
+
+
+class AnchorRefusedError(Exception):
+    """The anchor task did not anchor the head: it contradicts what is already anchored. Needs a person."""
+
+
+@dataclass(frozen=True)
+class AnchorRef:
+    """An anchor as its object name gives it: enough to check it against the chain."""
+
+    epoch: int
+    sequence: int
+    hash: str
 
 
 class AuditAnchor(BaseModel):
@@ -48,8 +78,12 @@ class AuditAnchor(BaseModel):
 
     @property
     def name(self) -> str:
-        """Object name; lexicographic order is numeric order, and the hash prefix keeps conflicting anchors apart."""
-        return f"epoch-{self.epoch:04d}/{self.sequence:012d}-{self.hash[:16]}.json"
+        """Object name; lexicographic order is numeric order, and the full hash keeps conflicting anchors apart."""
+        return f"epoch-{self.epoch:04d}/{self.sequence:012d}-{self.hash}.json"
+
+    @property
+    def ref(self) -> AnchorRef:
+        return AnchorRef(self.epoch, self.sequence, self.hash)
 
 
 class AuditAnchorStore(Protocol):
@@ -61,8 +95,8 @@ class AuditAnchorStore(Protocol):
         """The anchor with the highest sequence in ``epoch``; raises :class:`AnchorConflictError` on disagreement."""
         ...
 
-    async def highest_epoch(self) -> int | None:
-        """The highest epoch that has any anchor, or ``None`` when nothing was ever anchored."""
+    async def refs(self, epoch: int) -> list[AnchorRef]:
+        """Every anchor of ``epoch`` by name (lowest sequence first), without reading the objects."""
         ...
 
 
@@ -75,6 +109,10 @@ class ChainHead:
 
 class AnchorableAudit(Protocol):
     async def head(self) -> ChainHead: ...
+
+    async def record_hash_at(self, sequence: int) -> str | None:
+        """The hash of the stored record at ``sequence``, or ``None`` when there is none."""
+        ...
 
 
 def pick_latest(anchors: list[AuditAnchor]) -> AuditAnchor | None:
@@ -89,7 +127,7 @@ def pick_latest(anchors: list[AuditAnchor]) -> AuditAnchor | None:
 
 
 def parse_anchor_name(name: str) -> tuple[int, int, str] | None:
-    """(epoch, sequence, hash prefix) from an object name, or None when it is not an anchor."""
+    """(epoch, sequence, hash) from an object name, or None when it is not an anchor."""
     match = _NAME.match(name)
     return (int(match.group(1)), int(match.group(2)), match.group(3)) if match else None
 
@@ -113,20 +151,15 @@ class LocalAuditAnchorStore:
             return False
         return True
 
-    async def highest_epoch(self) -> int | None:
-        return await asyncio.to_thread(self._highest_epoch)
+    async def refs(self, epoch: int) -> list[AnchorRef]:
+        return await asyncio.to_thread(self._refs, epoch)
 
-    def _highest_epoch(self) -> int | None:
-        if not self._root.is_dir():
-            return None
-        epochs = [
-            parsed[0]
-            for folder in self._root.iterdir()
-            if folder.is_dir()
-            for p in folder.iterdir()
-            if (parsed := parse_anchor_name(f"{folder.name}/{p.name}")) is not None
-        ]
-        return max(epochs) if epochs else None
+    def _refs(self, epoch: int) -> list[AnchorRef]:
+        folder = self._root / f"epoch-{epoch:04d}"
+        if not folder.is_dir():
+            return []
+        parsed = (parse_anchor_name(f"{folder.name}/{p.name}") for p in sorted(folder.iterdir()))
+        return [AnchorRef(e, s, h) for e, s, h in (x for x in parsed if x is not None)]
 
     async def latest(self, epoch: int) -> AuditAnchor | None:
         return await asyncio.to_thread(self._latest, epoch)
@@ -144,17 +177,61 @@ class LocalAuditAnchorStore:
 
 
 class AuditAnchorTask:
-    """Scheduled job: anchor the chain head when it moved since the last anchor."""
+    """Scheduled job: anchor the chain head when it moved since the last anchor, and only if it is the same chain.
 
-    def __init__(self, audit: AnchorableAudit, store: AuditAnchorStore, clock: Clock) -> None:
+    Before anchoring it checks, with a handful of reads (not a full verification), that the head does not contradict
+    what is already anchored:
+
+    * the database is in the epoch of the highest epoch marker (when a marker store is configured);
+    * the head is not behind the previous anchor of this epoch, and the record at that anchor's sequence still has the
+      anchored hash;
+    * for an epoch above 1, the record that opened it still has the hash the marker names.
+
+    When any of these fails it anchors nothing, logs an ERROR with the message the audit verification alert watches
+    (:data:`AUDIT_VERIFICATION_FAILURE_MESSAGE`), calls ``on_failure`` and raises :class:`AnchorRefusedError` (the
+    scheduler then reports the job as failed). It keeps refusing on every run until the chain is consistent with its
+    anchors again or an operator has opened a new epoch.
+    """
+
+    def __init__(
+        self,
+        audit: AnchorableAudit,
+        store: AuditAnchorStore,
+        clock: Clock,
+        *,
+        epochs: EpochMarkerStore | None = None,
+        on_failure: Callable[[str], Awaitable[None] | None] | None = None,
+    ) -> None:
         self._audit = audit
         self._store = store
         self._clock = clock
+        self._epochs = epochs
+        self._on_failure = on_failure
         self._last: tuple[int, int] | None = None  # (epoch, sequence) already anchored by this process
 
     async def run(self) -> AuditAnchor | None:
         head = await self._audit.head()
-        if head.sequence == 0 or self._last == (head.epoch, head.sequence):
+        if head.sequence == 0:
+            return None
+        # Checked on every run, also when the head did not move: a chain that stops matching its anchors should be
+        # reported at the next interval, not only when someone appends to it.
+        if (problem := await self._continuity_problem(head)) is not None:
+            _log.error(
+                AUDIT_VERIFICATION_FAILURE_MESSAGE,
+                extra={
+                    "check": "anchor-continuity",
+                    "result": "invalid",
+                    "epoch": head.epoch,
+                    "head_sequence": head.sequence,
+                    "reason": problem,
+                },
+            )
+            if self._on_failure is not None:
+                outcome = self._on_failure(problem)
+                if outcome is not None:
+                    await outcome
+            raise AnchorRefusedError(problem)
+        if self._last == (head.epoch, head.sequence):
             return None
         anchor = AuditAnchor(epoch=head.epoch, sequence=head.sequence, hash=head.hash, anchored_at=self._clock.now())
         created = await self._store.put(anchor)
@@ -162,3 +239,33 @@ class AuditAnchorTask:
         if created:
             _log.info("audit head anchored", extra={"epoch": head.epoch, "sequence": head.sequence})
         return anchor if created else None
+
+    async def _continuity_problem(self, head: ChainHead) -> str | None:
+        marker = None
+        if self._epochs is not None:
+            markers = await self._epochs.all()
+            expected = current_epoch(markers)
+            if head.epoch != expected:
+                return (
+                    f"the database is in audit epoch {head.epoch} but the epoch markers say {expected}: the epoch "
+                    "counter was moved, or the database was restored, without `orqentis audit start-epoch`"
+                )
+            marker = next((m for m in markers if m.epoch == head.epoch), None)
+        try:
+            previous = await self._store.latest(head.epoch)
+        except AnchorConflictError as exc:
+            return str(exc)
+        if previous is not None:
+            if head.sequence < previous.sequence:
+                return (
+                    f"the chain head (sequence {head.sequence}) is behind the latest anchor of its epoch "
+                    f"(sequence {previous.sequence}): records were lost, for example by a restore"
+                )
+            if await self._audit.record_hash_at(previous.sequence) != previous.hash:
+                return (
+                    f"the record at sequence {previous.sequence} is not the one that was anchored: the chain was "
+                    "rewritten, or restored and grown past its anchor"
+                )
+        if marker is not None and await self._audit.record_hash_at(marker.sequence) != marker.hash:
+            return f"the record that opened audit epoch {head.epoch} is not the one its marker names"
+        return None

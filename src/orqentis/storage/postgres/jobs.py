@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from datetime import datetime, timedelta
-from typing import Any
 
 import asyncpg
 
@@ -257,13 +256,12 @@ class PostgresJobStore:
         return [_job(r) for r in rows if r["status"] == InvestigationJobStatus.FAILED.value]
 
     async def cancel_queued(self, *, error: str, finished_at: datetime) -> list[InvestigationJob]:
-        args: list[Any] = [error, finished_at]
-        async with self._db.transaction() as conn:
-            rows = await conn.fetch(
-                _sql(
-                    "UPDATE investigation_jobs SET status = 'FAILED', error = $1, finished_at = $2, "
-                    "counts_attempt = false WHERE status = 'QUEUED' RETURNING {columns}"
-                ),
-                *args,
-            )
-        return [_job(r) for r in rows]
+        """Not supported: the queue is shared by every replica.
+
+        The port defines this call for a store private to one process that is shutting down. Here it would fail the
+        queued jobs of every other replica, so the runner never calls it with a shared store (``shared`` is true) and
+        a caller that does is told so instead of silently emptying the queue of the whole fleet.
+        """
+        raise NotImplementedError(
+            "cancel_queued would fail the queued jobs of every replica; a shared store hands jobs back with release()"
+        )

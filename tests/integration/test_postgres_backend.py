@@ -69,7 +69,7 @@ async def test_the_audit_chain_is_anchored_and_verified_against_the_anchor(conta
     # Run the scheduled anchoring job exactly as the scheduler would (it is leader-only; no wait for a tick here).
     anchors = container.audit._anchors
     assert anchors is not None
-    task = AuditAnchorTask(container.audit, anchors, container.clock)
+    task = AuditAnchorTask(container.audit, anchors, container.clock, epochs=container.audit._epochs)
     anchor = await task.run()
     assert anchor is not None and anchor.sequence == head.sequence and anchor.hash == head.hash
     assert await task.run() is None  # nothing new to anchor

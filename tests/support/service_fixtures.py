@@ -10,7 +10,7 @@ import pytest
 from azure.storage.blob.aio import BlobServiceClient, ContainerClient
 
 from orqentis.config.clock import SystemClock
-from orqentis.storage.blob import BlobAuditAnchorStore, BlobEvidenceStore
+from orqentis.storage.blob import BlobAuditAnchorStore, BlobEpochMarkerStore, BlobEvidenceStore
 from orqentis.storage.postgres import PostgresConfig, PostgresStorage
 from tests.support.services import AzuriteServer, PostgresServer, start_azurite, start_postgres
 
@@ -98,3 +98,10 @@ async def blob_contracts_container(blob_service: BlobServiceClient) -> Container
     name = f"co-{secrets.token_hex(5)}"
     await blob_service.create_container(name)
     return blob_service.get_container_client(name)
+
+
+@pytest.fixture
+async def blob_epochs(blob_service: BlobServiceClient) -> BlobEpochMarkerStore:
+    name = f"ep-{secrets.token_hex(5)}"
+    await blob_service.create_container(name)
+    return BlobEpochMarkerStore(blob_service.get_container_client(name))

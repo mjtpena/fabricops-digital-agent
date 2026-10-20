@@ -15,6 +15,7 @@ from rich.console import Console
 from orqentis.bootstrap import open_postgres_session
 from orqentis.config.clock import SystemClock
 from orqentis.config.settings import Settings, StorageBackend
+from orqentis.observability.epochs import EpochMarkerAccessError
 from orqentis.storage.postgres import MigrationRunner
 
 _INCIDENT_ID = re.compile(r"^INC-(\d{4})-(\d+)$")
@@ -84,7 +85,12 @@ async def run_audit_postgres(settings: Settings, console: Console, *, start_epoc
     try:
         audit = session.storage.audit
         if start_epoch_reason is not None:
-            record = await audit.start_epoch(actor=f"operator:{getpass.getuser()}", reason=start_epoch_reason)
+            try:
+                record = await audit.start_epoch(actor=f"operator:{getpass.getuser()}", reason=start_epoch_reason)
+            except EpochMarkerAccessError as exc:
+                # Opening an epoch is an operator action the application's own identity cannot perform, on purpose.
+                console.print(f"Audit epoch not started: {exc}. Nothing was changed. See docs/operations/restore.md.")
+                return 1
             console.print(f"Started audit epoch (record {record.sequence}): {record.details}")
         result = await audit.verify()
         console.print(result.model_dump())

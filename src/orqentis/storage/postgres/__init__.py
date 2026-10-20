@@ -11,6 +11,7 @@ from typing import Self
 
 from orqentis.config.clock import Clock
 from orqentis.observability.anchors import AuditAnchorStore
+from orqentis.observability.epochs import EpochMarkerStore
 from orqentis.storage.postgres.approvals import PostgresApprovalProvider
 from orqentis.storage.postgres.audit import PostgresAuditTrail
 from orqentis.storage.postgres.database import PasswordProvider, PostgresConfig, PostgresDatabase
@@ -61,6 +62,7 @@ class PostgresStorage:
         clock: Clock,
         *,
         anchors: AuditAnchorStore | None = None,
+        epochs: EpochMarkerStore | None = None,
         migrate: bool | None = True,
         holder_id: str | None = None,
     ) -> Self:
@@ -78,7 +80,7 @@ class PostgresStorage:
                 incidents=PostgresIncidentRepository(db),
                 dependencies=PostgresDependencyStore(db),
                 approvals=PostgresApprovalProvider(db),
-                audit=PostgresAuditTrail(db, clock, anchors),
+                audit=PostgresAuditTrail(db, clock, anchors, epochs),
                 lease=PostgresLeaderLease(db, clock, holder_id=holder_id),
                 jobs=PostgresJobStore(db),
                 mutex=PostgresMutex(db),

@@ -7,11 +7,15 @@ REST mode on a mocked Fabric transport, contracts from a file (the blob variants
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import httpx
 import pytest
 
+from orqentis.api.app import create_app
 from orqentis.bootstrap import Container, build_container
 from orqentis.config.clock import FixedClock
 from orqentis.config.settings import FabricMode
@@ -163,3 +167,60 @@ async def test_a_follower_applies_new_contracts_to_its_own_memory_and_leaves_the
     actions = [r.action for r in await container.audit.list()]
     assert actions.count("contracts.loaded") == 2  # every replica says which contracts version it runs
     assert "catalog.refresh" not in actions  # the diff is audited once, by the leader's scheduled job
+
+
+def client_for(app: object) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")  # type: ignore[arg-type]
+
+
+async def failed_records(container: Container) -> list[dict[str, object]]:
+    return [dict(r.details) for r in await container.audit.list() if r.action == "contracts.reload"]
+
+
+@pytest.mark.security
+async def test_a_refused_reload_is_logged_audited_once_per_refused_digest_and_makes_the_app_degraded_not_unready(
+    container: Container, contracts_file: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    app = create_app(container.settings, container=container)
+    async with client_for(app) as http:
+        healthy = await http.get("/health/ready")
+        assert healthy.status_code == 200 and healthy.json() == {"status": "ready", "scheduler": "disabled"}
+
+        bad = b'{"dependencies": [], "client_secret": "hunter2-SECRET"'
+        publish(contracts_file, bad)
+        with caplog.at_level(logging.ERROR), pytest.raises(ContractsInvalidError):
+            await container.catalog_refresher.refresh()
+        assert [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR] == [
+            "contracts reload failed; the last good contracts stay in force"
+        ]
+        (record,) = await failed_records(container)
+        assert record["rejected_sha256"] == sha(bad) and record["error_type"] == "ContractsInvalidError"
+        assert record["contracts_sha256_in_force"] == sha(contracts_bytes())  # the last good ones are still in force
+        assert "hunter2" not in json.dumps(record)  # structure only, never content
+
+        # Still ready (the service keeps monitoring on the last good contracts), but it says what is wrong.
+        degraded = await http.get("/health/ready")
+        assert degraded.status_code == 200
+        assert degraded.json() == {"status": "ready", "scheduler": "disabled", "degraded": ["contracts reload failed"]}
+
+        # The same refused file again is the same news: not another audit record on every interval.
+        with pytest.raises(ContractsInvalidError):
+            await container.catalog_refresher.refresh()
+        assert len(await failed_records(container)) == 1
+        # A different refused file is new information.
+        publish(contracts_file, b"not json either")
+        with pytest.raises(ContractsInvalidError):
+            await container.catalog_refresher.refresh()
+        assert [r["rejected_sha256"] for r in await failed_records(container)] == [sha(bad), sha(b"not json either")]
+        # A missing file is reported too (no digest, since nothing could be read).
+        withdraw(contracts_file)
+        with pytest.raises(ContractsFileNotFoundError):
+            await container.catalog_refresher.refresh()
+        assert (await failed_records(container))[-1]["rejected_sha256"] is None
+
+        # A good upload clears the degraded state.
+        publish(contracts_file, contracts_bytes(EXTRA_DEPENDENCY))
+        await container.catalog_refresher.refresh()
+        recovered = await http.get("/health/ready")
+        assert recovered.json() == {"status": "ready", "scheduler": "disabled"}
+        assert (await container.audit.verify()).valid

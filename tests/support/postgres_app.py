@@ -19,7 +19,14 @@ from azure.core.credentials_async import AsyncTokenCredential
 from azure.storage.blob.aio import BlobServiceClient
 
 from orqentis.config.settings import Settings
-from orqentis.storage.blob import BlobAuditAnchorStore, BlobContractsSource, BlobEvidenceStore, BlobStorage
+from orqentis.observability.epochs import EpochMarker, EpochMarkerAccessError, EpochMarkerStore
+from orqentis.storage.blob import (
+    BlobAuditAnchorStore,
+    BlobContractsSource,
+    BlobEpochMarkerStore,
+    BlobEvidenceStore,
+    BlobStorage,
+)
 from tests.conftest import make_settings
 from tests.support.service_fixtures import drop_schema
 from tests.support.services import AzuriteServer, PostgresServer
@@ -35,6 +42,7 @@ class AppStorage:
     evidence_container: str
     anchor_container: str
     contracts_container: str
+    epoch_container: str
 
     def settings(self, tmp_path: Path, **overrides: object) -> Settings:
         values: dict[str, object] = {
@@ -50,14 +58,32 @@ class AppStorage:
             "evidence_container": self.evidence_container,
             "audit_anchor_container": self.anchor_container,
             "contracts_container": self.contracts_container,
+            "audit_epoch_container": self.epoch_container,
             "postgres_pool_max": 6,
         }
         values.update(overrides)
         return make_settings(tmp_path, **values)
 
 
-def azurite_blob_storage(azurite: AzuriteServer) -> Any:
-    """A replacement for ``BlobStorage.open`` that talks to Azurite with the per-run key."""
+class ReadOnlyEpochMarkerStore:
+    """What the application's identity has on the ``audit-epochs`` container: it can read markers, never write one."""
+
+    def __init__(self, inner: EpochMarkerStore) -> None:
+        self._inner = inner
+
+    async def put(self, marker: EpochMarker) -> bool:
+        raise EpochMarkerAccessError("this identity has read access to the audit-epochs container only (403)")
+
+    async def all(self) -> Any:
+        return await self._inner.all()
+
+
+def azurite_blob_storage(azurite: AzuriteServer, *, operator: bool = False) -> Any:
+    """A replacement for ``BlobStorage.open`` that talks to Azurite with the per-run key.
+
+    ``operator=False`` is the application's identity: its epoch marker store cannot write (as in Azure, where it holds
+    Storage Blob Data Reader on that container). ``operator=True`` is a person in the operator group.
+    """
 
     def open_(
         account_url: str,
@@ -69,15 +95,19 @@ def azurite_blob_storage(azurite: AzuriteServer) -> Any:
         anchor_prefix: str = "",
         contracts_container: str = "contracts",
         contracts_blob_name: str = "estate.json",
+        epoch_container: str = "audit-epochs",
     ) -> BlobStorage:
         service = BlobServiceClient(
             azurite.url, credential={"account_name": azurite.account, "account_key": azurite.key}
         )
+        markers = BlobEpochMarkerStore(service.get_container_client(epoch_container))
+        epochs = markers if operator else ReadOnlyEpochMarkerStore(markers)
         return BlobStorage(
             service=service,
             evidence=BlobEvidenceStore(service.get_container_client(evidence_container), path_prefix=evidence_prefix),
             anchors=BlobAuditAnchorStore(service.get_container_client(anchor_container), path_prefix=anchor_prefix),
             contracts=BlobContractsSource(service.get_container_client(contracts_container), contracts_blob_name),
+            epochs=epochs,  # type: ignore[arg-type]
         )
 
     return open_
@@ -87,10 +117,11 @@ async def make_app_storage(
     server: PostgresServer, azurite: AzuriteServer, service: BlobServiceClient, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[AppStorage]:
     suffix = secrets.token_hex(5)
-    storage = AppStorage(server, azurite, f"t_{suffix}", f"ev-{suffix}", f"an-{suffix}", f"co-{suffix}")
+    storage = AppStorage(server, azurite, f"t_{suffix}", f"ev-{suffix}", f"an-{suffix}", f"co-{suffix}", f"ep-{suffix}")
     await service.create_container(storage.evidence_container)
     await service.create_container(storage.anchor_container)
     await service.create_container(storage.contracts_container)
+    await service.create_container(storage.epoch_container)
     monkeypatch.setattr(BlobStorage, "open", staticmethod(azurite_blob_storage(azurite)))
     yield storage
     await drop_schema(server, storage.schema)

@@ -49,10 +49,14 @@ async def test_two_different_hashes_for_one_sequence_are_a_conflict(anchor_store
     assert latest is not None and latest.sequence == 10
 
 
-async def test_the_highest_epoch_is_the_highest_epoch_with_any_anchor(anchor_store: AuditAnchorStore) -> None:
-    assert await anchor_store.highest_epoch() is None
-    await anchor_store.put(anchor(5, epoch=1))
-    assert await anchor_store.highest_epoch() == 1
-    await anchor_store.put(anchor(3, epoch=3))
-    await anchor_store.put(anchor(9, epoch=2))
-    assert await anchor_store.highest_epoch() == 3
+async def test_refs_list_every_anchor_of_an_epoch_by_name_with_its_full_hash(anchor_store: AuditAnchorStore) -> None:
+    assert await anchor_store.refs(1) == []
+    for sequence in (40, 5, 1000):
+        await anchor_store.put(anchor(sequence))
+    await anchor_store.put(anchor(5, "b" * 64))  # a conflicting anchor is listed too: verification must see both
+    await anchor_store.put(anchor(7, epoch=2))
+    refs = await anchor_store.refs(1)
+    assert [(r.epoch, r.sequence) for r in refs] == [(1, 5), (1, 5), (1, 40), (1, 1000)]
+    assert {r.hash for r in refs if r.sequence == 5} == {f"{5:064x}", "b" * 64}
+    assert all(len(r.hash) == 64 for r in refs)
+    assert [r.sequence for r in await anchor_store.refs(2)] == [7]

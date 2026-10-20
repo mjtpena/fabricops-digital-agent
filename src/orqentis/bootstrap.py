@@ -50,6 +50,7 @@ from orqentis.notifications.port import Notifier
 from orqentis.notifications.sink import NOOP_SINK, NotificationService
 from orqentis.observability.anchors import AnchorableAudit, AuditAnchorStore, AuditAnchorTask
 from orqentis.observability.audit import AuditTrail, LocalAuditLog
+from orqentis.observability.epochs import EpochMarkerStore
 from orqentis.observability.logging import get_logger
 from orqentis.policies.engine import PolicyEngine
 from orqentis.reports.builder import ReportBuilder
@@ -161,6 +162,7 @@ class _Storage:
     contracts: ContractsSource | None = None
     # Set with PostgreSQL: where the audit head is anchored, and the chain that is anchored.
     anchors: AuditAnchorStore | None = None
+    epochs: EpochMarkerStore | None = None  # read-only for the app: only an operator opens an epoch
     audit_head: AnchorableAudit | None = None
     databases: tuple[SqliteDatabase, ...] = ()
     closers: tuple[Callable[[], Awaitable[None]], ...] = ()
@@ -236,6 +238,7 @@ async def open_postgres_session(
             anchor_prefix=settings.audit_anchor_path_prefix,
             contracts_container=settings.contracts_container,
             contracts_blob_name=settings.contracts_blob_name,
+            epoch_container=settings.audit_epoch_container,
         )
         track.append(blob.close)
 
@@ -258,12 +261,14 @@ async def open_postgres_session(
             pool_min=settings.postgres_pool_min,
             pool_max=settings.postgres_pool_max,
             command_timeout_seconds=settings.postgres_command_timeout_seconds,
+            set_role=settings.postgres_set_role,
         )
         pg = await PostgresStorage.open(
             config,
             database_token if settings.postgres_auth is PostgresAuth.ENTRA else None,
             clock,
             anchors=blob.anchors,
+            epochs=blob.epochs,
             migrate=migrate,
         )
     except BaseException:
@@ -295,6 +300,7 @@ async def _build_postgres_storage(
         mutex=pg.mutex,
         jobs=pg.jobs,
         anchors=blob.anchors,
+        epochs=blob.epochs,
         contracts=blob.contracts,
         audit_head=pg.audit,
         closers=session._closers,
@@ -684,7 +690,7 @@ async def _build_container(
     if storage.anchors is not None and storage.audit_head is not None:
         # Copies the audit chain head (sequence + hash) to an immutable blob, so that rewriting the database cannot
         # also rewrite what the chain is checked against (observability/anchors.py).
-        anchor_task = AuditAnchorTask(storage.audit_head, storage.anchors, clock)
+        anchor_task = AuditAnchorTask(storage.audit_head, storage.anchors, clock, epochs=storage.epochs)
 
         async def audit_anchor_job(ctx: JobContext) -> None:
             await anchor_task.run()

@@ -9,9 +9,17 @@ backups or PITR; one restore rehearsed and documented") is met by the rehearsal 
 > schema in `src/orqentis/storage/postgres/migrations/`. No command in this runbook has yet been run against a deployed
 > server, because nothing is deployed. The rehearsal is how they are proven: fix this document with whatever it changes.
 
-**Who.** A person with `Contributor` (or `Owner`) on the environment's resource group, who is a member of that
-environment's PostgreSQL administrator group (docs/delivery.md, section 5a), signed in with `az login`. The pipeline's deploy
-identities are not used for restores.
+**Who.** Two roles, which may be the same person:
+
+* The **restore operator**: `Contributor` (or `Owner`) on the environment's resource group and a member of that environment's
+  PostgreSQL administrator group (docs/delivery.md, section 5a), signed in with `az login`. The pipeline's deploy identities
+  are not used for restores. For the `orqentis` commands below the operator also needs `Storage Blob Data Reader` on the
+  `audit-anchors` and `audit-epochs` containers (an Owner or User Access Administrator grants it), and the database grant of
+  section 5.
+* The **audit operator**, for section 7 only: a member of the audit operators group (Bicep parameter
+  `auditOperatorsPrincipalId`), which holds `Storage Blob Data Contributor` on the `audit-epochs` container and nothing else
+  there. **The application's own identity cannot do section 7, on purpose:** it has read access to that container only, so a
+  compromised application cannot open an audit epoch, and neither can someone who only holds the database.
 
 ## 0. Variables
 
@@ -32,6 +40,7 @@ APP_ROLE=$(app_env ORQENTIS_POSTGRES_USER)               # id-<prefix>-reader, t
 BLOB_URL=$(app_env ORQENTIS_EVIDENCE_BLOB_URL)
 EVSA=${BLOB_URL#https://}; EVSA=${EVSA%%.*}              # the evidence storage account
 CONTRACTS_CONTAINER=$(app_env ORQENTIS_CONTRACTS_CONTAINER)   # contracts: the estate contracts file is a blob here, not in the database
+EPOCH_CONTAINER=$(app_env ORQENTIS_AUDIT_EPOCH_CONTAINER)     # audit-epochs: only an audit operator can write here (section 7)
 
 # The environment's PostgreSQL administrator group (docs/delivery.md, section 7):
 ADMIN_NAME=$(gh variable get POSTGRES_ENTRA_ADMIN_NAME --repo "$REPO" --env "$ENV")
@@ -43,7 +52,7 @@ with `az postgres flexible-server firewall-rule create`, as in the bootstrap ste
 
 ```bash
 export PGPASSWORD="$(az account get-access-token --resource-type oss-rdbms --query accessToken -o tsv)"   # about an hour
-# psql "host=<fqdn> port=5432 dbname=$DB user=$ADMIN_NAME sslmode=require" ...
+# psql "host=<fqdn> port=5432 dbname=$DB user=$ADMIN_NAME sslmode=verify-full" ...   (root certificate: infra/bicep/README.md)
 ```
 
 ## 1. When to use it, and when not
@@ -139,24 +148,35 @@ step with the managed identity's object id) and the schema `orqentis`. The ident
 works against the new server: **no second bootstrap**. Verify, as an administrator:
 
 ```bash
-psql "host=$NEW_FQDN port=5432 dbname=$DB user=$ADMIN_NAME sslmode=require" -c '\du' -c '\dn'
+psql "host=$NEW_FQDN port=5432 dbname=$DB user=$ADMIN_NAME sslmode=verify-full" -c '\du' -c '\dn'
 ```
 
 `\du` must list `$APP_ROLE`, and `\dn` the schema `orqentis` owned by it. If the role is missing (you restored to a point
 before the bootstrap), run the bootstrap step of `infra/bicep/README.md` (3a) against the new server.
 
+**The administrator group has no rights on the application's tables.** On Azure the Entra administrator can create roles and
+schemas but does not own what the application's role owns, so `orqentis audit` and `orqentis audit start-epoch` cannot read or
+append to `audit_records` as the group. The bootstrap script has an optional block that lets the group act as the
+application's role (`GRANT "<app role>" TO "<admin group>" WITH INHERIT FALSE, SET TRUE`); the `orqentis` commands below then
+run with `ORQENTIS_POSTGRES_USER=$ADMIN_NAME ORQENTIS_POSTGRES_SET_ROLE=$APP_ROLE`, which makes every connection `SET ROLE` to
+the application's role. If the block was not run, run it now as an administrator (it is idempotent). Without it, the only way
+to run these commands is inside a replica (below), which can verify but cannot open an epoch.
+
 ## 6. Verify the data and the audit chain
 
-Before any traffic goes to the new server. With your own identity (needs the database role of the admin group, and
-`Storage Blob Data Reader` on the `audit-anchors` container, which Owner or User Access Administrator can grant):
+Before any traffic goes to the new server. With your own identity (the database grant of section 5, and `Storage Blob Data
+Reader` on the `audit-anchors` and `audit-epochs` containers):
 
 ```bash
-export ORQENTIS_STORAGE_BACKEND=postgres ORQENTIS_POSTGRES_HOST="$NEW_FQDN" ORQENTIS_POSTGRES_DATABASE="$DB" \
-  ORQENTIS_POSTGRES_USER="$ADMIN_NAME" ORQENTIS_EVIDENCE_BLOB_URL="$BLOB_URL"
+export ORQENTIS_STORAGE_BACKEND=postgres ORQENTIS_AUTH_MODE=default ORQENTIS_POSTGRES_HOST="$NEW_FQDN" \
+  ORQENTIS_POSTGRES_DATABASE="$DB" ORQENTIS_POSTGRES_USER="$ADMIN_NAME" ORQENTIS_POSTGRES_SET_ROLE="$APP_ROLE" \
+  ORQENTIS_EVIDENCE_BLOB_URL="$BLOB_URL" ORQENTIS_AUDIT_EPOCH_CONTAINER="$EPOCH_CONTAINER"
 orqentis db status      # applied and pending migrations (the app applies pending ones itself when it starts)
-orqentis audit          # verifies every record and the chain head, and the head against the latest anchor of the current epoch
+orqentis audit          # hash chain, every anchor, and the epoch markers against the database
 ```
 
+`orqentis audit` checks **every** anchor ever written, not only the latest: at each anchored sequence the database must hold
+the record with the anchored hash. It also demands that the database is in the epoch of the highest **epoch marker**.
 Without those grants, run the same two commands inside a replica, which holds the app's identity and its access: `az
 containerapp exec -g "$RG" -n "$APP"` opens a shell, then `ORQENTIS_POSTGRES_HOST=<new fqdn> orqentis audit`. That needs a
 replica running, so use it for rehearsals; after a real restore with the app scaled to zero, use your own identity.
@@ -164,8 +184,11 @@ replica running, so use it for rehearsals; after a real restore with the app sca
 | `orqentis audit` reports | Meaning | What to do |
 |---|---|---|
 | valid | The restore point is at or after the latest anchor, or there is no anchor yet, and the chain is intact | Continue |
-| `audit chain is behind its latest anchor (anchored sequence N, database head M): records were lost, for example by a restore` | The restore point is **earlier** than the latest anchor: records M+1 to N existed (the immutable anchor proves it) and are gone from the database | Expected. Continue, and record it in section 7 |
-| `hash chain contradicts the audit anchor`, `hash chain broken`, `sequence gap`, `log truncated`, `Conflicting audit anchors` | The data is inconsistent with itself or with the anchors. A point-in-time restore cannot do that by itself | **Stop.** Do not point the app at this server. Treat it as a possible integrity incident, try an earlier restore time, and keep both servers |
+| `audit chain is behind its latest anchor (anchored sequence N, database head M): records were lost, for example by a restore` | The restore point is **earlier** than the latest anchor: records M+1 to N existed (the immutable anchor proves it) and are gone from this server | Section 7 (the loss is recorded, not repaired) |
+| `epoch markers exist for audit epoch N but the database is in epoch M ... restored or rewound without ...start-epoch` | The server is older than an epoch an operator opened earlier (a second restore from an older point) | Section 7 (it opens the next free epoch) |
+| `the database claims audit epoch N but the latest epoch marker is M ...` | The epoch counter was moved without an operator opening an epoch. A restore cannot do that | **Stop.** Treat it as tampering with the database; keep the server and the evidence, tell the owner |
+| `hash chain contradicts the audit anchor (epoch K) for sequence S` | The record at an anchored sequence is not the anchored one: history was rewritten, or the restored chain was grown past its anchor (the app wrote to the restored server before section 7) | **Stop** as above. If the app wrote first, restore again and do section 7 before any traffic |
+| `hash chain broken`, `sequence gap`, `log truncated`, `indexed columns disagree`, `exists beyond the chain head`, `Conflicting audit anchors` | The data is inconsistent with itself or with the anchors. A point-in-time restore cannot do that by itself | **Stop.** Do not point the app at this server; find out why |
 
 The record counts at the restore time, on **both** servers (the source keeps changing, so the counts are filtered to the
 restore time; they must be equal because incidents, approvals and events are only added or updated, and audit records are
@@ -180,45 +203,62 @@ UNION ALL SELECT 'audit_records', count(*) FROM orqentis.audit_records WHERE ts 
 UNION ALL SELECT 'investigation_jobs', count(*) FROM orqentis.investigation_jobs WHERE created_at <= :'restore_time'
 UNION ALL SELECT 'audit_sequence_at_restore_time', coalesce(max(sequence), 0) FROM orqentis.audit_records WHERE ts <= :'restore_time';
 SQL
-q() { psql "host=$1 port=5432 dbname=$DB user=$ADMIN_NAME sslmode=require" -At -v ON_ERROR_STOP=1 -v restore_time="$RESTORE_TIME" -f restore-counts.sql; }
+q() { psql "host=$1 port=5432 dbname=$DB user=$ADMIN_NAME sslmode=verify-full" -At -v ON_ERROR_STOP=1 -v restore_time="$RESTORE_TIME" -f restore-counts.sql; }
 q "$NEW_FQDN"                                            # the restored server
 diff <(q "$OLD_FQDN") <(q "$NEW_FQDN") && echo "counts match"   # needs the source server to still exist
 ```
 
-The chain head of the restored server against the latest anchor (the current epoch is in `audit_chain_head`):
+The chain head of the restored server against the anchors (the current epoch is in `audit_chain_head`):
 
 ```bash
-psql "host=$NEW_FQDN port=5432 dbname=$DB user=$ADMIN_NAME sslmode=require" -At \
-  -c "SELECT 'epoch ' || epoch || ', head sequence ' || sequence || ', hash ' || left(hash, 16) FROM orqentis.audit_chain_head"
+psql "host=$NEW_FQDN port=5432 dbname=$DB user=$ADMIN_NAME sslmode=verify-full" -At \
+  -c "SET ROLE \"$APP_ROLE\"" -c "SELECT 'epoch ' || epoch || ', head sequence ' || sequence || ', hash ' || left(hash, 16) FROM orqentis.audit_chain_head"
 az storage blob list --account-name "$EVSA" -c audit-anchors --prefix epoch-0001/ --auth-mode login --num-results '*' \
-  --query "[-1].name" -o tsv                             # newest anchor of epoch 1: epoch-0001/<sequence, 12 digits>-<hash prefix>.json
+  --query "[-1].name" -o tsv                             # newest anchor of epoch 1: epoch-0001/<sequence, 12 digits>-<hash, 64 hex>.json
+az storage blob list --account-name "$EVSA" -c "$EPOCH_CONTAINER" --auth-mode login --query "[].name" -o tsv   # epoch markers: epoch-NNNN.json
 ```
 
 Use the epoch the first query prints in `--prefix epoch-NNNN/`. An anchor sequence greater than the head sequence means
-records were lost: the difference is the number that are provably gone (records written after the last anchor are not
-covered by it, which is why the anchor interval is a parameter, `auditAnchorIntervalMinutes`).
+records were lost: the difference is the number that are provably gone. **Tampering is detectable up to the last anchor.**
+Records written after it are protected by the hash chain alone, so a restore point newer than the last anchor loses records
+nothing can prove (the anchor interval, `auditAnchorIntervalMinutes`, bounds that window).
 
 ## 7. Record the loss before the app uses the server
 
-If section 6 said **behind its latest anchor**, or you know records after the restore point existed, record that the history
-was cut, **before** any app writes to the restored server:
+If section 6 said **behind its latest anchor** or **restored or rewound**, or you know records after the restore point
+existed, record that the history was cut, **before** any app writes to the restored server. This is the **audit operator's**
+step (see *Who*): it writes to the `audit-epochs` container, which the app's identity cannot.
 
 ```bash
 orqentis audit start-epoch --reason "PITR restore of $OLD to $RESTORE_TIME as $NEW after <incident or ticket reference>; audit records after the restore point are lost"
-orqentis audit          # valid again: the new epoch's first anchor is the audit.epoch record itself
+orqentis audit          # valid again
 ```
 
-This appends an `audit.epoch` record to the restored chain (it names the restored head and the last anchored sequence and
-hash of the epoch that ends), writes that record as the first anchor of a new epoch (`epoch-0002/...`) and moves the
-database into it. The anchors, which the database cannot change, say which epoch the database must be in, so an epoch
-counter that was changed any other way fails verification. From then on the app writes its anchors under `epoch-0002/`,
-and verification checks the new epoch's anchors only. (If an earlier restore already created epoch 2, the new epoch is the
-next free one.) The anchors of the previous epoch stay in the immutable `audit-anchors`
-container as the evidence of what the restore lost; nothing deletes them.
+What it does, in order, in one database transaction: it appends an `audit.epoch` record to the restored chain (it names the
+restored head, the last anchored sequence and hash of the epoch that ends, and the new epoch), **writes the epoch marker for
+the new epoch** (`epoch-NNNN.json`: the epoch, that record's sequence and hash, who and why) and only then commits. If the
+marker cannot be written it rolls back: **nothing changes.** Run with the application's identity it stops with
+`Audit epoch not started: ... cannot write to the audit epoch container ... Nothing was changed` and exit code 1; ask an
+audit operator. If the process dies between the marker and the commit, the database stays in the old epoch and a marker
+exists for a new one: `orqentis audit` says "restored or rewound", the anchor job refuses to anchor, and running
+`start-epoch` again opens the next epoch number (the unused marker is ignored, because the record it names never existed in
+the chain).
 
-**Why before.** The restored chain resumes at the sequence numbers the lost records had. If the app appended first and
-anchored, it would write anchors for sequence numbers the old epoch already anchors with a different hash, and verification
-would report conflicting anchors. Run `start-epoch` once, on the restored server, while nothing else writes to it.
+**This step is permanent.** The marker is immutable, so never run `start-epoch` as a rehearsal against an environment's own
+`audit-epochs` container, and run it exactly once per real restore.
+
+From then on the app anchors under `epoch-NNNN/`, verification checks the new epoch's anchors, and the previous epoch's
+anchors **below the point where the new epoch opened** keep binding the surviving history: the restored prefix cannot be
+rewritten later without contradicting them. The anchors at or beyond that point describe the records the restore lost; they
+stay in the immutable container as the evidence of the loss and are not held against the new chain. Nothing deletes them.
+
+**Why before.** The restored chain resumes at the sequence numbers the lost records had. Every anchor binds the chain, so if
+the app appended first, its new records would sit at sequence numbers the old epoch already anchored with other hashes: the
+verification would report them as contradicting the anchors (correctly: that is what a rewritten history looks like), and
+opening an epoch afterwards would not make those records innocent. Also, the **anchor job refuses** to anchor a chain that
+contradicts what is anchored, reports the scheduled job as failed and logs `audit chain verification failed` (the alert
+watches that message). So: restore, verify (section 6), open the epoch (section 7), and only then point the app at the server
+(section 9). Run `start-epoch` once, on the restored server, while nothing else writes to it.
 
 ## 8. Evidence and the audit anchor
 
@@ -232,7 +272,7 @@ not touch them**, in either direction.
   ```bash
   az storage blob list --account-name "$EVSA" -c evidence --auth-mode login --num-results '*' --query "[].name" -o tsv \
     | cut -d/ -f1 | sort -u > evidence-ids.txt
-  psql "host=$NEW_FQDN port=5432 dbname=$DB user=$ADMIN_NAME sslmode=require" -At \
+  psql "host=$NEW_FQDN port=5432 dbname=$DB user=$ADMIN_NAME sslmode=verify-full" -At \
     -c "SELECT incident_id FROM orqentis.incidents" | sort -u > database-ids.txt
   comm -23 evidence-ids.txt database-ids.txt | tee orphan-incidents.txt        # evidence of incidents the database no longer knows
   ```
@@ -335,6 +375,8 @@ pull request or the release record.
 | 7 | Section 6: `orqentis audit` on the restored server | its verdict; head sequence against the newest anchor; if "behind", the number of records the anchor proves lost | |
 | 8 | Section 8: orphan evidence comparison | number of orphaned incident ids (zero is possible) and the counter check | |
 | 9 | The anchors of epoch 1 are untouched and no `epoch-0002/` objects exist (a rehearsal does not start an epoch) | `az storage blob list ... --prefix epoch-0002/` is empty | |
+| 9a | The application's identity cannot open an epoch: inside a replica (`az containerapp exec`), `orqentis audit start-epoch --reason test` stops with `Audit epoch not started ... Nothing was changed` (exit 1), and the `audit-epochs` container is still empty | the output | |
+| 9b | Section 7 is **not** run in a rehearsal: an epoch marker is immutable, and one for an epoch the live database is not in would make the live environment's verification fail and its anchor job refuse. The behaviour is proven by `tests/integration/test_postgres_least_privilege.py` on throwaway storage | confirm the `audit-epochs` container has no new object after the rehearsal | |
 | 10 | Section 10: rehearsal server deleted, temporary firewall rule removed, `POSTGRES_EXISTING_SERVER_NAME` still unset | `az postgres flexible-server list -g "$RG" -o table` | |
 | 11 | Every deviation from this runbook is fixed in this document | commit | |
 

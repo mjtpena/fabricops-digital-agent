@@ -166,6 +166,10 @@ class Settings(BaseSettings):
     postgres_schema: str = Field(default="orqentis", pattern=r"^[a-z_][a-z0-9_]{0,62}$")
     postgres_auth: PostgresAuth = PostgresAuth.ENTRA
     postgres_scope: str = PUBLIC_POSTGRES_SCOPE
+    # Run every connection as this role (SET ROLE), for an operator who connects as a member of the administrator group
+    # and acts as the application's role (the group has no rights on the application's tables itself): `orqentis audit
+    # start-epoch` after a restore, and the storage tests as a non-superuser. Needs the GRANT in postgres-bootstrap.sql.
+    postgres_set_role: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.@-]{1,63}$")
     postgres_ssl_mode: PostgresSslMode = PostgresSslMode.VERIFY_FULL
     postgres_ssl_root_cert: Path | None = None  # extra CA bundle; unset: the system trust store
     # Connections per replica. Burstable B1ms allows roughly 50 in total, so replicas x pool_max must stay well below.
@@ -182,6 +186,9 @@ class Settings(BaseSettings):
     evidence_path_prefix: str = ""
     audit_anchor_container: str = "audit-anchors"
     audit_anchor_path_prefix: str = ""
+    # Epoch markers (audit epochs opened after a restore): the application can only READ this container; an operator
+    # group writes it (docs/operations/restore.md).
+    audit_epoch_container: str = Field(default="audit-epochs", pattern=r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
 
     # Agent / reasoning
     reasoner: ReasonerKind = ReasonerKind.RULE_BASED
@@ -335,7 +342,7 @@ class Settings(BaseSettings):
             raise ValueError("must be an absolute path on this host such as /.auth/login/aad")
         return path
 
-    @field_validator("fabric_scope", "powerbi_scope")
+    @field_validator("fabric_scope", "powerbi_scope", "postgres_scope")
     @classmethod
     def _valid_scope(cls, value: str) -> str:
         scope = value.strip()

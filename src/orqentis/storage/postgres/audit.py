@@ -15,10 +15,12 @@ the lock (so, with synchronised clocks, it grows with the sequence; verification
 
 **Verification** re-derives every hash from the stored record bodies (exact JSON text), checks that sequences are
 contiguous, that the indexed columns agree with the body, that the last record is the chain head and that nothing exists
-beyond it, and, when an anchor store is configured, that the database is in the highest epoch that has an anchor and
-that the record the latest anchor of that epoch names exists with the anchored hash (rewrites and tail deletions
-contradict an anchor in storage the database cannot change; see :mod:`orqentis.observability.anchors`). Records appended
-while verification runs are simply beyond the head it started from.
+beyond it. With the immutable side configured it also checks that the database is in the epoch of the highest **epoch
+marker** (a marker only an operator can write, :mod:`orqentis.observability.epochs`) and that the record at **every**
+anchored sequence has the anchored hash (rewrites, tail deletions and a chain regrown past its anchor each contradict an
+anchor in storage the database cannot change; see :mod:`orqentis.observability.anchors`). Tampering is detectable up to
+the last anchor; the records after it are protected by the hash chain alone. Records appended while verification runs
+are simply beyond the head it started from.
 
 Audit appends are never fenced: an audit record describes something that happened, and it is more important that it is
 kept than that a deposed leader's late record is refused.
@@ -26,15 +28,17 @@ kept than that a deposed leader's late record is refused.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
 from orqentis.config.clock import Clock
 from orqentis.domain.common import new_id
-from orqentis.observability.anchors import AnchorConflictError, AuditAnchor, AuditAnchorStore, ChainHead
+from orqentis.observability.anchors import AnchorConflictError, AuditAnchorStore, ChainHead
 from orqentis.observability.audit import GENESIS_HASH, AuditRecord, AuditVerification, record_digest
+from orqentis.observability.epochs import EpochMarker, EpochMarkerStore, current_epoch
 from orqentis.observability.logging import get_logger
-from orqentis.observability.redaction import redact
+from orqentis.observability.redaction import redact, redact_text
 from orqentis.storage.postgres.database import Connection, PostgresDatabase
 
 _log = get_logger(__name__)
@@ -48,10 +52,17 @@ def _column_text(value: str | None) -> str | None:
 
 
 class PostgresAuditTrail:
-    def __init__(self, db: PostgresDatabase, clock: Clock, anchors: AuditAnchorStore | None = None) -> None:
+    def __init__(
+        self,
+        db: PostgresDatabase,
+        clock: Clock,
+        anchors: AuditAnchorStore | None = None,
+        epochs: EpochMarkerStore | None = None,
+    ) -> None:
         self._db = db
         self._clock = clock
         self._anchors = anchors
+        self._epochs = epochs
 
     # ---------------------------------------------------------------------------------------------- append
     async def record(
@@ -155,21 +166,25 @@ class PostgresAuditTrail:
             rows = await self._db.fetch(f"SELECT body FROM audit_records {where} ORDER BY sequence", *args)  # noqa: S608
         return [AuditRecord.model_validate_json(r["body"]) for r in rows]
 
+    async def record_hash_at(self, sequence: int) -> str | None:
+        value = await self._db.fetchval("SELECT hash FROM audit_records WHERE sequence = $1", sequence)
+        return str(value) if value is not None else None
+
     # -------------------------------------------------------------------------------------------- verification
     async def verify(self) -> AuditVerification:
-        anchor_hash_by_sequence: dict[int, str] = {}
-        head = await self.head()
-        anchor = None
-        if self._anchors is not None:
-            try:
-                if (problem := await self._check_epoch(head.epoch)) is not None:
-                    return AuditVerification(valid=False, records=0, first_invalid_sequence=None, reason=problem)
-                anchor = await self._anchors.latest(head.epoch)  # read first: it cannot be ahead of a later head
-            except AnchorConflictError as exc:
-                return AuditVerification(valid=False, records=0, first_invalid_sequence=None, reason=str(exc))
-        if anchor is not None:
-            anchor_hash_by_sequence[anchor.sequence] = anchor.hash
-        head = await self.head()
+        """Hash chain, indexed columns, head, epoch, every anchor and every epoch marker; see the module docstring."""
+        wanted: dict[int, tuple[str, str]] = {}  # sequence -> (hash that must be stored there, what says so)
+        marker_sequences: set[int] = set()
+        try:
+            head = await self.head()
+            markers = await self._epochs.all() if self._epochs is not None else []
+            if self._epochs is not None and head.epoch != current_epoch(markers):
+                return self._rejected(self._epoch_mismatch(head.epoch, current_epoch(markers)))
+            if (problem := await self._collect_checks(head.epoch, markers, wanted, marker_sequences)) is not None:
+                return self._rejected(problem)
+        except AnchorConflictError as exc:
+            return self._rejected(str(exc))
+        head = await self.head()  # anchors and markers were read first: none of them can be ahead of this head
 
         previous, expected, after = GENESIS_HASH, 1, 0
         while expected <= head.sequence:
@@ -196,11 +211,15 @@ class PostgresAuditTrail:
                     return self._invalid(
                         expected - 1, record.sequence, "indexed columns disagree with the hashed record body"
                     )
-                if anchor_hash_by_sequence.get(record.sequence, record.hash) != record.hash:
+                if (anchored := wanted.get(record.sequence)) is not None and anchored[0] != record.hash:
                     return self._invalid(
                         expected,
                         record.sequence,
-                        f"hash chain contradicts the audit anchor for sequence {record.sequence}",
+                        f"hash chain contradicts the {anchored[1]} for sequence {record.sequence}",
+                    )
+                if record.sequence in marker_sequences and record.action != "audit.epoch":
+                    return self._invalid(
+                        expected, record.sequence, f"the record at sequence {record.sequence} is not an epoch start"
                     )
                 previous, expected, after = record.hash, expected + 1, record.sequence
         if previous != head.hash:
@@ -210,14 +229,69 @@ class PostgresAuditTrail:
             return self._invalid(
                 head.sequence, int(beyond), f"record {beyond} exists beyond the chain head (sequence {head.sequence})"
             )
-        if anchor is not None and anchor.sequence > head.sequence:
+        if wanted and max(wanted) > head.sequence:
+            ahead = max(wanted)
             return self._invalid(
                 head.sequence,
-                anchor.sequence,
-                f"audit chain is behind its latest anchor (anchored sequence {anchor.sequence}, "
+                ahead,
+                f"audit chain is behind its latest anchor (anchored sequence {ahead}, "
                 f"database head {head.sequence}): records were lost, for example by a restore",
             )
         return AuditVerification(valid=True, records=head.sequence)
+
+    async def _collect_checks(
+        self,
+        epoch: int,
+        markers: Sequence[EpochMarker],
+        wanted: dict[int, tuple[str, str]],
+        marker_sequences: set[int],
+    ) -> str | None:
+        """What the immutable side says the chain must contain: every anchor and epoch marker that still applies.
+
+        The records an earlier epoch anchored at or beyond the sequence where the next epoch opened are the ones the
+        restore lost; they are evidence, not a claim on the chain that replaced them.
+        """
+
+        def lost(item_epoch: int, sequence: int) -> bool:
+            later = [m.sequence for m in markers if m.epoch > item_epoch]
+            return item_epoch < epoch and bool(later) and sequence >= min(later)
+
+        def add(sequence: int, digest: str, what: str) -> str | None:
+            known = wanted.get(sequence)
+            if known is not None and known[0] != digest:
+                return f"Conflicting audit anchors for sequence {sequence}: {sorted([known[0][:12], digest[:12]])}"
+            wanted[sequence] = (digest, what)
+            return None
+
+        for marker in markers:
+            if marker.epoch <= epoch and not lost(marker.epoch, marker.sequence):
+                marker_sequences.add(marker.sequence)
+                if (problem := add(marker.sequence, marker.hash, f"epoch {marker.epoch} marker")) is not None:
+                    return problem
+        if self._anchors is not None:
+            for k in range(1, epoch + 1) if self._epochs is not None else [epoch]:
+                for ref in await self._anchors.refs(k):
+                    if lost(k, ref.sequence):
+                        continue
+                    if (problem := add(ref.sequence, ref.hash, f"audit anchor (epoch {k})")) is not None:
+                        return problem
+        return None
+
+    @staticmethod
+    def _epoch_mismatch(database: int, markers: int) -> str:
+        if database > markers:
+            return (
+                f"the database claims audit epoch {database} but the latest epoch marker is {markers}: "
+                "the epoch counter was moved without `orqentis audit start-epoch`"
+            )
+        return (
+            f"epoch markers exist for audit epoch {markers} but the database is in epoch {database}: "
+            "it was restored or rewound without `orqentis audit start-epoch`"
+        )
+
+    @staticmethod
+    def _rejected(reason: str) -> AuditVerification:
+        return AuditVerification(valid=False, records=0, first_invalid_sequence=None, reason=reason)
 
     @staticmethod
     def _invalid(records: int, first_invalid: int, reason: str) -> AuditVerification:
@@ -238,51 +312,34 @@ class PostgresAuditTrail:
             and row["hash"] == record.hash
         )
 
-    async def _check_epoch(self, epoch: int) -> str | None:
-        """The database must be in the highest epoch that has an anchor.
-
-        The epoch counter is a column the database owner can change. The anchors cannot be changed, and starting an
-        epoch writes its first anchor, so a counter that disagrees with the anchors was moved without that operator
-        action: either to dodge the anchors of the real epoch, or by restoring an older database.
-        """
-        assert self._anchors is not None
-        highest = await self._anchors.highest_epoch()
-        if highest is None:
-            if epoch > 1:
-                return f"the database is in audit epoch {epoch} but no anchor exists for it"
-            return None
-        if highest > epoch:
-            return (
-                f"anchors exist for audit epoch {highest} but the database is in epoch {epoch}: "
-                "it was restored or rewound without `orqentis audit start-epoch`"
-            )
-        if highest < epoch:
-            return (
-                f"the database claims audit epoch {epoch} but the latest anchored epoch is {highest}: "
-                "the epoch counter was moved without starting an epoch"
-            )
-        return None
-
     # ------------------------------------------------------------------------------------------------ epochs
     async def start_epoch(self, *, actor: str, reason: str) -> AuditRecord:
-        """Record, in the chain, that history was cut (a restore) and begin a new anchor epoch.
+        """Record, in the chain, that history was cut (a restore) and begin a new epoch. An operator action.
 
-        The record names the head the restored database has and the last anchor of the epoch that ends, so the loss
-        is documented in the chain itself and in the immutable anchors of the old epoch, which are never removed.
+        The new epoch's **marker is written first, inside the transaction that appends the ``audit.epoch`` record**, to
+        a container the application's identity can only read: with the application's identity this raises, the
+        transaction rolls back and the epoch does not change. With an operator's identity both happen or neither does
+        (a crash between the marker and the commit leaves an unused marker; the next ``start-epoch`` picks the next
+        epoch number and verification ignores the unused one, because its record never existed in the chain).
+
+        The record names the head the restored database has and the last anchor of the epoch that ends, so the loss is
+        documented in the chain itself and in the immutable anchors of the old epoch, which are never removed.
         """
+        if self._epochs is None:
+            raise RuntimeError("starting an audit epoch needs the epoch marker store (the audit-epochs container)")
         previous_anchor = None
         head = await self.head()
-        new_epoch = head.epoch + 1
+        markers = await self._epochs.all()
+        new_epoch = max(head.epoch, current_epoch(markers)) + 1
         if self._anchors is not None:
             try:
                 previous_anchor = await self._anchors.latest(head.epoch)
             except AnchorConflictError as exc:
                 _log.warning("conflicting anchors while starting a new audit epoch", extra={"error": str(exc)})
-            # Never reuse an epoch that already has anchors (a second restore from an older backup).
-            new_epoch = max(new_epoch, (await self._anchors.highest_epoch() or 0) + 1)
         details: dict[str, Any] = {
             "reason": reason,
             "previous_epoch": head.epoch,
+            "new_epoch": new_epoch,
             "database_head_sequence": head.sequence,
             "database_head_hash": head.hash,
             "last_anchored_sequence": previous_anchor.sequence if previous_anchor else None,
@@ -296,15 +353,20 @@ class PostgresAuditTrail:
                 outcome="STARTED",
                 incident_id=None,
                 trace_id=None,
-                details=redact({**details, "new_epoch": new_epoch}),
+                details=redact(details),
                 timestamp=None,
                 new_epoch=new_epoch,
             )
-        if self._anchors is not None:
-            # The first anchor of the new epoch is this record: from now on the anchors, which the database cannot
-            # change, say which epoch the database must be in. If this write fails the next scheduled anchor writes
-            # one for the same epoch (verify() reports "no anchor" until then); it is not retried here.
-            await self._anchors.put(
-                AuditAnchor(epoch=new_epoch, sequence=record.sequence, hash=record.hash, anchored_at=self._clock.now())
+            # Before the commit: no epoch exists without a marker for it. A refusal (the application's read-only
+            # identity) or a failure here rolls the transaction back.
+            await self._epochs.put(
+                EpochMarker(
+                    epoch=new_epoch,
+                    sequence=record.sequence,
+                    hash=record.hash,
+                    started_at=self._clock.now(),
+                    started_by=redact_text(actor)[:200],
+                    reason=redact_text(reason)[:500],
+                )
             )
         return record

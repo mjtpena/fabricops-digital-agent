@@ -125,3 +125,29 @@ def test_a_database_connection_that_does_not_verify_the_server_is_for_a_local_co
             deployed(tmp_path, deployment_environment=environment, postgres_ssl_mode=mode)
     deployed(tmp_path, deployment_environment=environment, postgres_ssl_mode=PostgresSslMode.VERIFY_FULL)
     make_settings(tmp_path, **POSTGRES, postgres_ssl_mode=PostgresSslMode.REQUIRE)  # a local container may
+
+
+@pytest.mark.security
+def test_the_token_scope_for_postgres_is_validated_like_the_fabric_scopes(tmp_path: Path) -> None:
+    """The scope decides which resource the Entra token is issued for: a typo must not send it somewhere else."""
+    make_settings(tmp_path, **POSTGRES, postgres_scope="https://ossrdbms-aad.database.windows.net/.default")
+    for bad in (
+        "https://ossrdbms-aad.database.windows.net",
+        "http://evil.example/.default",
+        "ossrdbms-aad/.default",
+        "",
+    ):
+        with pytest.raises(ValueError, match="postgres_scope"):
+            make_settings(tmp_path, **POSTGRES, postgres_scope=bad)
+
+
+def test_the_epoch_container_and_the_role_to_act_as_are_validated(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, **POSTGRES)
+    assert settings.audit_epoch_container == "audit-epochs" and settings.postgres_set_role is None
+    make_settings(tmp_path, **POSTGRES, audit_epoch_container="ep-1", postgres_set_role="id-fabricops-dev-reader")
+    for bad in ("Epochs", "ep", "-ep", "ep_x"):
+        with pytest.raises(ValueError, match="audit_epoch_container"):
+            make_settings(tmp_path, **POSTGRES, audit_epoch_container=bad)
+    for bad in ('x"; DROP ROLE y; --', "", "a b", "x" * 64):
+        with pytest.raises(ValueError, match="postgres_set_role"):
+            make_settings(tmp_path, **POSTGRES, postgres_set_role=bad)

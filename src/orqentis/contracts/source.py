@@ -8,7 +8,10 @@
 same typed :mod:`~orqentis.contracts.errors` as before, naming where the document came from and every violation, and
 never echoing values from it. :class:`ContractsHolder` keeps the contracts in force and re-reads the source on demand
 (the catalog refresh does, on every replica): an unchanged SHA-256 is a no-op, a changed one is validated and applied,
-and an invalid or missing one raises the typed error while the **last good contracts stay in force**.
+and an invalid or missing one raises the typed error while the **last good contracts stay in force**. The failure is
+remembered (:class:`ReloadFailure`) until a later reload succeeds, so the application can say it is *degraded*
+(``/health/ready``), audit the rejected digest once, and let an operator see that the contracts in force are not the
+ones last uploaded.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from pathlib import Path
 from typing import Protocol
 
 from orqentis.contracts.diagnostics import MAX_FILE_BYTES, read_document
-from orqentis.contracts.errors import ContractsInvalidError, ContractViolation
+from orqentis.contracts.errors import ContractsError, ContractsInvalidError, ContractViolation
 from orqentis.contracts.model import EstateContracts
 from orqentis.contracts.validate import validate_text
 from orqentis.observability.logging import get_logger
@@ -92,6 +95,16 @@ async def load_contracts_from(source: ContractsSource) -> tuple[EstateContracts,
     return load_contracts_document(document), document
 
 
+@dataclass(frozen=True)
+class ReloadFailure:
+    """Why the last reload did not take effect. Nothing here comes from the document's content."""
+
+    error_type: str  # ContractsInvalidError | ContractsFileNotFoundError
+    location: str
+    rejected_sha256: str | None  # the digest of the document that was refused; None when it could not be read at all
+    violation_pointers: tuple[str, ...]  # JSON pointers of the violations (structure only, never values)
+
+
 class ContractsHolder:
     """The contracts in force, and a way to re-read them. ``apply`` pushes new contracts into the live adapters."""
 
@@ -107,6 +120,7 @@ class ContractsHolder:
         self._document = document
         self._apply = apply
         self._lock = asyncio.Lock()
+        self._failure: ReloadFailure | None = None
 
     @property
     def contracts(self) -> EstateContracts:
@@ -116,6 +130,11 @@ class ContractsHolder:
     def document(self) -> ContractsDocument:
         return self._document
 
+    @property
+    def failure(self) -> ReloadFailure | None:
+        """Set while the contracts in force are older than what the source holds (the last reload was refused)."""
+        return self._failure
+
     async def reload(self) -> bool:
         """Re-read the source; apply and return True when the content changed, False when it did not.
 
@@ -123,11 +142,23 @@ class ContractsHolder:
         were in force stay in force). Callers that run on a schedule report that once and retry on the next run.
         """
         async with self._lock:  # a scheduled refresh and a replica's own refresh never apply the same change twice
-            document = await self._source.read()
-            if document.sha256 == self._document.sha256:
-                return False
-            contracts = load_contracts_document(document)
+            document: ContractsDocument | None = None
+            try:
+                document = await self._source.read()
+                if document.sha256 == self._document.sha256:
+                    self._failure = None
+                    return False
+                contracts = load_contracts_document(document)
+            except ContractsError as exc:
+                self._failure = ReloadFailure(
+                    error_type=type(exc).__name__,
+                    location=document.location if document is not None else self._source.location,
+                    rejected_sha256=document.sha256 if document is not None else None,
+                    violation_pointers=tuple(dict.fromkeys(v.pointer or "/" for v in exc.violations))[:10],
+                )
+                raise
             self._apply(contracts)
+            self._failure = None
             previous, self._contracts, self._document = self._document, contracts, document
             _log.info(
                 "contracts reloaded",

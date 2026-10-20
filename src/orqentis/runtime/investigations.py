@@ -33,7 +33,7 @@ from orqentis.incidents.service import IncidentService
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
 from orqentis.observability.redaction import redact_text
-from orqentis.runtime.fencing import fenced
+from orqentis.runtime.fencing import ClaimFence, FencingError, claim_fenced, fenced
 from orqentis.runtime.job_store import (
     ClaimedJob,
     InMemoryJobStore,
@@ -334,8 +334,10 @@ class InvestigationJobRunner:
             # The timeout bounds the investigation, not the wait for a slot: starting the clock any earlier would let
             # jobs queued behind busy slots expire without ever having run (an incident storm).
             budget = asyncio.timeout(self._timeout.total_seconds())
-            async with budget:
-                incident, trace = await self._service.investigate(job.incident_id, actor=actor)
+            fence = ClaimFence(job.job_id, self._worker_id, claimed.claim) if self._store.shared else None
+            with claim_fenced(fence):  # database writes of the investigation are refused once the claim is not ours
+                async with budget:
+                    incident, trace = await self._service.investigate(job.incident_id, actor=actor)
             outcome = InvestigationOutcome(
                 incident_status=incident.status,
                 trace_id=trace.trace_id,
@@ -350,6 +352,10 @@ class InvestigationJobRunner:
         except asyncio.CancelledError:
             await self._on_cancelled(claimed)
             raise
+        except FencingError:
+            # The claim was taken over while the investigation was writing: the new holder owns the job and incident.
+            _log.warning("investigation write refused: the claim was lost", extra={"job_id": job.job_id})
+            self._lost.add(job.job_id)
         except TimeoutError as exc:
             if budget is not None and budget.expired():
                 await self._fail(claimed, f"Timed out after {self._timeout.total_seconds():g}s", reset=True)
@@ -366,21 +372,44 @@ class InvestigationJobRunner:
                 await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def _heartbeat(self, claimed: ClaimedJob, run_task: asyncio.Task[Any] | None) -> None:
+        """Keep the claim alive; stop the investigation as soon as another replica could have taken the job over.
+
+        A failing heartbeat is retried, but only while the claim cannot yet have expired: once the last heartbeat that
+        succeeded is older than the claim lifetime minus one interval, any replica may re-queue and start the job, so
+        this worker stops its own run (it would otherwise investigate the same incident a second time at once). What it
+        might still write in the meantime is refused by the claim fence.
+        """
         job = claimed.job
         interval = self._claim_ttl.total_seconds() / 3
+        loop = asyncio.get_running_loop()
+        last_renewed = loop.time()
         while True:
             await asyncio.sleep(interval)
             try:
-                alive = await self._store.heartbeat(job.job_id, self._worker_id, claimed.claim, self._claim_ttl)
+                alive = await asyncio.wait_for(
+                    self._store.heartbeat(job.job_id, self._worker_id, claimed.claim, self._claim_ttl), interval
+                )
             except Exception:
                 _log.warning("investigation heartbeat failed", extra={"job_id": job.job_id}, exc_info=True)
-                continue  # a transient database error: the claim only lapses if this goes on for a whole TTL
+                if loop.time() - last_renewed > self._claim_ttl.total_seconds() - interval:
+                    _log.error(
+                        "investigation claim could not be renewed for as long as its lifetime allows; stopping",
+                        extra={"job_id": job.job_id},
+                    )
+                    self._abandon(job.job_id, run_task)
+                    return
+                continue
             if not alive:
                 _log.warning("investigation claim lost; stopping", extra={"job_id": job.job_id})
-                self._lost.add(job.job_id)
-                if run_task is not None:
-                    run_task.cancel()
+                self._abandon(job.job_id, run_task)
                 return
+            last_renewed = loop.time()
+
+    def _abandon(self, job_id: str, run_task: asyncio.Task[Any] | None) -> None:
+        """The job is, or may be, someone else's now: stop running it and touch nothing of it afterwards."""
+        self._lost.add(job_id)
+        if run_task is not None:
+            run_task.cancel()
 
     async def _on_cancelled(self, claimed: ClaimedJob) -> None:
         job = claimed.job

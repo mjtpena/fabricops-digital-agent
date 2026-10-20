@@ -8,6 +8,7 @@ collectors, tools and the dependency graph until the next restart. A refresh bui
 from __future__ import annotations
 
 from orqentis.config.clock import Clock
+from orqentis.contracts.errors import ContractsError
 from orqentis.contracts.model import EstateContracts
 from orqentis.contracts.source import ContractsHolder
 from orqentis.domain.incidents import IncidentStatus, TimelineKind
@@ -48,6 +49,7 @@ class CatalogRefresher:
         self._holder = contracts_holder
         self._recorder = recorder
         self._loaded_unrecorded = False  # new contracts are in force but their audit record was not written yet
+        self._reported_failure: tuple[str, str | None] | None = None  # the reload failure already logged and audited
         self._catalog = catalog
         self._graph = graph
         self._store = dependency_store
@@ -66,7 +68,17 @@ class CatalogRefresher:
         ``shared_effects=True``: it also rewrites the shared dependency table, audits the diff and annotates incidents,
         which must happen once per change, not once per replica.
         """
-        contracts_changed = await self._holder.reload() if self._holder is not None else False
+        try:
+            contracts_changed = await self._holder.reload() if self._holder is not None else False
+        except ContractsError as exc:
+            await self._report_reload_failure(exc)
+            raise
+        if self._reported_failure is not None:
+            _log.info(
+                "contracts reload recovered",
+                extra={"contracts_path": self._holder.document.location if self._holder else None},
+            )
+            self._reported_failure = None
         contracts = self._holder.contracts if self._holder is not None else self._contracts
         if contracts_changed and self._recorder is not None and self._holder is not None:
             self._loaded_unrecorded = True
@@ -106,6 +118,41 @@ class CatalogRefresher:
             )
             await self._annotate_incidents_of_removed_items(diff.items.removed)
         return diff
+
+    @property
+    def contracts_reload_failed(self) -> bool:
+        """True while the contracts in force are not the ones last uploaded (the last reload was refused)."""
+        return self._holder is not None and self._holder.failure is not None
+
+    async def _report_reload_failure(self, exc: ContractsError) -> None:
+        """Once per distinct failure: an ERROR log, and an audit record naming the digest that was refused.
+
+        The contracts that were in force stay in force. The refresh itself still fails (the scheduled job is reported
+        as failed on every run until the upload is fixed); this is the record of *what* was refused, and it is written
+        once, not once per interval.
+        """
+        failure = self._holder.failure if self._holder is not None else None
+        if failure is None:
+            return
+        key = (failure.error_type, failure.rejected_sha256)
+        if key == self._reported_failure:
+            return
+        self._reported_failure = key
+        details = {
+            "contracts_path": failure.location,
+            "rejected_sha256": failure.rejected_sha256,
+            "contracts_sha256_in_force": self._holder.document.sha256 if self._holder is not None else None,
+            "error_type": failure.error_type,
+            "violations": len(exc.violations),
+            "violation_pointers": list(failure.violation_pointers),
+        }
+        _log.error("contracts reload failed; the last good contracts stay in force", extra=details)
+        try:
+            await self._audit.record(
+                actor=SYSTEM_PRINCIPAL.id, action="contracts.reload", outcome="FAILED", details=details
+            )
+        except Exception:
+            _log.warning("could not audit the failed contracts reload", exc_info=True)
 
     async def _record_contracts_loaded(self) -> None:
         """One ``contracts.loaded`` audit record per (re)load: which file version (SHA-256) this process now runs.

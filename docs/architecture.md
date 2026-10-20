@@ -67,7 +67,8 @@ sequenceDiagram
 | `LeaderLease` | `runtime.lease` | `InProcessLeaderLease` (single process) | `PostgresLeaderLease` (database clock, fencing generation; fenced writes in `runtime.fencing`) | Both implemented |
 | `JobStore` | `runtime.job_store` | `InMemoryJobStore` | `PostgresJobStore` (unique active job per incident, `FOR UPDATE SKIP LOCKED` claims, heartbeats) | Both implemented |
 | `Mutex` | `runtime.mutex` | `InProcessMutex` | `PostgresMutex` (advisory lock on a dedicated connection) | Both implemented |
-| `AuditAnchorStore` | `observability.anchors` | `LocalAuditAnchorStore` | `BlobAuditAnchorStore` (write-once blobs in an immutable container) | Both implemented |
+| `AuditAnchorStore` | `observability.anchors` | `LocalAuditAnchorStore` | `BlobAuditAnchorStore` (write-once blobs in an immutable container; the name carries the full hash) | Both implemented |
+| `EpochMarkerStore` | `observability.epochs` | `LocalEpochMarkerStore` | `BlobEpochMarkerStore` (write-once markers in `audit-epochs`; the application's identity can only read it, an operator group writes it) | Both implemented |
 | `Collector` | `telemetry.collectors` | pipeline runs, refreshes, capacity, static replay | Eventhouse-backed capacity / schema collectors | Implemented for REST-available data |
 | `DetectionRule` | `incidents.detection` | `PipelineFailureRule` | more rules per secondary scenario | Implemented for the primary scenario |
 | `InvestigationWorkflow` | `incidents.workflows.base` | `PipelineFailureWorkflow` | refresh failure, SLA, drift workflows | Implemented for the primary scenario |
@@ -390,7 +391,8 @@ What makes two or more replicas safe ([ADR-0017](adr/0017-postgresql-system-of-r
   committed prefix. A bare identity column would let a late commit be skipped for good.
 * **Approvals.** A decision, an expiry and the execution claim are `UPDATE ... WHERE revision = $n`: one winner.
 * **Audit chain.** An append locks the one head row, so no two records share a predecessor. Verification re-derives
-  the hashes and compares with the latest anchor in immutable storage.
+  the hashes and checks every anchor in immutable storage plus the operator-written epoch marker; the anchor job refuses
+  to anchor a head that contradicts the previous anchor.
 * **Leader.** The lease compares the database clock; every scheduled job runs under a fence, and each write transaction
   checks it against the lease row (share-locked until commit): a deposed leader's late write is refused.
 * **Detection** is check-then-act, so it runs under a mutex across replicas.

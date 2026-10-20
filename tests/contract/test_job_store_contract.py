@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from orqentis.domain.incidents import IncidentStatus
 from orqentis.domain.principals import SYSTEM_PRINCIPAL, Principal, PrincipalKind
 from orqentis.runtime.job_store import (
@@ -223,6 +225,13 @@ async def test_cancel_queued_fails_queued_jobs_without_counting(job_store: JobSt
     await job_store.enqueue(job(2), OPERATOR)
     running = await job_store.claim_next("w1", TTL, now())
     assert running is not None and running.job.job_id == "INV-1"
+    if job_store.shared:
+        # A queue shared by several replicas must never be emptied by one of them shutting down.
+        with pytest.raises(NotImplementedError, match="every replica"):
+            await job_store.cancel_queued(error="Cancelled: shutting down", finished_at=now())
+        queued = await job_store.get("INV-2")
+        assert queued is not None and queued.status is InvestigationJobStatus.QUEUED
+        return
     cancelled = await job_store.cancel_queued(error="Cancelled: shutting down", finished_at=now())
     assert [j.job_id for j in cancelled] == ["INV-2"]
     gone = await job_store.get("INV-2")

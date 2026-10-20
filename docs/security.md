@@ -185,8 +185,14 @@ depth against bugs). The tamper evidence is the chain plus **anchors**: every 15
 (epoch, sequence, hash) is written once to a blob in a container with version-level immutability, and `orqentis
 audit` / `GET /audit/verify` check that the database still holds the anchored record with the anchored hash. An
 edited record, a removed record, a removed tail, a row slipped in beyond the head, columns edited apart from the
-hashed body, and a table rewritten with every hash recomputed (also with the epoch counter moved) are each detected
-(`tests/concurrency/test_audit_chain.py`). Records newer than the latest anchor are protected by the chain alone.
+hashed body, a table rewritten with every hash recomputed (also with the epoch counter moved, also followed by a new
+record and the next scheduled anchor) and a chain cut back and regrown past its anchor are each detected
+(`tests/concurrency/test_audit_chain.py`, `test_audit_anchors.py`). Verification checks **every** anchor, not only the
+latest, and the anchor job refuses to anchor a head that contradicts the previous anchor (ERROR log
+`audit chain verification failed`, scheduled job reported as failed). **Tampering is detectable up to the last anchor**;
+the records after it, at most one anchoring interval, are protected by the chain alone. An audit epoch (opened after a
+restore) needs a marker in a container the application's identity can only read; the operator group that writes it is a
+parameter (`auditOperatorsPrincipalId`).
 After a restore the database can be behind its anchor; that is reported until an operator records the loss with
 `orqentis audit start-epoch` ([ADR-0017](adr/0017-postgresql-system-of-record.md),
 [operations/restore.md](operations/restore.md)).

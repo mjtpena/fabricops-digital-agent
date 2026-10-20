@@ -102,24 +102,45 @@ have exactly one winner across any number of processes, and a write behind the c
   user can drop a trigger).
 * **Verification** re-derives every hash from the stored body, checks contiguity, that the indexed columns (the ones
   queries filter on) agree with the hashed body, that the last record is the head and that nothing exists beyond it
-  (a row slipped in past the head would otherwise be listed, and would block every later append), and the latest
-  **anchor**. Records appended while it runs are beyond the head it started from. Values with a NUL character, which
-  PostgreSQL text cannot hold, are stored in the columns with U+FFFD in its place; the exact value stays in the body.
-* **Anchors.** Every 15 minutes (leader-only job) the head `(epoch, sequence, hash)` is written to a blob with
-  `If-None-Match: *` in a container with version-level immutability. Whoever rewrites the table, recomputes every hash
-  and moves the head, or deletes the tail, contradicts an anchor the database owner cannot change: verified against
-  all three attacks (`tests/concurrency/test_audit_chain.py`). Two different hashes anchored for one sequence are
-  reported as a conflict.
-* **The epoch counter is a database column, so the anchors decide it.** The database must be in the **highest epoch
-  that has an anchor**; otherwise verification fails. Without this, the same attacker could rewrite every record and
-  also add one to the counter, so that the rewritten chain is checked against an epoch nobody anchored (found by the
-  independent review). `orqentis audit start-epoch` therefore also writes the first anchor of the new epoch (the
-  `audit.epoch` record), and chooses an epoch above every one that has anchors (a second restore from an older backup
-  does not reuse epoch 2). Someone who holds the database but not the anchor container cannot move the counter.
-* **Epochs.** After a restore the database may be *behind* its latest anchor; that is reported (records are lost) and
-  stays reported until an operator runs `orqentis audit start-epoch --reason ...`, which appends an `audit.epoch`
-  record naming the head and the last anchor of the epoch that ends, anchors that record as the first anchor of a new
-  epoch, and moves the database into it. Old anchors stay as the evidence of the loss. Without this, a legitimate restore would leave verification failing forever.
+  (a row slipped in past the head would otherwise be listed, and would block every later append). With the immutable
+  side configured it also checks **every anchor and every epoch marker** (below). Records appended while it runs are
+  beyond the head it started from. Values with a NUL character, which PostgreSQL text cannot hold, are stored in the
+  columns with U+FFFD in its place; the exact value stays in the body.
+* **Anchors.** Every 15 minutes (leader-only job) the head `(epoch, sequence, hash)` is written to a blob named
+  `epoch-NNNN/<sequence>-<64 hex hash>.json` with `If-None-Match: *` in a container with version-level immutability.
+  Verification checks that the database holds, **at every anchored sequence, the record with the anchored hash**. (The
+  first version compared only the latest anchor; the independent review showed that anyone who rewrote the chain could
+  then append a record and wait for the next scheduled anchor to cover the rewritten head. Old anchors are what stop
+  that.) The full hash is in the name, so listing the container verifies all of them without reading each blob. Two
+  different hashes anchored for one sequence are reported as a conflict.
+* **The anchor job refuses to anchor a chain that contradicts what is already anchored.** Before writing it checks, with
+  a handful of reads, that the database is in the epoch of the highest marker, that the head is not behind the previous
+  anchor of the epoch, that the record at the previous anchor's sequence still has the anchored hash and that the record
+  that opened the epoch still matches its marker. If not, it anchors nothing, logs an ERROR with the message the audit
+  verification alert watches (`audit chain verification failed`), and fails the scheduled job (visible in the scheduler
+  status), on every run, until the chain is consistent again or an operator opens an epoch. A tampered head therefore
+  never enters the immutable record, where it would be permanent.
+* **Epochs and the operator-only marker.** The epoch counter is a database column, and so is whatever a database owner
+  makes it. After a restore the database may be *behind* its anchors; an operator runs
+  `orqentis audit start-epoch --reason ...`, which, in one transaction, appends an `audit.epoch` record (naming the head
+  and the last anchor of the epoch that ends), **writes the epoch marker for the new epoch** and commits. The marker is
+  a blob in a separate container, `audit-epochs`, where the application's identity has `Storage Blob Data Reader` only and
+  an operator group (`auditOperatorsPrincipalId`) has `Contributor`. Verification requires the database to be in the
+  epoch of the highest marker. So: someone who only holds the database cannot move the counter (no marker), the anchor
+  job and the application cannot open an epoch (they cannot write the marker; the identity has no management-plane role
+  on the storage account either, so it cannot change an immutability policy), and a restore that skips the operator step
+  is reported and refused rather than waved through. The marker is written inside the transaction, before the commit: with
+  the application's identity `start-epoch` stops with a clear error and **nothing changes**; if the process dies between
+  the marker and the commit, the next run opens the next epoch number and the unused marker is ignored.
+  Anchors of an earlier epoch below the sequence where the next epoch opened keep binding the surviving history;
+  those at or beyond it describe the records the restore lost and stay as evidence.
+* **What this does not protect, stated plainly.** Tampering is detectable **up to the last anchor**. The records
+  after it (at most one anchoring interval, 15 minutes by default) are protected by the hash chain alone: someone with
+  full database rights could rewrite that tail before the next anchor covers it. Someone who holds *both* the database
+  and the application's storage identity cannot rewrite anchors (immutable) or open an epoch (no write role), but can
+  write junk anchors, which only makes verification fail; someone who also holds the operator role can open an epoch,
+  and that is recorded in the chain and in a marker that names who and why. An owner of the storage account who can change
+  the immutability policy before it is locked can delete anchors: keep that role small and lock the policy in production.
 * The timestamp is the application clock's, taken while holding the head lock. Audit appends are never fenced (see 7):
   a record of something that happened is kept even from a deposed leader.
 
@@ -240,7 +261,9 @@ storage key and the SMB mount are removed.** The estate contracts file, which li
     revision is gone.
   * Anchoring runs every 15 minutes (leader-only). Records newer than the latest anchor are protected by the hash
     chain alone: someone with full database rights could rewrite that last interval before the next anchor covers it.
-    A shorter interval narrows the window (`ORQENTIS_SCHEDULER_AUDIT_ANCHOR_INTERVAL_MINUTES`).
+    A shorter interval narrows the window (`ORQENTIS_SCHEDULER_AUDIT_ANCHOR_INTERVAL_MINUTES`); it is inherent, not a
+    defect to be closed. Verification reads every anchor name on each run (a year of 15-minute anchors is about 35,000
+    names, 35 list calls).
 * A PostgreSQL outage stops the app (readiness fails; the build is retried with backoff), by design: the system of
   record is unavailable.
 * Costs: B1ms about USD 24/month plus storage; the connection budget is `replicas x ORQENTIS_POSTGRES_POOL_MAX` (+ the

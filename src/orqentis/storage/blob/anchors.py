@@ -1,23 +1,20 @@
 """Audit anchors as immutable blobs (:class:`~orqentis.observability.anchors.AuditAnchorStore`).
 
-Each anchor is a small JSON object named ``epoch-NNNN/<sequence, 12 digits>-<hash prefix>.json`` and uploaded with
+Each anchor is a small JSON object named ``epoch-NNNN/<sequence, 12 digits>-<hash, 64 hex>.json`` and uploaded with
 ``If-None-Match: *`` (write-once). In the deployed storage account the container has version-level immutability, so the
 application identity can create anchors but nobody, the application included, can change or delete one before its
-retention ends. Listing is lexicographic, which for zero-padded sequences is numeric order.
+retention ends. Listing is lexicographic, which for zero-padded sequences is numeric order, and the name alone says
+everything verification needs (epoch, sequence, hash).
 """
 
 from __future__ import annotations
-
-import re
 
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import ContainerClient
 
-from orqentis.observability.anchors import AuditAnchor, parse_anchor_name, pick_latest
+from orqentis.observability.anchors import AnchorRef, AuditAnchor, parse_anchor_name, pick_latest
 from orqentis.storage.blob.evidence import normalise_prefix
-
-_EPOCH_FOLDER = re.compile(r"^epoch-(\d{4})/$")
 
 
 class BlobAuditAnchorStore:
@@ -37,32 +34,24 @@ class BlobAuditAnchorStore:
             return False
         return True
 
-    async def highest_epoch(self) -> int | None:
-        # One level of "folders" (epoch-NNNN/): listing by delimiter does not read every anchor ever written.
-        epochs: list[int] = []
-        async for item in self._container.walk_blobs(name_starts_with=f"{self._prefix}epoch-", delimiter="/"):
-            name = str(item.name)[len(self._prefix) :]
-            match = _EPOCH_FOLDER.match(name)
-            if match:
-                epochs.append(int(match.group(1)))
-        return max(epochs) if epochs else None
+    async def refs(self, epoch: int) -> list[AnchorRef]:
+        folder = f"{self._prefix}epoch-{epoch:04d}/"
+        found: list[AnchorRef] = []
+        async for blob in self._container.list_blobs(name_starts_with=folder):
+            parsed = parse_anchor_name(blob.name[len(self._prefix) :])
+            if parsed is not None:
+                found.append(AnchorRef(*parsed))
+        return sorted(found, key=lambda r: (r.sequence, r.hash))
 
     async def latest(self, epoch: int) -> AuditAnchor | None:
-        folder = f"{self._prefix}epoch-{epoch:04d}/"
-        names = [
-            blob.name
-            async for blob in self._container.list_blobs(name_starts_with=folder)
-            if parse_anchor_name(blob.name[len(self._prefix) :]) is not None
-        ]
-        if not names:
+        refs = await self.refs(epoch)
+        if not refs:
             return None
-        names.sort()
-        top = parse_anchor_name(names[-1][len(self._prefix) :])
-        assert top is not None
+        top = refs[-1].sequence
         # Every object at the highest sequence (normally one; two with different hashes is a conflict to report).
-        candidates = [n for n in names if (parse_anchor_name(n[len(self._prefix) :]) or (0, -1, ""))[1] == top[1]]
         anchors = []
-        for name in candidates:
+        for ref in (r for r in refs if r.sequence == top):
+            name = f"{self._prefix}epoch-{ref.epoch:04d}/{ref.sequence:012d}-{ref.hash}.json"
             downloader = await self._container.download_blob(name)
             anchors.append(AuditAnchor.model_validate_json(await downloader.readall()))
         return pick_latest(anchors)

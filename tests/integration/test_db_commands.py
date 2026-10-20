@@ -12,8 +12,9 @@ from orqentis.bootstrap import open_postgres_session
 from orqentis.cli import main
 from orqentis.config.clock import SystemClock
 from orqentis.db_commands import run_audit_postgres, run_db
+from orqentis.storage.blob import BlobStorage
 from tests.conftest import make_settings
-from tests.support.postgres_app import AppStorage
+from tests.support.postgres_app import AppStorage, azurite_blob_storage
 
 
 def console() -> tuple[Console, io.StringIO]:
@@ -66,7 +67,7 @@ async def test_reseed_counters_raises_the_numbers_above_the_evidence_that_surviv
 
 
 async def test_audit_verification_and_a_new_epoch_from_the_command_line(
-    app_storage: AppStorage, tmp_path: Path
+    app_storage: AppStorage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = app_storage.settings(tmp_path)
     session = await open_postgres_session(settings, SystemClock(), migrate=True)
@@ -78,6 +79,11 @@ async def test_audit_verification_and_a_new_epoch_from_the_command_line(
     out, text = console()
     assert await run_audit_postgres(settings, out, start_epoch_reason=None) == 0
     assert "'valid': True" in text.getvalue() and "'records': 3" in text.getvalue()
+    # Opening an epoch is an operator action: the application's own identity cannot do it (read-only marker container).
+    out, text = console()
+    assert await run_audit_postgres(settings, out, start_epoch_reason="from the app") == 1
+    assert "Audit epoch not started" in text.getvalue()
+    monkeypatch.setattr(BlobStorage, "open", staticmethod(azurite_blob_storage(app_storage.azurite, operator=True)))
     out, text = console()
     assert await run_audit_postgres(settings, out, start_epoch_reason="restored to 07:00Z from server old") == 0
     assert "Started audit epoch (record 4)" in text.getvalue() and "restored to 07:00Z" in text.getvalue()

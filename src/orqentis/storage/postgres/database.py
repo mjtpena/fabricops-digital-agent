@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 import asyncpg
 
 from orqentis.observability.logging import get_logger
-from orqentis.runtime.fencing import FencingError, current_fence
+from orqentis.runtime.fencing import FencingError, current_claim_fence, current_fence
 
 _log = get_logger(__name__)
 
@@ -44,6 +44,7 @@ _CONNECT_ATTEMPTS = 3
 _CONNECT_RETRYABLE = (OSError, asyncpg.PostgresConnectionError, asyncpg.InvalidPasswordError, asyncio.TimeoutError)
 
 _SCHEMA_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}")
+_ROLE_NAME = re.compile(r"[A-Za-z0-9_.@-]{1,63}")
 
 Record = asyncpg.Record
 if TYPE_CHECKING:
@@ -70,12 +71,28 @@ class PostgresConfig:
     lock_timeout_seconds: int = 30
     idle_in_transaction_timeout_seconds: int = 60
     application_name: str = "orqentis-fabricops"
+    # Act as this role on every connection (SET ROLE); see ``Settings.postgres_set_role``.
+    set_role: str | None = None
 
     def __post_init__(self) -> None:
         if not _SCHEMA_NAME.fullmatch(self.schema):
             raise ValueError(
                 f"Invalid PostgreSQL schema name (lower case letters, digits, underscore): {self.schema!r}"
             )
+
+
+def _role_initialiser(role: str | None) -> Any:
+    """A per-connection ``SET ROLE``, or nothing. The name is validated by the settings; quote it anyway."""
+    if role is None:
+        return None
+    if not _ROLE_NAME.fullmatch(role):
+        raise ValueError(f"Invalid PostgreSQL role name: {role!r}")
+    statement = f'SET ROLE "{role}"'
+
+    async def init(connection: Any) -> None:
+        await connection.execute(statement)
+
+    return init
 
 
 def _has_nul(args: tuple[Any, ...]) -> bool:
@@ -124,6 +141,7 @@ class PostgresDatabase:
             server_settings=server_settings,
             # Idle connections are closed and re-opened (with a fresh token) instead of living for days.
             max_inactive_connection_lifetime=300.0,
+            init=_role_initialiser(config.set_role),
         )
         if pool is None:  # pragma: no cover - asyncpg returns None only for an unawaited, unstarted pool
             raise RuntimeError("PostgreSQL pool could not be created")
@@ -181,6 +199,19 @@ class PostgresDatabase:
                     raise FencingError(
                         f"The lease {fence.lease_name!r} (generation {fence.generation}) is no longer held by "
                         f"{fence.holder_id}: the write was refused"
+                    )
+            if fenced and (claim := current_claim_fence()) is not None:
+                row = await conn.fetchrow(
+                    "SELECT job_id FROM investigation_jobs WHERE job_id = $1 AND claimed_by = $2 AND claim_seq = $3 "
+                    "AND status = 'RUNNING' FOR SHARE",
+                    claim.job_id,
+                    claim.worker_id,
+                    claim.claim,
+                )
+                if row is None:
+                    raise FencingError(
+                        f"The claim on investigation job {claim.job_id} is no longer held by {claim.worker_id}: "
+                        "the write was refused"
                     )
             yield conn
 

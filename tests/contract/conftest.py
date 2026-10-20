@@ -24,6 +24,7 @@ from orqentis.domain.incidents import Incident
 from orqentis.fabric.fixtures import load_history
 from orqentis.observability.anchors import AuditAnchorStore, LocalAuditAnchorStore
 from orqentis.observability.audit import AuditTrail, LocalAuditLog
+from orqentis.observability.epochs import EpochMarkerStore, LocalEpochMarkerStore
 from orqentis.runtime.job_store import InMemoryJobStore, JobStore
 from orqentis.runtime.lease import InProcessLeaderLease, LeaderLease, LeaseTable
 from orqentis.storage.blob import BlobContractsSource
@@ -182,6 +183,13 @@ def contracts_publisher(contracts_backend: str, request: pytest.FixtureRequest, 
         path.unlink()
 
     return ContractsPublisher(FileContractsSource(path), put_file, remove_file)
+
+
+@pytest.fixture
+def epoch_store(evidence_backend: str, request: pytest.FixtureRequest, tmp_path: Path) -> EpochMarkerStore:
+    if evidence_backend == "blob":
+        return request.getfixturevalue("blob_epochs")  # type: ignore[no-any-return]
+    return LocalEpochMarkerStore(tmp_path / "epochs")
 
 
 # -------------------------------------------------------------------------------------------- sample objects

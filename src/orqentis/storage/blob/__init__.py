@@ -10,9 +10,10 @@ from azure.storage.blob.aio import BlobServiceClient
 
 from orqentis.storage.blob.anchors import BlobAuditAnchorStore
 from orqentis.storage.blob.contracts import BlobContractsSource
+from orqentis.storage.blob.epochs import BlobEpochMarkerStore
 from orqentis.storage.blob.evidence import BlobEvidenceStore
 
-__all__ = ["BlobAuditAnchorStore", "BlobContractsSource", "BlobEvidenceStore", "BlobStorage"]
+__all__ = ["BlobAuditAnchorStore", "BlobContractsSource", "BlobEpochMarkerStore", "BlobEvidenceStore", "BlobStorage"]
 
 
 @dataclass
@@ -23,6 +24,7 @@ class BlobStorage:
     evidence: BlobEvidenceStore
     anchors: BlobAuditAnchorStore
     contracts: BlobContractsSource
+    epochs: BlobEpochMarkerStore
 
     @classmethod
     def open(
@@ -36,6 +38,7 @@ class BlobStorage:
         anchor_prefix: str = "",
         contracts_container: str = "contracts",
         contracts_blob_name: str = "estate.json",
+        epoch_container: str = "audit-epochs",
     ) -> Self:
         """Build the clients (no network traffic yet). ``credential`` is an Entra token credential, never a key."""
         service = BlobServiceClient(account_url, credential=credential)
@@ -44,6 +47,7 @@ class BlobStorage:
             evidence=BlobEvidenceStore(service.get_container_client(evidence_container), path_prefix=evidence_prefix),
             anchors=BlobAuditAnchorStore(service.get_container_client(anchor_container), path_prefix=anchor_prefix),
             contracts=BlobContractsSource(service.get_container_client(contracts_container), contracts_blob_name),
+            epochs=BlobEpochMarkerStore(service.get_container_client(epoch_container)),
         )
 
     async def close(self) -> None:
