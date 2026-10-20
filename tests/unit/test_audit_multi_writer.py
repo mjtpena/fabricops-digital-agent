@@ -73,6 +73,7 @@ async def test_a_half_written_last_line_does_not_stop_a_new_process_from_startin
 
 
 # ------------------------------------------------------------------------------------ review round 2: shrinking
+@pytest.mark.security
 async def test_truncating_the_tail_of_a_live_log_is_refused_not_absorbed(tmp_path: Path) -> None:
     """Another writer only ever makes the file bigger; a smaller file means records were removed."""
     path = tmp_path / "audit.jsonl"
@@ -93,6 +94,7 @@ async def test_truncating_the_tail_of_a_live_log_is_refused_not_absorbed(tmp_pat
         await log.record(actor="x", action="again", outcome="OK")
 
 
+@pytest.mark.security
 async def test_a_breach_is_remembered_even_if_the_file_grows_back(tmp_path: Path) -> None:
     """Restoring or padding the file afterwards must not quietly re-enable appends."""
     path = tmp_path / "audit.jsonl"
@@ -110,6 +112,7 @@ async def test_a_breach_is_remembered_even_if_the_file_grows_back(tmp_path: Path
     assert not (await log.verify()).valid
 
 
+@pytest.mark.security
 async def test_a_replaced_or_emptied_log_is_a_breach_too(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     log = LocalAuditLog(path, CLOCK)
@@ -120,6 +123,7 @@ async def test_a_replaced_or_emptied_log_is_a_breach_too(tmp_path: Path) -> None
     assert not (await log.verify()).valid
 
 
+@pytest.mark.security
 async def test_verification_notices_truncation_even_if_nothing_was_appended_since(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     log = LocalAuditLog(path, CLOCK)
@@ -130,6 +134,7 @@ async def test_verification_notices_truncation_even_if_nothing_was_appended_sinc
     assert not verification.valid and "truncated" in (verification.reason or "")
 
 
+@pytest.mark.security
 async def test_a_deletion_in_the_middle_keeps_its_original_diagnosis(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     log = LocalAuditLog(path, CLOCK)
@@ -160,6 +165,7 @@ async def test_a_failed_write_does_not_consume_a_sequence_number(
     assert (await log.verify()).valid
 
 
+@pytest.mark.security
 async def test_the_audit_endpoint_reports_a_truncated_live_log(container: Container) -> None:
     await container.audit.record(actor="x", action="a", outcome="OK")
     await container.audit.record(actor="x", action="b", outcome="OK")

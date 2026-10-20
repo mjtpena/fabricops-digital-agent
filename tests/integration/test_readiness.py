@@ -35,6 +35,7 @@ def client_for(app: object) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")  # type: ignore[arg-type]
 
 
+@pytest.mark.security
 async def test_a_failing_build_keeps_the_process_alive_reports_a_redacted_reason_and_is_retried(
     tmp_path: Path,
 ) -> None:
@@ -137,6 +138,24 @@ async def test_a_real_build_failure_in_the_composition_root_does_not_crash_or_le
     for db in opened:
         with pytest.raises(sqlite3.ProgrammingError):
             db._conn.execute("SELECT 1")
+
+
+async def test_create_app_looks_up_build_container_when_the_app_is_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tests (and WS3's spy write client) patch ``orqentis.api.app.build_container``; a default argument bound at
+    import time would silently ignore that patch."""
+    built: list[Settings] = []
+
+    async def patched(s: Settings) -> Container:
+        built.append(s)
+        return await build_container(s, reset=True)
+
+    monkeypatch.setattr("orqentis.api.app.build_container", patched)
+    app = create_app(make_settings(tmp_path))
+    async with app.router.lifespan_context(app):
+        await wait_until(lambda: app.state.runtime.ready)
+    assert len(built) == 1
 
 
 def test_the_readiness_models_reject_unknown_fields() -> None:

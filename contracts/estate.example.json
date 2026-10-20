@@ -1,0 +1,109 @@
+{
+  "$schema": "../schemas/contracts.schema.json",
+  "environments": [
+    {
+      "workspace_id": "00000000-0000-0000-0000-0000000000a1",
+      "environment": "PROD",
+      "note": "Sales Analytics: the name carries no environment"
+    },
+    {
+      "workspace_name_pattern": "Finance *",
+      "environment": "PROD",
+      "note": "Every Finance workspace is production"
+    },
+    {
+      "workspace_name_pattern": "*-sandbox",
+      "environment": "DEV"
+    },
+    {
+      "item_id": "00000000-0000-0000-0000-0000000000b6",
+      "environment": "DEV",
+      "note": "Experimental notebook that lives in a PROD workspace; the downgrade is intended",
+      "accepts_downgrade": true
+    }
+  ],
+  "external_sources": [
+    {
+      "id": "src-crm",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "workspace_id": "00000000-0000-0000-0000-0000000000a1",
+      "display_name": "CRM sales orders feed",
+      "environment": "PROD",
+      "owner": "crm-integration@contoso.com",
+      "metadata": {
+        "system": "Dynamics 365"
+      }
+    }
+  ],
+  "data_products": [
+    {
+      "id": "dp-sales-gold",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "workspace_id": "00000000-0000-0000-0000-0000000000a1",
+      "display_name": "sales_gold",
+      "owner": "sales-data-platform@contoso.com",
+      "description": "Curated daily sales orders.",
+      "environment": "PROD",
+      "backing_item_ids": [
+        "00000000-0000-0000-0000-0000000000b3"
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "id": "dep-1",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "source_item_id": "00000000-0000-0000-0000-0000000000b1",
+      "target_item_id": "src-crm",
+      "dependency_type": "READS_FROM"
+    },
+    {
+      "id": "dep-2",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "source_item_id": "00000000-0000-0000-0000-0000000000b1",
+      "target_item_id": "00000000-0000-0000-0000-0000000000b2",
+      "dependency_type": "TRIGGERS"
+    },
+    {
+      "id": "dep-3",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "source_item_id": "00000000-0000-0000-0000-0000000000b2",
+      "target_item_id": "00000000-0000-0000-0000-0000000000b3",
+      "dependency_type": "WRITES_TO"
+    },
+    {
+      "id": "dep-4",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "source_item_id": "00000000-0000-0000-0000-0000000000b3",
+      "target_item_id": "dp-sales-gold",
+      "dependency_type": "PRODUCES"
+    },
+    {
+      "id": "dep-5",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "source_item_id": "00000000-0000-0000-0000-0000000000b4",
+      "target_item_id": "dp-sales-gold",
+      "dependency_type": "CONSUMES"
+    },
+    {
+      "id": "dep-6",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "source_item_id": "00000000-0000-0000-0000-0000000000b5",
+      "target_item_id": "00000000-0000-0000-0000-0000000000b4",
+      "dependency_type": "DEPENDS_ON"
+    }
+  ],
+  "slas": [
+    {
+      "id": "sla-sales-gold",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "data_product_id": "dp-sales-gold",
+      "display_name": "sales_gold daily availability",
+      "description": "sales_gold must be available before 06:30 Australia/Sydney.",
+      "deadline_local_time": "06:30:00",
+      "timezone": "Australia/Sydney",
+      "freshness_item_id": "00000000-0000-0000-0000-0000000000b1",
+      "owner": "sales-data-platform@contoso.com"
+    }
+  ]
+}

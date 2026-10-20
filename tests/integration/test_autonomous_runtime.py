@@ -78,6 +78,7 @@ async def gated_container(tmp_path: Path) -> AsyncIterator[tuple[Container, Gate
 
 
 # ---------------------------------------------------------------- AC2: scheduled detection -> investigation
+@pytest.mark.security
 async def test_an_incident_from_scheduled_detection_is_investigated_without_any_api_call(
     container: Container,
 ) -> None:

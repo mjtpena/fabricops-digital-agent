@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -14,6 +13,7 @@ from fastapi.testclient import TestClient
 from orqentis.api.app import create_app
 from orqentis.config.settings import ApiAuthMode
 from tests.conftest import make_settings
+from tests.support.jobs import await_job
 
 OPERATOR = {"X-Orqentis-User": "olivia@contoso.com", "X-Orqentis-Roles": "FabricOps.Operator"}
 VIEWER = {"X-Orqentis-User": "victor@contoso.com"}
@@ -23,17 +23,6 @@ VIEWER = {"X-Orqentis-User": "victor@contoso.com"}
 def client(tmp_path: Path) -> Iterator[TestClient]:
     with TestClient(create_app(make_settings(tmp_path))) as test_client:
         yield test_client
-
-
-def await_job(client: TestClient, job_id: str, headers: dict[str, str], *, timeout: float = 30.0) -> dict[str, object]:
-    """Poll an investigation job until it leaves QUEUED/RUNNING."""
-    deadline = time.monotonic() + timeout
-    while True:
-        job: dict[str, object] = client.get(f"/investigations/{job_id}", headers=headers).json()
-        if job["status"] not in ("QUEUED", "RUNNING"):
-            return job
-        assert time.monotonic() < deadline, f"investigation job still {job['status']} after {timeout}s"
-        time.sleep(0.02)
 
 
 def investigated(client: TestClient) -> dict[str, object]:
@@ -50,7 +39,10 @@ def investigated(client: TestClient) -> dict[str, object]:
 
 def test_health_and_openapi(client: TestClient) -> None:
     health = client.get("/health").json()
-    assert health["status"] == "ok" and health["fabric_mode"] == "mock" and health["write_actions_enabled"] is False
+    assert health["status"] == "ok" and health["fabric_mode"] == "mock"
+    # The anonymous answer does not disclose the write capability; the authenticated one does.
+    assert "write_actions_enabled" not in health
+    assert client.get("/system/info", headers=VIEWER).json()["write_actions_enabled"] is False
     paths = client.get("/openapi.json").json()["paths"]
     for path in (
         "/health",
@@ -142,12 +134,16 @@ def test_unknown_incident_and_conflicts(client: TestClient) -> None:
 
 def test_easy_auth_principal(tmp_path: Path) -> None:
     settings = make_settings(tmp_path, api_auth_mode=ApiAuthMode.EASY_AUTH)
+    # A delegated user token as Easy Auth forwards it. A principal with only oid, name and roles is ambiguous
+    # (it could be an app-only token) and is refused; see tests/integration/test_api_identity.py.
     principal = {
         "auth_typ": "aad",
         "name_typ": "name",
         "role_typ": "roles",
         "claims": [
             {"typ": "http://schemas.microsoft.com/identity/claims/objectidentifier", "val": "oid-123"},
+            {"typ": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier", "val": "pairwise-123"},
+            {"typ": "http://schemas.microsoft.com/identity/claims/scope", "val": "FabricOps.Access"},
             {"typ": "name", "val": "Olivia"},
             {"typ": "roles", "val": "FabricOps.Operator"},
         ],

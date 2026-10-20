@@ -253,6 +253,7 @@ async def test_the_lease_generation_is_visible_in_the_audit_trail(tmp_path: Path
 
 
 # ------------------------------------------------------------------------------------------------ finding 7
+@pytest.mark.security
 async def test_the_readiness_probe_reveals_no_exception_text(tmp_path: Path) -> None:
     async def failing(s: Settings) -> Container:
         raise FileNotFoundError("/var/lib/orqentis/contracts/estate.json")

@@ -1,0 +1,493 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "DataProduct": {
+      "additionalProperties": false,
+      "description": "A logical, owned data asset (e.g. the ``sales_gold`` table) backed by Fabric items.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "tenant_id": {
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "workspace_id": {
+          "title": "Workspace Id",
+          "type": "string"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "owner": {
+          "title": "Owner",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment",
+          "default": "UNKNOWN"
+        },
+        "backing_item_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Backing Item Ids",
+          "type": "array"
+        },
+        "item_type": {
+          "const": "DataProduct",
+          "default": "DataProduct",
+          "title": "Item Type",
+          "type": "string"
+        },
+        "source": {
+          "default": "declared",
+          "title": "Source",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "tenant_id",
+        "workspace_id",
+        "display_name",
+        "owner"
+      ],
+      "title": "DataProduct",
+      "type": "object"
+    },
+    "Dependency": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "tenant_id": {
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "source_item_id": {
+          "title": "Source Item Id",
+          "type": "string"
+        },
+        "target_item_id": {
+          "title": "Target Item Id",
+          "type": "string"
+        },
+        "dependency_type": {
+          "$ref": "#/$defs/DependencyType"
+        },
+        "source": {
+          "default": "declared",
+          "title": "Source",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "tenant_id",
+        "source_item_id",
+        "target_item_id",
+        "dependency_type"
+      ],
+      "title": "Dependency",
+      "type": "object"
+    },
+    "DependencyType": {
+      "enum": [
+        "TRIGGERS",
+        "READS_FROM",
+        "WRITES_TO",
+        "REFRESHES",
+        "DEPENDS_ON",
+        "PRODUCES",
+        "CONSUMES"
+      ],
+      "title": "DependencyType",
+      "type": "string"
+    },
+    "Environment": {
+      "enum": [
+        "DEV",
+        "TEST",
+        "PROD",
+        "UNKNOWN"
+      ],
+      "title": "Environment",
+      "type": "string"
+    },
+    "EnvironmentDeclaration": {
+      "additionalProperties": false,
+      "description": "A declared environment that takes precedence over inference from names.\n\nExactly one selector identifies what is classified: a workspace by ``workspace_id``, workspaces by\n``workspace_name_pattern`` (``*`` and ``?`` wildcards, case-insensitive; every other character is\nliteral, so ``Sales [PROD]`` matches that name exactly), one item by ``item_id`` or one capacity by\n``capacity_id``. Items inherit the environment of their workspace unless an ``item_id`` entry says\notherwise.\n\nOnly a *reviewed* declaration is enforced. An entry with ``inferred: true`` (a draft that\n``orqentis contracts scaffold`` pre-filled from naming conventions) or with environment ``UNKNOWN`` is\nnot applied: the workspace keeps its name-based classification, so a stale or unfinished draft can\nnever pin a workspace to a guess. ``contracts validate`` warns about both until a human edits them.\n\nA declaration that lowers a workspace whose name says PROD (or an item below its workspace) weakens\nseverity and production-only policy rules for it. Startup logs and audits every such override, and\n``contracts validate`` warns about it; ``accepts_downgrade: true`` records that a reviewer confirmed it\nand silences that one warning (the log and audit records remain).",
+      "oneOf": [
+        {
+          "properties": {
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ]
+        },
+        {
+          "properties": {
+            "workspace_name_pattern": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_name_pattern"
+          ]
+        },
+        {
+          "properties": {
+            "item_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "item_id"
+          ]
+        },
+        {
+          "properties": {
+            "capacity_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "capacity_id"
+          ]
+        }
+      ],
+      "properties": {
+        "workspace_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workspace Id"
+        },
+        "workspace_name_pattern": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workspace Name Pattern"
+        },
+        "item_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Item Id"
+        },
+        "capacity_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capacity Id"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "inferred": {
+          "default": false,
+          "title": "Inferred",
+          "type": "boolean"
+        },
+        "accepts_downgrade": {
+          "default": false,
+          "title": "Accepts Downgrade",
+          "type": "boolean"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "environment"
+      ],
+      "title": "EnvironmentDeclaration",
+      "type": "object"
+    },
+    "ExternalSource": {
+      "additionalProperties": false,
+      "description": "A system outside Fabric that feeds the estate (declared, not discovered).",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "tenant_id": {
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "workspace_id": {
+          "title": "Workspace Id",
+          "type": "string"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment",
+          "default": "UNKNOWN"
+        },
+        "owner": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Owner"
+        },
+        "source": {
+          "default": "declared",
+          "title": "Source",
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tags",
+          "type": "array"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "item_type": {
+          "const": "ExternalSource",
+          "default": "ExternalSource",
+          "title": "Item Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "tenant_id",
+        "workspace_id",
+        "display_name"
+      ],
+      "title": "ExternalSource",
+      "type": "object"
+    },
+    "SLA": {
+      "additionalProperties": false,
+      "description": "e.g. ``sales_gold must be available before 06:30 Australia/Sydney``.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "tenant_id": {
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "data_product_id": {
+          "title": "Data Product Id",
+          "type": "string"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "deadline_local_time": {
+          "format": "time",
+          "title": "Deadline Local Time",
+          "type": "string"
+        },
+        "timezone": {
+          "title": "Timezone",
+          "type": "string"
+        },
+        "applies_on_weekdays": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Applies On Weekdays",
+          "type": "array"
+        },
+        "freshness_item_id": {
+          "title": "Freshness Item Id",
+          "type": "string"
+        },
+        "owner": {
+          "title": "Owner",
+          "type": "string"
+        },
+        "source": {
+          "default": "declared",
+          "title": "Source",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "tenant_id",
+        "data_product_id",
+        "display_name",
+        "description",
+        "deadline_local_time",
+        "timezone",
+        "freshness_item_id",
+        "owner"
+      ],
+      "title": "SLA",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Declared environments, external sources, data products, dependencies and SLAs of a Microsoft Fabric estate. Validate with `orqentis contracts validate`; draft with `orqentis contracts scaffold`.",
+  "properties": {
+    "$schema": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional reference to the JSON Schema, for editor validation and completion.",
+      "title": "$Schema"
+    },
+    "environments": {
+      "description": "Declared environments (by workspace id, workspace name pattern or item id). They take precedence over inference from names and drive incident severity and policy.",
+      "items": {
+        "$ref": "#/$defs/EnvironmentDeclaration"
+      },
+      "title": "Environments",
+      "type": "array"
+    },
+    "external_sources": {
+      "description": "Systems outside Fabric that feed the estate.",
+      "items": {
+        "$ref": "#/$defs/ExternalSource"
+      },
+      "title": "External Sources",
+      "type": "array"
+    },
+    "data_products": {
+      "description": "Logical, owned data assets backed by Fabric items.",
+      "items": {
+        "$ref": "#/$defs/DataProduct"
+      },
+      "title": "Data Products",
+      "type": "array"
+    },
+    "dependencies": {
+      "description": "Lineage and control-flow edges between estate nodes.",
+      "items": {
+        "$ref": "#/$defs/Dependency"
+      },
+      "title": "Dependencies",
+      "type": "array"
+    },
+    "slas": {
+      "description": "Availability deadlines of data products.",
+      "items": {
+        "$ref": "#/$defs/SLA"
+      },
+      "title": "Slas",
+      "type": "array"
+    }
+  },
+  "title": "Orqentis FabricOps contracts",
+  "type": "object"
+}

@@ -18,7 +18,8 @@ param tags = {
 param containerImage = 'crfabricops.azurecr.io/orqentis-fabricops:0.1.0'
 param containerRegistryName = 'crfabricops'
 
-// Microsoft Entra app registration that represents the API (app roles FabricOps.Operator / FabricOps.PlatformAdmin).
+// Microsoft Entra app registration that represents the API (app roles FabricOps.Operator, FabricOps.PlatformAdmin,
+// FabricOps.Automation and FabricOps.Reader).
 param entraClientId = '00000000-0000-0000-0000-000000000000'
 // param entraTenantId = '<tenant id>'   // defaults to the deployment tenant
 
@@ -71,10 +72,29 @@ param startupGraceSeconds = 10
 param buildRetryInitialSeconds = 2
 param buildRetryMaxSeconds = 60
 
-// Environment-internal ingress by default. For VNet-only access set infrastructureSubnetId and externalIngress = true.
-param externalIngress = false
+// Exposure: 'externalAuthenticated' (default: public endpoint, every request needs an Entra ID token),
+// 'vnet' (internal environment, needs infrastructureSubnetId) or 'internal' (environment-internal only).
+// See infra/bicep/README.md "Network exposure" and the examples in infra/bicep/examples/.
+param ingressMode = 'externalAuthenticated'
 param infrastructureSubnetId = ''
+// param allowedIpRanges = ['203.0.113.0/24']   // optional address allow list in front of authentication
+param anonymousHealthEndpoints = true           // /health and /health/ready answer without a token
 
 param logRetentionInDays = 30
 param storageSkuName = 'Standard_LRS'
 param fileShareQuotaGiB = 32
+
+// Time zone for time-of-day reasoning and report times (validated at startup).
+param defaultTimezone = 'Australia/Sydney'
+
+// Fabric identity. managed_identity (default) reads Fabric with the reader managed identity. For a Fabric tenant
+// that is a different Entra tenant use service_principal with a Key Vault reference: see
+// infra/bicep/examples/cross-tenant.bicepparam and "Cross-tenant Fabric access" in infra/bicep/README.md.
+param fabricAuthMode = 'managed_identity'
+
+// Sovereign clouds (US Government, China): see "Sovereign clouds" in infra/bicep/README.md. Empty keeps the public cloud.
+// param authorityHost = 'https://login.microsoftonline.us'
+// param fabricApiBaseUrl = '<Fabric API base URL for your cloud>'
+// param powerbiApiBaseUrl = 'https://api.high.powerbigov.us/v1.0/myorg'
+// param fabricScope = '<Fabric API scope for your cloud>/.default'
+// param powerbiScope = 'https://high.analysis.usgovcloudapi.net/powerbi/api/.default'

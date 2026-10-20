@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from orqentis import __version__
 from orqentis.actions.gateway import ActionBlockedError
 from orqentis.api.deps import NotReadyError
+from orqentis.api.middleware import install_api_hardening
 from orqentis.api.routers import approvals, estate, incidents, investigations, runbooks, system
 from orqentis.approvals.service import (
     ApprovalError,
@@ -42,16 +43,17 @@ def create_app(
     settings: Settings | None = None,
     *,
     container: Container | None = None,
-    container_factory: Callable[[Settings], Awaitable[Container]] = build_container,
+    container_factory: Callable[[Settings], Awaitable[Container]] | None = None,
 ) -> FastAPI:
     """Build the API.
 
     Without ``container`` the app builds its own in the background (retrying with backoff if that fails) so that
     ``/health`` answers at once and ``/health/ready`` reports when the estate is loaded. ``container_factory`` lets
-    tests and embedders replace how the container is built.
+    tests and embedders replace how the container is built (default: ``build_container``, looked up when the app is
+    created).
     """
     settings = settings or (container.settings if container else Settings())
-    runtime = Runtime(settings, container_factory, container=container)
+    runtime = Runtime(settings, container_factory or build_container, container=container)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -112,4 +114,5 @@ def create_app(
         approvals.router,
     ):
         app.include_router(router)
+    install_api_hardening(app, settings)
     return app

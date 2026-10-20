@@ -8,9 +8,9 @@ collectors, tools and the dependency graph until the next restart. A refresh bui
 from __future__ import annotations
 
 from orqentis.config.clock import Clock
+from orqentis.contracts.model import EstateContracts
 from orqentis.domain.incidents import IncidentStatus, TimelineKind
 from orqentis.domain.principals import SYSTEM_PRINCIPAL
-from orqentis.fabric.fixtures import EstateContracts
 from orqentis.fabric.ports import FabricClient
 from orqentis.incidents.service import IncidentService
 from orqentis.observability.audit import AuditTrail

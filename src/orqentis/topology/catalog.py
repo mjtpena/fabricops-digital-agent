@@ -12,10 +12,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orqentis.contracts.model import EstateContracts
 from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.estate import Capacity, DataProduct, FabricItem, Workspace
 from orqentis.domain.sla import SLA
-from orqentis.fabric.fixtures import EstateContracts
 from orqentis.fabric.ports import FabricClient
 from orqentis.observability.logging import get_logger
 

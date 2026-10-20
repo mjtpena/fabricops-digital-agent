@@ -14,7 +14,10 @@ from orqentis.runtime.investigations import InvestigationJob
 
 
 class Health(BaseModel):
-    """Liveness: the process is up. Says nothing about whether the estate has been loaded (see ``Ready``)."""
+    """Anonymous liveness answer. Deliberately without capability flags (see ``SystemInfo``).
+
+    Says nothing about whether the estate has been loaded: that is ``Ready`` (``/health/ready``).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -22,7 +25,6 @@ class Health(BaseModel):
     version: str
     fabric_mode: str
     reasoner: str
-    write_actions_enabled: bool
     time: datetime
 
 
@@ -44,6 +46,12 @@ class NotReady(BaseModel):
     error_type: str | None = None
     attempts: int
     retry_in_seconds: float | None = None
+
+
+class SystemInfo(Health):
+    """What an authenticated caller may learn about the deployment, including whether writes are enabled."""
+
+    write_actions_enabled: bool
 
 
 class IncidentSummary(BaseModel):

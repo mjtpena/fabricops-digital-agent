@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 from orqentis.approvals.provider import ApprovalProvider
@@ -73,10 +76,34 @@ class ApprovalService:
         self._audit = audit
         self._clock = clock
         self._ttl = ttl
+        self._locks: dict[str, tuple[asyncio.Lock, int]] = {}
 
     @property
     def provider(self) -> ApprovalProvider:
         return self._provider
+
+    @asynccontextmanager
+    async def exclusive(self, approval_id: str) -> AsyncIterator[None]:
+        """Serialise decisions and execution claims for one approval within this process.
+
+        The compare-and-set in ``ApprovalProvider.transition`` is what makes the outcome safe across processes;
+        the lock only spares concurrent callers a pointless conflict.
+        """
+        lock, users = self._locks.get(approval_id) or (asyncio.Lock(), 0)
+        self._locks[approval_id] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            lock, users = self._locks[approval_id]
+            if users <= 1:
+                del self._locks[approval_id]
+            else:
+                self._locks[approval_id] = (lock, users - 1)
+
+    async def transition(self, updated: ApprovalRequest, *, expected_revision: int) -> ApprovalRequest | None:
+        """Compare-and-set a state change (see ``ApprovalProvider.transition``)."""
+        return await self._provider.transition(updated, expected_revision=expected_revision)
 
     async def get(self, approval_id: str) -> ApprovalRequest:
         approval = await self._provider.get(approval_id)
@@ -136,54 +163,61 @@ class ApprovalService:
     async def decide(
         self, approval_id: str, *, principal: Principal, approve: bool, comment: str | None = None
     ) -> ApprovalRequest:
-        approval = await self.get(approval_id)
-        outcome = "APPROVE" if approve else "REJECT"
-        try:
-            if approval.status is not ApprovalStatus.PENDING:
-                raise ApprovalStateError(f"Approval {approval_id} is {approval.status.value}, not PENDING")
-            if principal.kind is not PrincipalKind.HUMAN:
-                raise ApprovalForbiddenError("Only human principals can decide approvals (agents cannot approve)")
-            if principal.id == approval.requested_by:
-                raise ApprovalForbiddenError("The requester cannot approve their own request")
-            if not principal.has_role(approval.required_role):
-                raise ApprovalForbiddenError(f"Role {approval.required_role} is required to decide this approval")
-        except ApprovalError as exc:
+        async with self.exclusive(approval_id):
+            approval = await self.get(approval_id)
+            outcome = "APPROVE" if approve else "REJECT"
+            try:
+                if approval.status is not ApprovalStatus.PENDING:
+                    raise ApprovalStateError(f"Approval {approval_id} is {approval.status.value}, not PENDING")
+                if principal.kind is not PrincipalKind.HUMAN:
+                    raise ApprovalForbiddenError("Only human principals can decide approvals (agents cannot approve)")
+                if principal.id == approval.requested_by:
+                    raise ApprovalForbiddenError("The requester cannot approve their own request")
+                if not principal.has_role(approval.required_role):
+                    raise ApprovalForbiddenError(f"Role {approval.required_role} is required to decide this approval")
+
+                now = self._clock.now()
+                action = approval.proposed_action.model_copy(
+                    update={"status": ActionStatus.APPROVED if approve else ActionStatus.REJECTED}
+                )
+                update: dict[str, object] = {"proposed_action": action, "decision_comment": comment}
+                if approve:
+                    update |= {"status": ApprovalStatus.APPROVED, "approved_by": principal.id, "approved_at": now}
+                else:
+                    update |= {"status": ApprovalStatus.REJECTED, "rejected_by": principal.id, "rejected_at": now}
+                # Compare-and-set: of two concurrent decisions (even in different processes) exactly one is stored.
+                stored = await self._provider.transition(
+                    approval.model_copy(update=update), expected_revision=approval.revision
+                )
+                if stored is None:
+                    raise ApprovalStateError(f"Approval {approval_id} was decided by another request")
+            except ApprovalError as exc:
+                await self._audit.record(
+                    actor=principal.id,
+                    action="approval.decide",
+                    outcome="REFUSED",
+                    incident_id=approval.incident_id,
+                    details={"approval_id": approval_id, "requested": outcome, "reason": str(exc), "code": exc.code},
+                )
+                raise
+
             await self._audit.record(
                 actor=principal.id,
                 action="approval.decide",
-                outcome="REFUSED",
-                incident_id=approval.incident_id,
-                details={"approval_id": approval_id, "requested": outcome, "reason": str(exc), "code": exc.code},
+                outcome=stored.status.value,
+                incident_id=stored.incident_id,
+                details={"approval_id": approval_id, "comment": comment, "action_type": action.action_type.value},
             )
-            raise
-
-        now = self._clock.now()
-        action = approval.proposed_action.model_copy(
-            update={"status": ActionStatus.APPROVED if approve else ActionStatus.REJECTED}
-        )
-        update: dict[str, object] = {"proposed_action": action, "decision_comment": comment}
-        if approve:
-            update |= {"status": ApprovalStatus.APPROVED, "approved_by": principal.id, "approved_at": now}
-        else:
-            update |= {"status": ApprovalStatus.REJECTED, "rejected_by": principal.id, "rejected_at": now}
-        approval = approval.model_copy(update=update)
-        await self._provider.save(approval)
-        await self._audit.record(
-            actor=principal.id,
-            action="approval.decide",
-            outcome=approval.status.value,
-            incident_id=approval.incident_id,
-            details={"approval_id": approval_id, "comment": comment, "action_type": action.action_type.value},
-        )
-        await self._sync_incident(
-            approval,
-            action,
-            actor=principal.id,
-            summary=f"Approval {approval_id} {approval.status.value} by {principal.id}",
-        )
-        return approval
+            await self._sync_incident(
+                stored,
+                action,
+                actor=principal.id,
+                summary=f"Approval {approval_id} {stored.status.value} by {principal.id}",
+            )
+            return stored
 
     async def save(self, approval: ApprovalRequest) -> None:
+        """Unconditional write, bypassing compare-and-set. For tests; production code uses ``transition``."""
         await self._provider.save(approval)
 
     async def cancel_pending(self, incident_id: str, *, actor: str, reason: str) -> builtins.list[ApprovalRequest]:
@@ -191,10 +225,13 @@ class ApprovalService:
         cancelled: builtins.list[ApprovalRequest] = []
         for approval in await self._provider.list(incident_id=incident_id, status=ApprovalStatus.PENDING):
             action = approval.proposed_action.model_copy(update={"status": ActionStatus.CANCELLED})
-            approval = approval.model_copy(
+            cancelled_request = approval.model_copy(
                 update={"status": ApprovalStatus.CANCELLED, "proposed_action": action, "decision_comment": reason}
             )
-            await self._provider.save(approval)
+            stored = await self._provider.transition(cancelled_request, expected_revision=approval.revision)
+            if stored is None:
+                continue  # decided or expired in the meantime: nothing left to cancel
+            approval = stored
             await self._audit.record(
                 actor=actor,
                 action="approval.cancel",
@@ -208,8 +245,12 @@ class ApprovalService:
     async def _expire_if_due(self, approval: ApprovalRequest) -> ApprovalRequest:
         if approval.status is ApprovalStatus.PENDING and self._clock.now() > approval.expires_at:
             action = approval.proposed_action.model_copy(update={"status": ActionStatus.EXPIRED})
-            approval = approval.model_copy(update={"status": ApprovalStatus.EXPIRED, "proposed_action": action})
-            await self._provider.save(approval)
+            expired = approval.model_copy(update={"status": ApprovalStatus.EXPIRED, "proposed_action": action})
+            stored = await self._provider.transition(expired, expected_revision=approval.revision)
+            if stored is None:
+                # Someone decided it first: report what is stored now, not our stale copy.
+                return await self._provider.get(approval.approval_id) or approval
+            approval = stored
             await self._audit.record(
                 actor="system:approvals",
                 action="approval.expire",

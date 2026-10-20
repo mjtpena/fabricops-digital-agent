@@ -8,9 +8,9 @@ from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from orqentis import __version__
-from orqentis.api.auth import CurrentPrincipal
+from orqentis.api.authz import CollectPrincipal, ReadPrincipal, VerifyPrincipal
 from orqentis.api.deps import ContainerDep
-from orqentis.api.schemas import CollectionResult, Health, NotReady, Ready
+from orqentis.api.schemas import CollectionResult, Health, NotReady, Ready, SystemInfo
 from orqentis.config.settings import Settings
 from orqentis.observability.audit import AuditRecord, AuditVerification
 from orqentis.runtime.service import Runtime
@@ -28,8 +28,20 @@ async def health(request: Request) -> Health:
         version=__version__,
         fabric_mode=settings.fabric_mode.value,
         reasoner=container.investigator.reasoner_name if container else settings.reasoner.value,
-        write_actions_enabled=settings.enable_write_actions,
         time=container.clock.now() if container else datetime.now(UTC),
+    )
+
+
+@router.get("/system/info", response_model=SystemInfo)
+async def system_info(c: ContainerDep, _: ReadPrincipal) -> SystemInfo:
+    """Like /health, plus the write-capability flag. Authenticated: /health may be reachable anonymously."""
+    return SystemInfo(
+        status="ok",
+        version=__version__,
+        fabric_mode=c.settings.fabric_mode.value,
+        reasoner=c.investigator.reasoner_name,
+        write_actions_enabled=c.settings.enable_write_actions,
+        time=c.clock.now(),
     )
 
 
@@ -54,7 +66,7 @@ async def ready(request: Request, response: Response) -> Ready | JSONResponse:
 
 
 @router.post("/telemetry/collect", response_model=CollectionResult)
-async def collect(c: ContainerDep, _: CurrentPrincipal) -> CollectionResult:
+async def collect(c: ContainerDep, _: CollectPrincipal) -> CollectionResult:
     ingestion, created = await c.collect_and_detect()
     return CollectionResult(
         new_events=len(ingestion.new_events),
@@ -66,11 +78,11 @@ async def collect(c: ContainerDep, _: CurrentPrincipal) -> CollectionResult:
 
 @router.get("/audit", response_model=list[AuditRecord])
 async def audit(
-    c: ContainerDep, _: CurrentPrincipal, incident_id: str | None = None, limit: int = Query(default=200, ge=1, le=5000)
+    c: ContainerDep, _: ReadPrincipal, incident_id: str | None = None, limit: int = Query(default=200, ge=1, le=5000)
 ) -> list[AuditRecord]:
     return await c.audit.list(incident_id=incident_id, limit=limit)
 
 
 @router.get("/audit/verify", response_model=AuditVerification)
-async def verify_audit(c: ContainerDep, _: CurrentPrincipal) -> AuditVerification:
+async def verify_audit(c: ContainerDep, _: VerifyPrincipal) -> AuditVerification:
     return await c.audit.verify()

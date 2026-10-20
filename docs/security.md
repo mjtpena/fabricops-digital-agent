@@ -12,6 +12,8 @@ write capability turned on.
 | Reader (operating identity), e.g. user-assigned managed identity `id-orqentis-reader` | `RestFabricClient` (all reads); Agent Framework chat client | Fabric workspace **Viewer** on monitored workspaces (includes semantic model read for refresh history); Azure OpenAI **Cognitive Services OpenAI User**; AcrPull on the image registry | Least privilege. No write role anywhere. |
 | Actor (write capability), e.g. `id-orqentis-actor` | `FabricWriteClient`, held only by the `ActionGateway` | Fabric **Contributor** only on workspaces where approved remediation is allowed | Not attached to the app unless `enableWriteActions` is set at deployment **and** `ORQENTIS_ENABLE_WRITE_ACTIONS=true`. The MVP ships no REST write adapter. |
 | Human approvers | REST API (`/approvals/*`) | Entra ID app roles `FabricOps.Operator`, `FabricOps.PlatformAdmin` | Roles arrive in the Easy Auth client principal. |
+| Automation identities (scheduler, smoke test) | REST API (read endpoints, `POST /telemetry/collect`) | Entra ID app role `FabricOps.Automation` (Application members only) | An app-only token is a `SERVICE` principal. It can never approve, reject, execute or investigate. |
+| Read-only users | REST API (read endpoints) | Entra ID app role `FabricOps.Reader` | Cannot trigger anything. |
 | The agent | `AGENT_PRINCIPAL` (`agent:FabricOpsInvestigator`) | Tool allowlist from policy | Cannot approve, cannot execute, cannot be impersonated through the API. |
 
 READ and WRITE are separate in code as well: `FabricClient` (read port) has no mutation methods,
@@ -40,15 +42,90 @@ grants and for checking them with `POST /telemetry/collect` (`collector_errors` 
   * `managed_identity`: `ManagedIdentityCredential` (optionally a specific client id).
   * `workload_identity`: `WorkloadIdentityCredential` (AKS / federated credentials).
   * `service_principal`: `EnvironmentCredential`, which reads `AZURE_CLIENT_*` from the runtime
-    environment or a secret store. Never put these in the repo.
+    environment or a secret store. Never put these in the repo. This mode exists for a Fabric tenant that
+    is a different Entra tenant from the Azure tenant (a managed identity cannot be granted access
+    there). In Azure the secret or the PEM certificate is a **Key Vault reference** that Container Apps
+    resolves with the reader managed identity (`infra/bicep`, ADR-0014): it is never a Bicep parameter,
+    output or CI variable, and a certificate's private key is mounted as a read-only secret file, not on
+    the data share. The reader identity's Key Vault role is assigned on the referenced secret(s) only. The
+    deployment fails with a readable reason when the inputs are incomplete or ambiguous, and the app refuses to
+    start, naming the missing variable names (never values), if they still are. The LLM credential stays a managed identity
+    (`ORQENTIS_LLM_AUTH_MODE=managed_identity`), so the foreign-tenant service principal never signs
+    Azure OpenAI calls. Grant that service principal workspace **Viewer** only, like the reader identity.
 * Fabric scope `https://api.fabric.microsoft.com/.default`; Power BI scope
-  `https://analysis.windows.net/powerbi/api/.default`. Tokens are cached in memory until five
-  minutes before expiry and are never logged.
+  `https://analysis.windows.net/powerbi/api/.default` (public cloud). Sovereign clouds replace them with
+  `ORQENTIS_FABRIC_SCOPE` / `ORQENTIS_POWERBI_SCOPE` and set the Entra authority with
+  `ORQENTIS_AUTHORITY_HOST` (an https host; passed to every credential that talks to Entra ID). Tokens are
+  cached in memory until five minutes before expiry and are never logged.
+* **Interactive administrator sign-in** exists in exactly one place: `orqentis contracts scaffold --scanner`
+  (a person at a terminal reads Power BI admin Scanner metadata to draft lineage). It is not an auth mode, it
+  is not reachable from the application, it refuses non-interactive use, and a test checks that the API
+  application never imports it. The application's own identities never hold Fabric admin rights.
 * The API authenticates callers with Container Apps / App Service built-in authentication
   (`ORQENTIS_API_AUTH_MODE=easy_auth`), which reads the `X-MS-CLIENT-PRINCIPAL` header. The
-  container must only be reachable through that front end (internal ingress plus auth config in
-  `infra/bicep`). `dev_headers` mode is refused by configuration validation unless
+  container must only be reachable through that front end (ingress plus auth config in
+  `infra/bicep`; the default is external ingress where every request needs an Entra token, see
+  `ingressMode`). `dev_headers` mode is refused by configuration validation unless
   `ORQENTIS_DEPLOYMENT_ENVIRONMENT=local`.
+
+### 2.1 Who is calling: people versus applications
+
+Easy Auth validates the token; it does not say whether the caller is a person. `orqentis.api.claims`
+classifies every principal from the token claims (ADR-0015 has the full decision table):
+
+* **HUMAN** needs positive evidence of a user token: a delegated access token (`scp` present) or an
+  ID-token browser session, in both cases with a pairwise `sub` that differs from `oid`.
+* **SERVICE** is any app-only token: `idtyp = app`, `sub == oid`, or a token carrying the
+  application-only `FabricOps.Automation` role. These callers keep their roles for reads but are
+  never HUMAN.
+* **Ambiguous or contradictory claims** (an app signal together with a user signal, unknown `idtyp`,
+  conflicting duplicates, no `sub`, no user identity) are refused with `403 PRINCIPAL_AMBIGUOUS`. They
+  are never HUMAN, and the app logs the rule that decided.
+
+Only a HUMAN principal can approve, reject or execute. This is checked at the route
+(`DecidingPrincipal`, which also refuses any token carrying `FabricOps.Automation` and audits the
+refusal), in the approval service and in the action gateway. Grant `FabricOps.Automation` only to
+managed identities or service principals (`allowedMemberTypes: ["Application"]`), and give approver
+roles only to people. Both are enforced by the checks above even when Entra is misconfigured.
+
+**`HUMAN` means a user token, not necessarily a person.** Password-signing service accounts, agent users and
+third-party applications acting for a consenting user also classify `HUMAN`. Do not assign approver roles to
+non-interactive accounts, and list the allowed client applications (`allowedClientApplications`). Exactly one
+`X-MS-CLIENT-PRINCIPAL` header is accepted (several: 401), the header is strictly base64, capped in size, and the
+payload cannot relabel claims as roles. Cookie sessions (WS8) additionally need CSRF protection (JSON-only
+state-changing routes plus an `Origin` check); ADR-0015 records the requirement.
+
+`orqentis serve` refuses `dev_headers` on a non-loopback address unless `ORQENTIS_DEV_HEADERS_ALLOW_REMOTE=true`
+is set, and the container image defaults to `easy_auth`, so an unconfigured `docker run` is not an open API.
+
+### 2.2 Roles and what they unlock
+
+| Role | Read endpoints | `POST /telemetry/collect` | `POST /incidents/{id}/investigate` | Approve / reject / execute |
+|---|---|---|---|---|
+| `FabricOps.Reader` | yes | no | no | no |
+| `FabricOps.Automation` | yes | yes | no | never |
+| `FabricOps.Operator` | yes | yes | yes | LOW/MEDIUM risk, human only |
+| `FabricOps.PlatformAdmin` | yes | yes | yes | HIGH_RISK, human only |
+
+Under Easy Auth a caller needs one of these roles for every endpoint except `/health` (liveness only: it does not
+reveal whether writes are enabled; `GET /system/info` does and needs a role). A principal with no role
+gets 403. `ORQENTIS_API_REQUIRE_READ_ROLE=false` opens the plain read endpoints only: collection, investigation and
+audit verification keep their roles, and approving stays human-only. The interactive docs and `/openapi.json` are
+not served under Easy Auth (they would answer callers with no role).
+
+### 2.3 Request limits
+
+* Bodies over `ORQENTIS_API_MAX_BODY_BYTES` (64 KiB by default) get **413**, both when `Content-Length`
+  declares too much and when a chunked body grows past the limit.
+* Approve, reject and execute (`ORQENTIS_API_RATE_LIMIT_MUTATING_PER_MINUTE`, 30) and expensive calls, telemetry
+  collection, investigations and audit verification (`ORQENTIS_API_RATE_LIMIT_EXPENSIVE_PER_MINUTE`, 6),
+  are limited per **authenticated** principal and answer **429** with `Retry-After`. The budget is charged after
+  the caller has been authenticated and keyed on the principal id from the validated claims, never on a raw header,
+  so a forged `X-MS-CLIENT-PRINCIPAL` on `/health` or an unrouted path cannot drain anyone's budget. Refused
+  attempts are charged too, which bounds the audit records an authenticated caller can cause. Reads are not
+  limited by the app. Unauthenticated traffic is rejected by Easy Auth before it reaches the app.
+* Limits live in memory per replica (the MVP runs one). A global limit, WAF and edge logging belong
+  in Front Door or API Management.
 
 ## 3. No credentials in the repository
 
@@ -56,6 +133,18 @@ grants and for checking them with `POST /telemetry/collect` (`collector_errors` 
   `.env.example` contains no secrets.
 * The Application Insights connection string is a Container App secret.
 * The LLM uses Entra ID, not API keys.
+* The contracts file holds declarations, not credentials. Its validation and loading errors name
+  paths, ids and positions and never echo values from the file. `contracts scaffold` redacts and
+  sanitises what it reads from Fabric (names, data source descriptions) and drops credentials, user info
+  and query strings from data source URLs.
+* **A declared environment is a trust decision.** Declaring a PROD workspace as DEV lowers incident
+  severity and stops production-only policy rules (`POL-002`, `POL-020`) from matching it. Therefore: only
+  *reviewed* entries are enforced (a scaffold draft marked `inferred`, or an `UNKNOWN` entry, never overrides the
+  name); every override that changes a classification is logged, the first time the node is classified, and written to the hash-chained audit trail
+  with the SHA-256 of the contracts file (`contracts.environment_override`, `contracts.loaded`); and
+  `orqentis contracts validate --strict` flags downgrades and catch-all patterns for CI. Review changes to
+  `environments` like code. The code-level invariant is unaffected: no mutation is ever auto-allowed in any
+  environment.
 
 ## 4. Redaction
 
@@ -108,11 +197,15 @@ storage.
   been decided.
 * Execution requires all of the following:
   * the approval is APPROVED and unexpired;
-  * a human principal holds the required role;
+  * a human principal holds the required role, and the role the **current** policy requires;
   * the action fingerprint is unchanged;
-  * the action has not already been executed;
-  * the policy does not deny it now;
+  * the action has not already been executed: single use is claimed with a compare-and-set persisted
+    **before** the write call (concurrent executes reach the write client once), and an unknown outcome keeps
+    the claim so a retry cannot repeat the write;
+  * the policy does not deny it now, and has not reclassified it to a higher risk than was approved;
   * the write capability is enabled.
+* Decisions are atomic: approve, reject, expire and cancel are compare-and-set transitions, so of two concurrent
+  decisions exactly one is stored and the other gets 409.
 
 The critical tests in `tests/scenarios/test_security_boundary.py` and
 `tests/integration/test_agent_framework_reasoner.py` exercise these paths, including a model that
@@ -145,7 +238,16 @@ to keep these defences under test.
   the host volume. The target is Eventhouse plus OneLake, with Entra ID RBAC.
 * `easy_auth` trusts the front end's header. Do not expose the container without the built-in
   authentication layer.
-* There is no rate limiting on the internal API, which is internal ingress only.
+* **The app trusts `X-MS-CLIENT-PRINCIPAL` and does not validate bearer tokens itself.** If an externally reachable
+  app ever runs without Container Apps authentication (the first deployment before the auth config applies,
+  authentication disabled by mistake, a platform fault), a forged header can name a `FabricOps.PlatformAdmin` and be
+  believed. Deploy with `ingressMode = 'internal'` first, verify authentication, then switch (infra README, "First
+  deployment and the Easy Auth window"), and check in every deployment that tokenless and forged-header requests get 401.
+  In-app token validation is the follow-up that removes this dependency (ADR-0015).
+* Rate limits are per replica and in memory, and plain reads are not limited (see 2.3). The default ingress is
+  external (authenticated); use `allowedIpRanges` or `vnet` where the API must not be internet-reachable.
+* Easy Auth's claim-name mapping and the `sub == oid` behaviour of app tokens are handled from documentation
+  and synthetic principals. They have not been checked against a live tenant (ADR-0015).
 * No REST write adapter is shipped. Enabling writes against a real tenant first requires
   implementing and reviewing one.
 

@@ -124,8 +124,9 @@ On a machine where `python3` is older than 3.12, use `make demo PYTHON=python3.1
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health` | Liveness (cheap, no dependencies) and mode |
+| GET | `/health` | Liveness (anonymous; version and mode) |
 | GET | `/health/ready` | Readiness: `503` (fixed reason code and exception type, never a message) until the container is built and the estate catalog is loaded |
+| GET | `/system/info` | Like `/health` plus whether the write capability is enabled (needs a FabricOps role) |
 | GET | `/incidents` | List incidents (`?status=`) |
 | GET | `/incidents/{id}` | Full incident: evidence, findings, root causes, blast radius, timeline |
 | POST | `/incidents/{id}/investigate` | Queue the investigation workflow: `202` with a job (idempotent per incident) |
@@ -145,6 +146,15 @@ On a machine where `python3` is older than 3.12, use `make demo PYTHON=python3.1
 Locally, identify yourself with headers: `X-Orqentis-User: you@contoso.com` and
 `X-Orqentis-Roles: FabricOps.Operator`. In deployed environments the API uses Microsoft Entra ID
 through Container Apps built-in authentication (`ORQENTIS_API_AUTH_MODE=easy_auth`).
+
+Callers are classified from their token claims: **app-only tokens (service principals, managed
+identities) are services and can never approve, reject or execute**, whatever roles they carry.
+Four app roles control access: `FabricOps.Operator` and `FabricOps.PlatformAdmin` (people; approve),
+`FabricOps.Automation` (applications only: read endpoints and `POST /telemetry/collect`) and
+`FabricOps.Reader` (read-only). Under Easy Auth a caller needs one of them. Request bodies over
+`ORQENTIS_API_MAX_BODY_BYTES` get 413, and mutating or expensive calls are rate limited per principal
+(429 with `Retry-After`). See [docs/security.md](docs/security.md) and
+[ADR-0015](docs/adr/0015-principal-classification-and-api-hardening.md).
 
 ### Autonomous operation
 
@@ -180,9 +190,19 @@ deterministic reasoner takes over, and the decision records the fallback.
 
 ```bash
 ORQENTIS_FABRIC_MODE=rest
-ORQENTIS_CONTRACTS_PATH=contracts/estate.json   # declared sources, dependencies, data products, SLAs
+ORQENTIS_CONTRACTS_PATH=contracts/estate.json   # environments, sources, dependencies, data products, SLAs
 ORQENTIS_AUTH_MODE=managed_identity             # or default / workload_identity / service_principal
 ```
+
+The contracts file is drafted, checked and reviewed with tools, not written from scratch:
+`orqentis contracts scaffold` drafts it from a read-only listing (environments inferred from names and marked
+for review, `TRIGGERS` edges from observed pipeline runs, placeholders for owners and SLAs),
+`orqentis contracts validate` checks it (schema, references, time zones, with line numbers), and
+`schemas/contracts.schema.json` gives editors completion. A workspace's **environment** can be declared by id
+or name pattern and then overrides the name-based guess, which drives incident severity and policy. A Fabric
+tenant in another Entra tenant is reached with a service principal whose secret is a Key Vault reference,
+and sovereign clouds are configuration (`ORQENTIS_AUTHORITY_HOST` and the token scopes). See
+[Development](docs/development.md#contracts-workflow) and the [Bicep guide](infra/bicep/README.md).
 
 The operating identity needs read permissions only (see [docs/security.md](docs/security.md)).
 Fabric has no public API for capacity utilisation or Delta schema history, so those signals arrive
@@ -240,7 +260,9 @@ runbooks/         version-controlled Markdown/YAML runbooks
 fixtures/         synthetic estate, scenario telemetry, incident history
 tests/            unit, integration, scenarios (incl. critical security tests)
 docs/             architecture, security, product, threat model, development, ADRs
-infra/bicep/      Azure deployment (Container Apps, managed identities, App Insights)
+infra/bicep/      Azure deployment (Container Apps, managed identities, App Insights, Key Vault references)
+contracts/        example contracts file and catalog (orqentis contracts validate)
+schemas/          JSON Schema of the contracts file (generated from the model)
 ```
 
 ## Documentation

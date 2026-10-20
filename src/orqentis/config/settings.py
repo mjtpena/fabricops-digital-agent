@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import ipaddress
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
-from pydantic import AliasChoices, Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Token scopes of the public cloud. Sovereign clouds use other resources (see docs/development.md).
+PUBLIC_FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
+PUBLIC_POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
 
 
 class FabricMode(StrEnum):
@@ -44,6 +51,15 @@ class ClockMode(StrEnum):
     SCENARIO = "scenario"  # freeze time at the synthetic scenario's "now" (mock mode only)
 
 
+def _is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ORQENTIS_", env_file=".env", extra="ignore")
 
@@ -65,6 +81,14 @@ class Settings(BaseSettings):
     powerbi_api_base_url: str = "https://api.powerbi.com/v1.0/myorg"
     auth_mode: AuthMode = AuthMode.DEFAULT
     managed_identity_client_id: str | None = None
+    # Sovereign clouds: the Entra ID authority host and the token scopes of the Fabric and Power BI APIs.
+    # Unset authority_host leaves azure-identity's own default (public cloud, or AZURE_AUTHORITY_HOST).
+    authority_host: str | None = None
+    fabric_scope: str = PUBLIC_FABRIC_SCOPE
+    powerbi_scope: str = PUBLIC_POWERBI_SCOPE
+    # Credential type for non-Fabric Azure calls (the LLM). Unset follows auth_mode. Set managed_identity when
+    # auth_mode=service_principal targets a Fabric tenant other than the one that hosts Azure OpenAI.
+    llm_auth_mode: AuthMode | None = None
     http_timeout_seconds: float = 30.0
     http_max_retries: int = Field(default=4, ge=0, le=10)
     # Global budget for Fabric and Power BI calls, shared by every collector, tool and refresh (rest mode).
@@ -121,6 +145,19 @@ class Settings(BaseSettings):
 
     # API
     api_auth_mode: ApiAuthMode = ApiAuthMode.DEV_HEADERS
+    # dev_headers lets every caller pick its own identity and roles, so `orqentis serve` refuses it on a
+    # non-loopback address unless this is set (for example `docker run` of a local test container).
+    dev_headers_allow_remote: bool = False
+    # Roles for reads. None (default): required under easy_auth, not enforced under dev_headers (local only).
+    # With enforcement every API call needs a FabricOps role (Reader, Automation, Operator or PlatformAdmin).
+    # Collection and investigation always need their roles under easy_auth, whatever this says.
+    api_require_read_role: bool | None = None
+    # Request limits (per replica, in memory). Bodies over the limit get 413. Mutating calls and the expensive
+    # ones (telemetry collection, investigations, audit verification) are limited per principal and get 429.
+    api_max_body_bytes: int = Field(default=65_536, ge=1_024, le=16_777_216)
+    api_rate_limit_enabled: bool = True
+    api_rate_limit_mutating_per_minute: int = Field(default=30, ge=1, le=10_000)
+    api_rate_limit_expensive_per_minute: int = Field(default=6, ge=1, le=10_000)
 
     # Observability
     log_level: str = "INFO"
@@ -132,6 +169,38 @@ class Settings(BaseSettings):
             "ORQENTIS_APPLICATIONINSIGHTS_CONNECTION_STRING", "APPLICATIONINSIGHTS_CONNECTION_STRING"
         ),
     )
+
+    @field_validator("default_timezone")
+    @classmethod
+    def _valid_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (KeyError, ValueError, OSError):  # unknown key, malformed key, or a directory name
+            raise ValueError(f"{value!r} is not a valid IANA time zone (for example Australia/Sydney)") from None
+        return value
+
+    @field_validator("authority_host")
+    @classmethod
+    def _valid_authority_host(cls, value: str | None) -> str | None:
+        """An https host such as ``https://login.microsoftonline.us`` (a bare host name gets ``https://``)."""
+        if value is None or not value.strip():
+            return None
+        raw = value.strip()
+        parts = urlsplit(raw if "://" in raw else f"https://{raw}")
+        if parts.scheme != "https" or not parts.hostname or parts.path.strip("/") or parts.query or parts.fragment:
+            raise ValueError("must be an https host such as https://login.microsoftonline.us (no path or query)")
+        return f"https://{parts.netloc}"
+
+    @field_validator("fabric_scope", "powerbi_scope")
+    @classmethod
+    def _valid_scope(cls, value: str) -> str:
+        scope = value.strip()
+        resource, _, suffix = scope.rpartition("/")
+        if suffix != ".default" or urlsplit(resource).scheme not in ("https", "api") or not urlsplit(resource).netloc:
+            raise ValueError(
+                "must be a resource URI ending in /.default, e.g. https://api.fabric.microsoft.com/.default"
+            )
+        return scope
 
     @model_validator(mode="after")
     def _guard_rails(self) -> Settings:
@@ -169,6 +238,35 @@ class Settings(BaseSettings):
                     "ORQENTIS_FOUNDRY_PROJECT_ENDPOINT and ORQENTIS_FOUNDRY_MODEL"
                 )
         return self
+
+    def check_bind_host(self, host: str) -> None:
+        """Refuse to serve ``dev_headers`` (self-asserted identities and roles) on a non-loopback address."""
+        if (
+            self.api_auth_mode is ApiAuthMode.DEV_HEADERS
+            and not self.dev_headers_allow_remote
+            and not _is_loopback(host)
+        ):
+            raise ValueError(
+                f"Refusing to serve ORQENTIS_API_AUTH_MODE=dev_headers on {host!r}: any caller could choose its own "
+                "roles. Bind to 127.0.0.1, use ORQENTIS_API_AUTH_MODE=easy_auth, or set "
+                "ORQENTIS_DEV_HEADERS_ALLOW_REMOTE=true for a throwaway local test container."
+            )
+
+    @property
+    def read_role_required(self) -> bool:
+        """Whether read endpoints need a FabricOps role (default: yes under easy_auth, no under dev_headers)."""
+        if self.api_require_read_role is not None:
+            return self.api_require_read_role
+        return self.api_auth_mode is ApiAuthMode.EASY_AUTH
+
+    @property
+    def action_roles_required(self) -> bool:
+        """Whether collection and investigation need their roles. Under easy_auth this cannot be turned off.
+
+        ``api_require_read_role=false`` only opens the read endpoints. Locally (dev_headers) the roles apply
+        when ``api_require_read_role=true`` asks for the production role model.
+        """
+        return self.api_auth_mode is ApiAuthMode.EASY_AUTH or self.api_require_read_role is True
 
     @property
     def event_store_path(self) -> Path:
