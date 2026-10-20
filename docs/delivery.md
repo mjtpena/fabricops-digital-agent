@@ -229,20 +229,21 @@ accept wildcards, so each subject is registered exactly. Add one more only while
 |---|---|---|---|
 | build `fabricops-cicd-dev` | `AcrPush` | the registry | Push images and add tags. Nothing else; it cannot deploy (exists) |
 | each `fabricops-deploy-<env>` | `Contributor` | `rg-fabricops-<env>` | Create the template's resources |
-| each `fabricops-deploy-<env>` | `Role Based Access Control Administrator`, **constrained** | `rg-fabricops-<env>`, the registry, and the Azure OpenAI account when one is used | The template grants the reader identity `AcrPull` on the registry (`modules/acr-pull.bicep`), optionally `Cognitive Services OpenAI User` on the account (`modules/openai-role.bicep`), and `Storage Blob Data Contributor` on the two evidence containers it creates (`modules/evidence-storage.bicep`, inside the environment's own resource group) |
+| each `fabricops-deploy-<env>` | `Role Based Access Control Administrator`, **constrained** | `rg-fabricops-<env>`, the registry, and the Azure OpenAI account when one is used | The template grants the reader identity `AcrPull` on the registry (`modules/acr-pull.bicep`), optionally `Cognitive Services OpenAI User` on the account (`modules/openai-role.bicep`), `Storage Blob Data Contributor` on the evidence and audit-anchor containers it creates and `Storage Blob Data Reader` on the `contracts` container (`modules/evidence-storage.bicep`, inside the environment's own resource group) |
 | each `fabricops-deploy-<env>` | custom `FabricOps Nested Deployment` | `rg-fabricops-shared` (and the resource group of an Azure OpenAI account elsewhere) | Those two modules deploy into the registry's / account's resource group, which creates a nested ARM deployment there |
 | `fabricops-whatif` | `Reader` + custom `FabricOps Deployment What-If` | `rg-fabricops-dev` only | Simulate the dev deployment; cannot change anything and has no access to the shared resource group |
 
 **The constrained RBAC Administrator** is the built-in role plus an ABAC condition. With it an identity can create role
-assignments only for the three role definitions below and only for service principals (a managed identity is one), and
+assignments only for the four role definitions below and only for service principals (a managed identity is one), and
 it **cannot delete any role assignment**, so it cannot grant itself or anyone Owner, Contributor or any other role, and
 cannot remove anyone's access. (The syntax follows Microsoft's *Constrain roles and principal types* example.)
 
 ```bash
 ACR_PULL=7f951dda-4ed3-4680-a7ca-43fe172d538d       # AcrPull
 OPENAI_USER=5e0bd9bd-7b93-4f28-af87-19fc36ad61bd    # Cognitive Services OpenAI User
-STORAGE_BLOB_DATA_CONTRIBUTOR=ba92f5b4-2d11-453d-a403-e96b0029c9fe   # Storage Blob Data Contributor (the evidence containers)
-CONDITION="((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {${ACR_PULL}, ${OPENAI_USER}, ${STORAGE_BLOB_DATA_CONTRIBUTOR}} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {'ServicePrincipal'})) AND (!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'}))"
+STORAGE_BLOB_DATA_CONTRIBUTOR=ba92f5b4-2d11-453d-a403-e96b0029c9fe   # Storage Blob Data Contributor (the evidence and audit-anchor containers)
+STORAGE_BLOB_DATA_READER=2a2b9908-6b94-4b4a-bb09-aaf3bc7f7a58         # Storage Blob Data Reader (the contracts container; confirm both ids on the first deployment)
+CONDITION="((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {${ACR_PULL}, ${OPENAI_USER}, ${STORAGE_BLOB_DATA_CONTRIBUTOR}, ${STORAGE_BLOB_DATA_READER}} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {'ServicePrincipal'})) AND (!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'}))"
 ```
 
 **The nested-deployment role** carries one permission, `Microsoft.Resources/deployments/*`, and no access to any
@@ -289,8 +290,9 @@ When an Azure OpenAI account is added (ADR-0012), repeat for each deploy identit
 for the constrained role (the same `$CONDITION`), and the `FabricOps Nested Deployment` role on its resource group if
 that is not `rg-fabricops-shared`.
 
-**Deploy identities created before the PostgreSQL release** still carry the two-role condition, so a deployment would fail
-with `AuthorizationFailed ... roleAssignments/write` when it grants `Storage Blob Data Contributor`. Replace the
+**Deploy identities created before the PostgreSQL release** still carry the two-role condition (`AcrPull` and `Cognitive
+Services OpenAI User` only), so a deployment would fail with `AuthorizationFailed ... roleAssignments/write` when it grants
+`Storage Blob Data Contributor` and `Storage Blob Data Reader`. Replace the
 assignment on the environment's resource group with one that carries the new `$CONDITION` (run it as Owner or User Access
 Administrator, after the `CONDITION` above is defined; a role assignment's condition cannot be edited in place):
 
@@ -470,8 +472,7 @@ gh variable set AZURE_CLIENT_ID --repo $REPO --env release --body "$BUILD_APP_ID
 | `POSTGRES_ENTRA_ADMIN_OBJECT_ID`, `POSTGRES_ENTRA_ADMIN_NAME` | environment (`dev`, `test`, `prod`) | object id and name of that environment's PostgreSQL administrator group (section 5a). Identifiers | `.bicepparam` (`postgresEntraAdminObjectId`, `postgresEntraAdminName`); the deploy job stops without them, and so does the template |
 | `POSTGRES_ENTRA_ADMIN_TYPE` | environment, optional | `Group` (default), `User` or `ServicePrincipal` | `.bicepparam` (`postgresEntraAdminType`) |
 | `POSTGRES_EXISTING_SERVER_NAME` | environment, optional | the name of a server in the environment's resource group to use instead of the one the template creates, for example after a point-in-time restore ([restore runbook](operations/restore.md)). Empty: the template manages its own server | `.bicepparam` (`postgresExistingServerName`) |
-| `CONTRACTS_JSON` | environment, optional; **required while `fabricMode` is `rest`** | the JSON text of the estate contracts file (`gh variable set CONTRACTS_JSON --repo $REPO --env prod < contracts/estate.json`). Identifiers, names and SLAs, no credentials; GitHub limits a variable to 48 KB, and everyone with access to the repository can read it | `.bicepparam` (`contractsContent`); the template fails a `rest` deployment without it |
-| `WHATIF_POSTGRES_ENTRA_ADMIN_OBJECT_ID`, `WHATIF_POSTGRES_ENTRA_ADMIN_NAME` (optional: `WHATIF_POSTGRES_ENTRA_ADMIN_TYPE`, `WHATIF_POSTGRES_EXISTING_SERVER_NAME`, `WHATIF_CONTRACTS_JSON`) | repository | dev's values of the four variables above | `whatif.yml`; set them before the first pull request that touches `infra/**`, or the what-if reports missing configuration |
+| `WHATIF_POSTGRES_ENTRA_ADMIN_OBJECT_ID`, `WHATIF_POSTGRES_ENTRA_ADMIN_NAME` (optional: `WHATIF_POSTGRES_ENTRA_ADMIN_TYPE`, `WHATIF_POSTGRES_EXISTING_SERVER_NAME`) | repository | dev's values of the corresponding variables above | `whatif.yml`; set them before the first pull request that touches `infra/**`, or the what-if reports missing configuration |
 | `SMOKE_HEALTH_AUTHENTICATED` | repository or environment, optional | `true` only if `/health` is **not** excluded from Container Apps authentication (`anonymousHealthEndpoints = false`) | smoke test |
 
 Per-environment settings that are not variables (image reference, tags, CPU, retention, replicas, the PostgreSQL SKU
@@ -555,11 +556,14 @@ not required (it is skipped for forks and before the resource group exists). Ver
 ### 9. First deployment of each environment
 
 * `dev` and `test` use `fabricMode = 'mock'` by default and need no contracts file.
-* `prod` defaults to `rest`, which needs Fabric access and the contracts file (the `CONTRACTS_JSON` variable; the
-  deployment fails without it) before the app can start. For the very first deployment set `FABRIC_MODE=mock` on the
-  `prod` environment (`gh variable set FABRIC_MODE --repo $REPO --env prod --body mock`), let the pipeline deploy,
-  complete `infra/bicep/README.md` sections 4 and 5 (and set `CONTRACTS_JSON`), then delete the variable (`gh variable
-  delete FABRIC_MODE --repo $REPO --env prod`) and promote again.
+* `prod` defaults to `rest`, which needs Fabric access and the estate contracts file before the app can become ready. The
+  contracts file is a **blob** in the environment's evidence storage account, uploaded after the first deployment
+  (`infra/bicep/README.md`, section 4, which also shows the one role assignment the uploader needs); a `rest`
+  deployment does not fail without it, the app simply stays not ready (`/health/ready` is 503) and so does the smoke
+  test. For the very first deployment set `FABRIC_MODE=mock` on the `prod` environment (`gh variable set FABRIC_MODE
+  --repo $REPO --env prod --body mock`), let the pipeline deploy, complete `infra/bicep/README.md` sections 4 and 5
+  (upload the contracts blob, grant Fabric access), then delete the variable (`gh variable delete FABRIC_MODE --repo
+  $REPO --env prod`) and promote again.
 * **PostgreSQL bootstrap, once per environment.** The first deployment creates the PostgreSQL server and the evidence
   storage account, which takes several minutes more than before. The app cannot become ready until a member of the
   environment's administrator group has created the app's database role (`infra/bicep/README.md`, section 3a), so the
@@ -674,8 +678,9 @@ bump it, change `ACTIONLINT_VERSION` and `ACTIONLINT_SHA256` together (the check
 | `AuthorizationFailed ... roleAssignments/write` during deployment | The deploy identity lacks the constrained RBAC Administrator on the registry (or OpenAI account) scope, or the template tried to assign a role or principal type outside the condition |
 | Job fails with `Missing GitHub variables` | Section 7. The message lists the names (the PostgreSQL administrator variables are required, section 5a) |
 | `The subscription is not registered to use namespace 'Microsoft.DBforPostgreSQL'` | Register the provider once (section 5a) |
-| The deployment fails in `orqentis-check-durable-storage-inputs` (or `orqentis-check-service-principal-inputs`), the error saying a value is not in the allowed list | That module exists to fail with a sentence: the offending *value* in the error is the reason, for example an empty `postgresEntraAdminObjectId` or a rest-mode deployment without `contractsContent` (`CONTRACTS_JSON`) |
+| The deployment fails in `orqentis-check-durable-storage-inputs` (or `orqentis-check-service-principal-inputs`), the error saying a value is not in the allowed list | That module exists to fail with a sentence: the offending *value* in the error is the reason, for example an empty `postgresEntraAdminObjectId` |
 | First deployment of an environment: smoke test fails, `/health/ready` is 503 | The PostgreSQL bootstrap has not run yet (`infra/bicep/README.md`, section 3a); run it and re-run the failed deploy job |
+| A `rest` environment: `/health/ready` is 503 `build_failed` with `ContractsFileNotFoundError` or `ContractsInvalidError` | The estate contracts blob is missing or invalid (`infra/bicep/README.md`, section 4). The app retries by itself; upload a valid file, no redeployment is needed |
 | `Resource group ... does not exist` | Section 1 |
 | Deployment fine, smoke test `AADSTS501051` or `403` on `/incidents` | The deploy principal lacks the `FabricOps.Automation` role (section 6), or the role is missing on the API registration (section 2) |
 | Smoke test `FAIL revision` | The latest revision is not ready, is not serving all traffic or runs another image than the one deployed. Check `az containerapp revision list -g rg-fabricops-<env> -n ca-fabricops-<env>` and the revision's system logs |

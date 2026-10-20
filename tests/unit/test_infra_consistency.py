@@ -65,6 +65,7 @@ WORKFLOWS = REPO / ".github" / "workflows"
 EVIDENCE_MODULE = (INFRA / "modules" / "evidence-storage.bicep").read_text(encoding="utf-8")
 POSTGRES_MODULE = (INFRA / "modules" / "postgres.bicep").read_text(encoding="utf-8")
 STORAGE_BLOB_DATA_CONTRIBUTOR = "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+STORAGE_BLOB_DATA_READER = "2a2b9908-6b94-4b4a-bb09-aaf3bc7f7a58"
 
 
 def _code(text: str) -> str:
@@ -107,7 +108,11 @@ def test_no_template_mounts_azure_files_or_reads_a_storage_key() -> None:
 
 def test_removed_azure_files_parameters_are_gone_from_every_parameter_file() -> None:
     for path in sorted(INFRA.rglob("*.bicepparam")):
-        assert "fileShareQuotaGiB" not in path.read_text(encoding="utf-8"), path.name
+        text = path.read_text(encoding="utf-8")
+        assert "fileShareQuotaGiB" not in text, path.name
+        # The contracts file is a blob now: no path to set and no text to pass (no pipeline variable either).
+        for removed in ("contractsPath", "contractsContent", "CONTRACTS_JSON"):
+            assert removed not in text, f"{path.name} still mentions {removed}"
 
 
 def test_the_evidence_account_has_no_shared_key_and_is_immutable() -> None:
@@ -125,7 +130,7 @@ def test_the_evidence_account_has_no_shared_key_and_is_immutable() -> None:
     ):
         assert setting in code, f"evidence-storage.bicep lacks {setting}"
     # Version-level immutability on the account (a default retention policy) and on both containers; soft delete.
-    assert code.count("immutableStorageWithVersioning: {") == 3
+    assert code.count("immutableStorageWithVersioning: {") == 4, "the account and each of the three containers"
     assert "immutabilityPeriodSinceCreationInDays: retentionDays" in code
     assert "deleteRetentionPolicy" in code
     assert "containerDeleteRetentionPolicy" in code
@@ -143,22 +148,33 @@ def test_prod_keeps_the_immutability_policy_unlocked_until_the_owner_approves() 
         )
 
 
-def test_the_reader_identity_gets_blob_access_on_the_two_containers_only() -> None:
+def test_the_reader_identity_gets_blob_access_on_the_containers_only_and_read_only_on_contracts() -> None:
     code = _code(EVIDENCE_MODULE)
     assert f"'{STORAGE_BLOB_DATA_CONTRIBUTOR}'" in code
+    assert f"'{STORAGE_BLOB_DATA_READER}'" in code
     assignments = re.findall(
         r"resource (\w+) 'Microsoft.Authorization/roleAssignments@[^']+' = \{(.*?)\n\}", code, re.S
     )
-    assert len(assignments) == 2, "one role assignment per container, nothing else"
-    scopes = []
+    assert len(assignments) == 3, "one role assignment per container, nothing else"
+    roles: dict[str, str] = {}
     for _, body in assignments:
-        found = re.search(r"scope: (\w+)", body)
-        assert found is not None
-        scopes.append(found.group(1))
+        scope = re.search(r"scope: (\w+)", body)
+        role = re.search(r"roleDefinitions', (\w+)\)", body)
+        assert scope is not None
+        assert role is not None
+        roles[scope.group(1)] = role.group(1)
         assert "principalType: 'ServicePrincipal'" in body
         assert "name: guid(" in body, "deterministic role assignment names"
-    assert sorted(scopes) == ["auditAnchorContainer", "evidenceContainer"], "scoped to the containers, not the account"
-    # The module is handed the reader identity only; the actor (WRITE) identity gets nothing on storage.
+        assert "principalId: readerPrincipalId" in body, "only the reader identity is granted anything"
+    # Scoped to the containers, never to the account; the contracts container is read-only for the app.
+    assert roles == {
+        "evidenceContainer": "storageBlobDataContributorRoleId",
+        "auditAnchorContainer": "storageBlobDataContributorRoleId",
+        "contractsContainer": "storageBlobDataReaderRoleId",
+    }
+    assert "var storageBlobDataReaderRoleId = '2a2b9908-6b94-4b4a-bb09-aaf3bc7f7a58'" in code
+    # The module is handed the reader identity only; the actor (WRITE) identity gets nothing on storage, and the
+    # template assigns no uploader: the owner grants that on the contracts container (README, Estate contracts).
     call = re.search(r"module evidenceStorage 'modules/evidence-storage.bicep' = \{(.*?)\n\}", BICEP, re.S)
     assert call is not None
     assert "readerPrincipalId: readerIdentity.properties.principalId" in call.group(1)
@@ -233,19 +249,84 @@ def test_the_connection_budget_fits_the_sku_of_every_environment() -> None:
         assert replicas * pool + 15 <= 50, f"{environment}: {replicas * pool + 15} connections do not fit Standard_B1ms"
 
 
-def test_the_estate_contracts_file_is_a_mounted_secret_not_a_share() -> None:
+def test_the_estate_contracts_file_is_a_blob_not_a_secret_a_volume_or_a_share() -> None:
     main = _code(BICEP)
-    assert re.search(r"@secure\(\)\nparam contractsContent string = ''$", main, re.M)
-    assert re.search(r"^param contractsPath string = '/mnt/contracts/estate\.json'$", main, re.M)
-    assert "contractsSecretName = 'estate-contracts'" in main
-    assert "storageType: 'Secret'" in main
-    assert "fabricMode == 'rest' && !hasContracts" in main, "rest mode without contracts fails the deployment"
-    for environment, text in ENV_FILES.items():
-        assert "readEnvironmentVariable('CONTRACTS_JSON', '')" in text, environment
-        assert _param_value(text, "contractsPath") == "'/mnt/contracts/estate.json'", environment
-        assert "/var/lib/orqentis/contracts" not in text
-    for token in ("contractsContent", "CONTRACTS_JSON", "/mnt/contracts/estate.json", "estate-contracts"):
+    # The removed designs: a Container App secret with a mounted file, an Azure Files path, a pipeline variable.
+    for removed in (
+        "contractsContent",
+        "estate-contracts",
+        "CONTRACTS_JSON",
+        "ORQENTIS_CONTRACTS_PATH",
+        "contractsPath",
+    ):
+        assert removed not in main, f"main.bicep still mentions {removed}"
+        for path in MODULES:
+            assert removed not in _code(path.read_text(encoding="utf-8")), f"{path.name} still mentions {removed}"
+    for name in ("deploy-environment.yml", "whatif.yml", "cd.yml", "ci.yml"):
+        text = (WORKFLOWS / name).read_text(encoding="utf-8")
+        assert "CONTRACTS_JSON" not in text, f"{name} still passes the contracts text"
+        assert "contractsContent" not in text
+    assert "CONTRACTS_JSON" not in (REPO / "scripts" / "validate-bicep.sh").read_text(encoding="utf-8")
+    delivery = (REPO / "docs" / "delivery.md").read_text(encoding="utf-8")
+    assert "CONTRACTS_JSON" not in delivery
+    assert "estate-contracts" not in delivery
+    assert "storageType: 'Secret'" in main, (
+        "the Key Vault certificate volume (service_principal mode) is the only secret volume"
+    )
+    assert main.count("storageType: 'Secret'") == 1
+    # The parameters and the two settings they feed. They are not autonomous-runtime parameters.
+    assert re.search(r"@maxLength\(63\)\nparam contractsContainerName string = 'contracts'$", main, re.M)
+    assert re.search(r"^param contractsBlobName string = 'estate\.json'$", main, re.M)
+    section = re.search(r"-+ autonomous runtime\n(.*?)\n// -+ network \+ auth", BICEP, re.S)
+    assert section is not None
+    assert "contractsContainerName" not in section.group(1)
+    assert "contractsBlobName" not in section.group(1)
+    for name, value in (
+        ("ORQENTIS_CONTRACTS_CONTAINER", "evidenceStorage.outputs.contractsContainerName"),
+        ("ORQENTIS_CONTRACTS_BLOB_NAME", "contractsBlobName"),
+    ):
+        assert f"{{ name: '{name}', value: {value} }}" in BICEP
+        assert name.removeprefix("ORQENTIS_").lower() in Settings.model_fields, f"{name} is not a setting"
+        assert f"`{name}`" in BICEP_README
+    # No extra URL: the contracts live in the evidence account (ORQENTIS_EVIDENCE_BLOB_URL).
+    assert "ORQENTIS_CONTRACTS_BLOB_URL" not in BICEP
+    assert Settings.model_fields["contracts_container"].default == "contracts"
+    assert Settings.model_fields["contracts_blob_name"].default == "estate.json"
+    # The container exists, versioned like the others, and its name is an output for the upload instructions.
+    evidence = _code(EVIDENCE_MODULE)
+    assert re.search(
+        r"resource contractsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@[^']+'", evidence
+    )
+    assert "output contractsContainerName string = contractsContainer.name" in evidence
+    assert "contractsContainerName: contractsContainerName" in main
+    assert "output contractsContainerName string = evidenceStorage.outputs.contractsContainerName" in main
+    for token in (
+        "contractsContainerName",
+        "contractsBlobName",
+        "ContractsFileNotFoundError",
+        "ContractsInvalidError",
+        "contracts.loaded",
+    ):
         assert token in BICEP_README, f"{token} is not documented in infra/bicep/README.md"
+    # The upload instruction names the one role the uploader needs, on the contracts container only.
+    assert "--assignee-object-id" in BICEP_README
+    assert "/containers/$CONTAINER" in BICEP_README
+    assert (
+        'az storage blob upload --account-name "$(out evidenceStorageAccountName)" --container-name contracts'
+        in BICEP_README
+    )
+    # Only the upgrade notes may still name what was removed.
+    upgrade_notes = "### Upgrading from the Azure Files template"
+    readme = BICEP_README.split(upgrade_notes)[0] + BICEP_README.split(upgrade_notes)[1].split("\n## ", 1)[1]
+    for removed in (
+        "estate-contracts",
+        "CONTRACTS_JSON",
+        "ORQENTIS_CONTRACTS_PATH",
+        "contractsPath",
+        "contractsContent",
+    ):
+        assert removed not in readme, f"infra/bicep/README.md still mentions {removed} outside the upgrade notes"
+    assert "Azure Files" not in readme.replace("There is no Azure Files share, no SQLite file", "")
 
 
 def test_the_storage_environment_variables_are_set_and_documented() -> None:
@@ -311,7 +392,8 @@ def test_every_variable_an_environment_file_requires_is_supplied_by_the_pipeline
     # Identifiers come from GitHub variables, never from secrets.
     assert "POSTGRES_ENTRA_ADMIN_OBJECT_ID: ${{ vars.POSTGRES_ENTRA_ADMIN_OBJECT_ID }}" in deploy
     assert "POSTGRES_ENTRA_ADMIN_NAME: ${{ vars.POSTGRES_ENTRA_ADMIN_NAME }}" in deploy
-    assert "CONTRACTS_JSON: ${{ vars.CONTRACTS_JSON }}" in deploy
+    assert "CONTRACTS_JSON" not in deploy
+    assert "CONTRACTS_JSON" not in whatif
     assert not re.search(r"secrets\.\w", deploy)
     assert not re.search(r"secrets\.\w", whatif)
 
@@ -319,5 +401,8 @@ def test_every_variable_an_environment_file_requires_is_supplied_by_the_pipeline
 def test_the_deploy_identity_may_assign_the_storage_role_the_template_grants() -> None:
     delivery = (REPO / "docs" / "delivery.md").read_text(encoding="utf-8")
     assert STORAGE_BLOB_DATA_CONTRIBUTOR in delivery, "the RBAC Administrator condition must allow the storage role"
+    assert STORAGE_BLOB_DATA_READER in delivery, "... and the read-only role on the contracts container"
+    assert "${STORAGE_BLOB_DATA_READER}" in delivery.split("CONDITION=")[1].split("\n")[0]
     assert STORAGE_BLOB_DATA_CONTRIBUTOR in EVIDENCE_MODULE
+    assert STORAGE_BLOB_DATA_READER in EVIDENCE_MODULE
     assert "Microsoft.DBforPostgreSQL" in delivery, "the resource provider must be registered once"

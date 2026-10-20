@@ -9,8 +9,8 @@
 | User-assigned managed identity | `id-<prefix>-reader` | **READ** capability boundary. The app's operating identity (Fabric/Power BI read, Azure OpenAI) |
 | User-assigned managed identity | `id-<prefix>-actor` | **WRITE** capability boundary. Created, but attached to the app **only** when `enableWriteActions = true` |
 | PostgreSQL Flexible Server | `psql-<prefix>-<hash>` (`modules/postgres.bicep`) | The system of record: incidents, approvals, events, scheduler leases, investigation jobs, the audit trail. Microsoft Entra authentication only (`passwordAuth` disabled), an Entra administrator (`postgresEntraAdminObjectId`), database `orqentis`, point-in-time restore. See *Storage* |
-| Storage account | `stev<prefix><hash>` (`modules/evidence-storage.bicep`) | Evidence, reports and audit anchors in Blob containers `evidence` and `audit-anchors`. Entra only (Shared Key off), versioning, soft delete, version-level immutability |
-| Role assignments | `modules/evidence-storage.bicep` | `Storage Blob Data Contributor` for the **reader** identity on each of the two containers (not on the account). The actor identity gets nothing on storage |
+| Storage account | `stev<prefix><hash>` (`modules/evidence-storage.bicep`) | Evidence, reports, audit anchors and the estate contracts file in Blob containers `evidence`, `audit-anchors` and `contracts`. Entra only (Shared Key off), versioning, soft delete, version-level immutability |
+| Role assignments | `modules/evidence-storage.bicep` | For the **reader** identity, on the containers only (never on the account): `Storage Blob Data Contributor` on `evidence` and `audit-anchors`, and `Storage Blob Data Reader` (read-only) on `contracts`. The actor identity gets nothing on storage, and the template grants nobody the right to upload contracts |
 | Container Apps environment | `cae-<prefix>` | Workload-profiles environment (Consumption), logs to Log Analytics, optional VNet |
 | Container App | `ca-<prefix>` | The API (`orqentis serve`), port 8000, `minReplicas` to `maxReplicas` replicas (2 by default; dev uses 1), Entra ID authentication, exposure per `ingressMode` |
 | Container App auth config | `current` | Built-in authentication (Easy Auth) with Microsoft Entra ID, `Return401`; `/health` and `/health/ready` excluded by default (`anonymousHealthEndpoints`) |
@@ -19,7 +19,6 @@
 | Role assignment (optional) | `modules/openai-role.bicep` | `Cognitive Services OpenAI User` for the reader identity on `azureOpenAiResourceId` (any RG/subscription) |
 | Role assignment (optional) | `modules/keyvault-role.bicep` | `Key Vault Secrets User` for the reader identity on **each referenced secret only** (not the vault), in the vault of `keyVaultResourceId` (any RG/subscription) |
 | Deployment check | `modules/input-check.bicep` | Fails the deployment with a readable reason when the `service_principal` inputs cannot work (see *Cross-tenant Fabric access*), and when the PostgreSQL administrator, the estate contracts (`rest` mode), the replica counts, the connection budget or the network options cannot work (see *Storage*) |
-| Container App secret | `estate-contracts` | The estate contracts file (`contractsContent`), mounted read-only at `/mnt/contracts/estate.json`; only when `contractsContent` is set (see *Estate contracts*) |
 | Container App secrets (optional) | `fabric-sp-client-secret` / `fabric-sp-certificate` | Key Vault references (`keyVaultUrl` + the reader identity), only in `service_principal` mode |
 
 The app runs with these settings (see `src/orqentis/config/settings.py`):
@@ -37,7 +36,7 @@ The app runs with these settings (see `src/orqentis/config/settings.py`):
 | `ORQENTIS_DEFAULT_TIMEZONE` | `defaultTimezone` (default `Australia/Sydney`) |
 | `ORQENTIS_AUTHORITY_HOST`, `ORQENTIS_FABRIC_API_BASE_URL`, `ORQENTIS_POWERBI_API_BASE_URL`, `ORQENTIS_FABRIC_SCOPE`, `ORQENTIS_POWERBI_SCOPE` | `authorityHost`, `fabricApiBaseUrl`, `powerbiApiBaseUrl`, `fabricScope`, `powerbiScope` (only set when non-empty; empty keeps the public cloud) |
 | `ORQENTIS_FABRIC_MODE` | `fabricMode` (default `rest`) |
-| `ORQENTIS_CONTRACTS_PATH` | `contractsPath` (default `/mnt/contracts/estate.json`, where `contractsContent` is mounted read-only) |
+| `ORQENTIS_CONTRACTS_CONTAINER` / `ORQENTIS_CONTRACTS_BLOB_NAME` | `contractsContainerName` / `contractsBlobName` (default `contracts` / `estate.json`): where the estate contracts file is read from, in the evidence account (`ORQENTIS_EVIDENCE_BLOB_URL`). No path and no volume; see *Estate contracts* |
 | `ORQENTIS_ENABLE_WRITE_ACTIONS` | `enableWriteActions` (default `false`) |
 | `ORQENTIS_REASONER` | `reasoner` (default `rule_based`) |
 | `ORQENTIS_AZURE_OPENAI_ENDPOINT` / `_DEPLOYMENT` | `azureOpenAiEndpoint` / `azureOpenAiDeployment` (only set when non-empty) |
@@ -217,7 +216,7 @@ az acr build -r crfabricops -t orqentis-fabricops:0.1.0 .   # builds the reposit
 
 ### 3. Deploy the template
 
-Copy `main.bicepparam` and set `entraClientId` to `$API_APP_ID`, along with `containerImage`, `containerRegistryName` and the other values you need. Two more values are **required**: the PostgreSQL Entra administrator (`postgresEntraAdminObjectId` and `postgresEntraAdminName`: the object id and name of an Entra group whose members will run the bootstrap step below; the deployment fails with a readable reason when they are empty) and, in `rest` mode, `contractsContent` (the estate contracts file, step 4). The subscription needs the `Microsoft.DBforPostgreSQL` resource provider registered once (`az provider register --namespace Microsoft.DBforPostgreSQL`).
+Copy `main.bicepparam` and set `entraClientId` to `$API_APP_ID`, along with `containerImage`, `containerRegistryName` and the other values you need. The PostgreSQL Entra administrator is **required** (`postgresEntraAdminObjectId` and `postgresEntraAdminName`: the object id and name of an Entra group whose members will run the bootstrap step below; the deployment fails with a readable reason when they are empty). In `rest` mode the estate contracts file is uploaded after the deployment (step 4). The subscription needs the `Microsoft.DBforPostgreSQL` resource provider registered once (`az provider register --namespace Microsoft.DBforPostgreSQL`).
 
 ```bash
 az deployment group what-if -g "$RG" -f infra/bicep/main.bicep -p infra/bicep/main.bicepparam
@@ -278,9 +277,9 @@ If `/health/ready` stays `503`, read the replica log (`az containerapp logs show
 
 ### 4. Estate contracts (rest mode)
 
-In `rest` mode the app needs the declared environments, topology, data products and SLAs at `contractsPath`. There is no shared disk to upload to any more: the file is deployed with the app. The parameter `contractsContent` takes the **JSON text of the file**; the template stores it as the Container App secret `estate-contracts` and mounts it read-only as `/mnt/contracts/estate.json` (the same pattern as the Key Vault certificate in *Cross-tenant Fabric access*). In `rest` mode the deployment **fails with a readable reason** when `contractsContent` is empty; in `mock` mode it may be empty and nothing is mounted.
+In `rest` mode the app needs the declared environments, topology, data products and SLAs: the **estate contracts file**. There is no shared disk and no secret for it. It is a **blob** in the evidence storage account (container `contracts`, blob `estate.json` by default: the parameters `contractsContainerName` and `contractsBlobName`, the settings `ORQENTIS_CONTRACTS_CONTAINER` and `ORQENTIS_CONTRACTS_BLOB_NAME`), and the account is the one in `ORQENTIS_EVIDENCE_BLOB_URL`. The template creates the container (versioned, soft delete, version-level immutability, like the other two) and gives the reader identity read-only access to it: **Storage Blob Data Reader**, scoped to that container, so a compromised app identity cannot rewrite the declared estate. You upload the file after the deployment. `mock` mode does not read it.
 
-If the file is invalid the app does not start; the container log carries one error that names the path and lists every violation as `file:line:column: error: /json/pointer: message`, for example `Contracts file is invalid: /mnt/contracts/estate.json` followed by `... error: /slas/0/timezone: not a valid IANA time zone`. Container Apps keeps restarting the container until the file is fixed, so check the file **before** deploying it:
+The file format is described by `schemas/contracts.schema.json`; a full estate file (`fixtures/fabric/estate.json`) is also accepted, and only its contract sections are used. Check it **before** uploading:
 
 ```bash
 orqentis contracts scaffold --output contracts/estate.json --catalog-output contracts/catalog.json   # draft from a read-only listing
@@ -288,24 +287,38 @@ orqentis contracts scaffold --output contracts/estate.json --catalog-output cont
 orqentis contracts validate contracts/estate.json --catalog contracts/catalog.json --strict
 ```
 
-The file format is described by `schemas/contracts.schema.json`. A full estate file (`fixtures/fabric/estate.json`) is also accepted; only its contract sections are used.
-
-Hand the text to the deployment:
+**Who may upload.** The template assigns **no one** the right to write to the contracts container, and the pipeline's deploy identities cannot. The owner grants `Storage Blob Data Contributor` on **that container only** to each person, group or identity that uploads (this needs Owner or User Access Administrator; the deploy identity cannot):
 
 ```bash
-# Pipeline: the text of the file is the GitHub environment variable CONTRACTS_JSON; the env/*.bicepparam files read it with
-# readEnvironmentVariable('CONTRACTS_JSON', '') (docs/delivery.md, section 7).
-gh variable set CONTRACTS_JSON --repo mjtpena/fabricops-digital-agent --env prod < contracts/estate.json
+RG=rg-fabricops-dev                  # the environment's resource group
+DEPLOYMENT=<deployment name>         # az deployment group list -g "$RG" --query "[].name" -o tsv
+out() { az deployment group show -g "$RG" -n "$DEPLOYMENT" --query "properties.outputs.$1.value" -o tsv; }
+ACCOUNT=$(out evidenceStorageAccountName)
+CONTAINER=$(out contractsContainerName)                                                    # contracts
+SCOPE="$(az storage account show -g "$RG" -n "$ACCOUNT" --query id -o tsv)/blobServices/default/containers/$CONTAINER"
 
-# Manual deployment from a shell:
-export CONTRACTS_JSON="$(cat contracts/estate.json)"
-az deployment group create -g "$RG" -f infra/bicep/main.bicep -p infra/bicep/main.bicepparam -n fabricops
-# or, in your own parameter file:  param contractsContent = loadTextContent('../../contracts/estate.json')
+# In Git Bash on Windows prefix the next command with MSYS_NO_PATHCONV=1, or the scope path is rewritten.
+az role assignment create --assignee-object-id <object id of the person, group or service principal> \
+  --assignee-principal-type <User|Group|ServicePrincipal> \
+  --role "Storage Blob Data Contributor" --scope "$SCOPE"
 ```
 
-The file holds identifiers, names and SLAs, not credentials. It is a secure parameter and a Container App secret only so that it stays out of deployment logs; a GitHub variable is readable by everyone with access to the repository, like the other variables. To change the contracts, update the variable and deploy again, then restart the active revision so the app reads the new file (a secret change does not create a revision; `az containerapp revision restart`).
+**Upload** (and every later update; the uploader signs in with Entra, no key or SAS exists):
 
-**Size.** Container Apps limits the size of a secret, and GitHub limits a variable to 48 KB. I could not verify the Container Apps limit offline: verify it for your file (`wc -c contracts/estate.json`). For a very large estate file, use a Key Vault secret reference instead of `contractsContent`: the template already resolves Key Vault references with the reader identity for the cross-tenant credential, and a contracts secret has the same shape; that variant is not in the template yet.
+```bash
+az storage blob upload --account-name "$(out evidenceStorageAccountName)" --container-name contracts --name estate.json \
+  --file contracts/estate.json --auth-mode login --overwrite
+```
+
+`--overwrite` replaces the current blob by creating a **new version**; the previous version stays readable (`az storage blob list ... --include v`, then `az storage blob download ... --version-id <id>`), so a bad upload is undone by uploading the previous version's content again. Use another `--name` only together with `contractsBlobName`.
+
+**What the app does with it:**
+
+* **At start-up.** A missing or invalid blob leaves the app **not ready**: `/health/ready` answers `503` with the reason `build_failed` and the exception *type* only (for example `ContractsFileNotFoundError` or `ContractsInvalidError`; never its message), and the redacted container log lists every violation as `file:line:column: error: /json/pointer: message`. The build is retried with exponential backoff (`buildRetryInitialSeconds` up to `buildRetryMaxSeconds`); `/health` stays `200`, so there is **no crash loop**. A `rest` deployment therefore succeeds without the file, and the app becomes ready by itself, without a redeployment, within one retry after a valid file is uploaded. That is intended; it also means the smoke test of a first `rest` deployment fails until the upload (docs/delivery.md, section 9, has the `mock`-first route for `prod`).
+* **While running.** On every catalog refresh (`catalogRefreshIntervalMinutes`, default `60`: lower it to pick changes up sooner) each replica re-reads the blob, compares its SHA-256 with the contracts in force and, when it changed, validates and applies the new file and writes a `contracts.loaded` audit record with the SHA-256 and the blob version.
+* **A bad blob after start.** If the blob becomes missing or invalid, the contracts that were last good **stay in force**. The refresh job reports `FAILED` once (audited when its health changes, not on every attempt) and recovers on its own when a valid blob is uploaded.
+
+The file holds identifiers, names and SLAs, not credentials. Because the account has version-level immutability, every uploaded version is protected for `evidenceRetentionDays` and cannot be deleted before then, so check the file before uploading it. *Verify on the first deployment:* that overwriting `estate.json` while the previous version is under retention creates a new version rather than being refused; the template and this procedure depend on it (if the service refuses, the file needs a new `contractsBlobName` per release).
 
 For a smoke test before Fabric access is in place, deploy once with `fabricMode = 'mock'`. The app then serves the synthetic estate that is baked into the image.
 
@@ -451,7 +464,7 @@ A deployed environment keeps **no state in the container**. Two stateful service
 | Incidents, approvals, dependencies, operational events with collector watermarks, scheduler leases, investigation jobs, the audit trail (records and chain head) | PostgreSQL Flexible Server `psql-<prefix>-<hash>`, database `orqentis` (`modules/postgres.bicep`) | Transactions, row locks and compare-and-set make concurrent replicas safe; backups with point-in-time restore |
 | Evidence artefacts and incident reports | Blob container `evidence` (`ORQENTIS_EVIDENCE_CONTAINER`) | Write-once; version-level immutability |
 | Audit-chain anchors | Blob container `audit-anchors` (`ORQENTIS_AUDIT_ANCHOR_CONTAINER`) | The chain head (sequence and hash), copied periodically to storage the database cannot rewrite |
-| The estate contracts file | Container App secret `estate-contracts`, a read-only file at `/mnt/contracts/estate.json` | Its source of truth is the repository / the `CONTRACTS_JSON` variable, not this deployment |
+| The estate contracts file | Blob container `contracts`, blob `estate.json` (`ORQENTIS_CONTRACTS_CONTAINER`, `ORQENTIS_CONTRACTS_BLOB_NAME`) | Read-only for the app; versioned, soft-deleted and immutable per version like the other containers; re-read on the catalog refresh |
 | `ORQENTIS_DATA_DIR` (`/var/lib/orqentis`) | The container's own disk | Ephemeral and per replica: scratch space, lost when the replica restarts. Nothing durable is written there |
 
 There is no Azure Files share, no SQLite file and no storage account key in a deployed environment. `ORQENTIS_STORAGE_BACKEND=postgres` is set by the template, and the app refuses to start on local files in `dev`, `test` or `prod`. SQLite, the file evidence store and the JSONL audit log remain the adapters for local development, tests and `make demo` ([ADR-0003](../../docs/adr/0003-local-stores-first.md)).
@@ -474,7 +487,7 @@ There is no Azure Files share, no SQLite file and no storage account key in a de
 * **Immutability.** Version-level immutability is enabled for the account with a default retention policy of `evidenceRetentionDays` (default `30`, up to `3650`) that every new blob version inherits: a version cannot be changed or deleted until its retention ends. The setting can only be switched on when an account is created, which is why this account has its own name (`stev...`, not the `st...` account of earlier template versions). An overwrite creates a new version and the previous one stays protected. *Verify on the first deployment:* reports that are re-rendered are written as overwrites; if the service refuses an overwrite of a blob whose current version is under retention, reports must be written under a new name per render instead.
 * **`Unlocked` or `Locked`: the owner's decision.** `evidenceImmutabilityState` is `Unlocked` by default and in every environment today. Unlocked means an account owner (management-plane rights, which the app does not have) can still change or remove the policy: right for `dev` and `test`, and for `prod` until the retention period and the decision are confirmed. **`Locked` is irreversible:** the retention can then only be extended, never shortened or removed, and the account cannot be deleted until every blob's retention has expired. It is a deliberate production step that needs the owner's approval. To lock: set `evidenceImmutabilityState = 'Locked'` in `env/prod.bicepparam` in a reviewed pull request, after the account exists with the policy `Unlocked` (a policy cannot be created `Locked`; the platform allows only the Unlocked to Locked transition). `tests/unit/test_infra_consistency.py` guards the prod value, so the same pull request changes that test.
 * **Soft delete and versioning.** Versioning is on. Blob soft delete and container soft delete keep a deleted or overwritten blob, and a deleted container, recoverable for `evidenceSoftDeleteDays` (default `14`). Change feed is off. Recover with `az storage blob undelete` and `az storage container restore`, and list versions with `az storage blob list --include v`.
-* **Who can touch it.** The reader identity holds `Storage Blob Data Contributor` on each of the two containers (`evidenceContainerName`, default `evidence`, and `auditAnchorContainerName`, default `audit-anchors`), **not on the account**: it can read and write blobs in those two containers and nothing else. It cannot list or create containers (the template creates them), change policies or read account settings. The actor (WRITE) identity has no access to storage. There are no keys and no SAS. People who need to read evidence or anchors need a data role of their own, for example `Storage Blob Data Reader` on a container.
+* **Who can touch it.** The reader identity holds `Storage Blob Data Contributor` on the evidence and audit-anchor containers (`evidenceContainerName`, default `evidence`, and `auditAnchorContainerName`, default `audit-anchors`) and only `Storage Blob Data Reader` on the contracts container (`contractsContainerName`, default `contracts`), always scoped to the container and **never to the account**: it can read and write blobs in the first two, read the third, and do nothing else. It cannot list or create containers (the template creates them), change policies or read account settings. The actor (WRITE) identity has no access to storage. There are no keys and no SAS. Whoever uploads the estate contracts file needs `Storage Blob Data Contributor` on the contracts container only, granted by the owner (section 4); the template assigns no uploader. People who need to read evidence or anchors need a data role of their own, for example `Storage Blob Data Reader` on a container.
 * **Network.** `evidenceNetworkDefaultAction` is `Allow` by default: the public endpoint answers any caller, and every request still needs an Entra token and a role. `Deny` with `evidenceAllowedIpRanges` and/or `evidenceAllowedSubnetIds` restricts it (trusted Azure services stay allowed). An environment without a VNet has no fixed address, so `Deny` is for ingress mode `vnet` with a subnet that has the `Microsoft.Storage` service endpoint; the deployment fails if `Deny` has neither a range nor a subnet.
 * **Redundancy.** `storageSkuName`: `Standard_LRS` (`dev`, `test`) or `Standard_ZRS` (`prod`).
 
@@ -486,12 +499,12 @@ PostgreSQL backs itself up continuously; `postgresBackupRetentionDays` (7 to 35)
 
 This release changes the interface of the template:
 
-* `fileShareQuotaGiB` is removed (a parameter file that still sets it no longer compiles), and so are the `storageAccountName` and `dataFileShareName` outputs. New outputs: `postgresServerName`, `postgresServerFqdn`, `postgresDatabaseName`, `evidenceStorageAccountName`, `evidenceBlobEndpoint`, `evidenceContainerName`, `auditAnchorContainerName`.
-* `contractsContent` is required in `rest` mode, and `contractsPath` now defaults to `/mnt/contracts/estate.json`.
+* `fileShareQuotaGiB` is removed (a parameter file that still sets it no longer compiles), and so are the `storageAccountName` and `dataFileShareName` outputs. New outputs: `postgresServerName`, `postgresServerFqdn`, `postgresDatabaseName`, `evidenceStorageAccountName`, `evidenceBlobEndpoint`, `evidenceContainerName`, `auditAnchorContainerName`, `contractsContainerName`.
+* The estate contracts file now comes from a **blob** (`contractsContainerName` / `contractsBlobName`, uploaded after the deployment, section 4). The file used to live on the Azure Files share at `contractsPath`, which is gone together with `ORQENTIS_CONTRACTS_PATH` (a parameter file that still sets `contractsPath` no longer compiles). A `rest` app stays not ready until the blob is uploaded. (`contractsContent`, a Container App secret design, was considered and never shipped.)
 * `postgresEntraAdminObjectId` and `postgresEntraAdminName` are required.
 * `schedulerStartupDelaySeconds` now defaults to `30` (it was `120`).
 * `minReplicas` / `maxReplicas` default to `2` / `2` (the template used to be pinned to 1); `dev` sets 1.
-* The deploy identity's role-assignment condition must now allow `Storage Blob Data Contributor`, and the `Microsoft.DBforPostgreSQL` provider must be registered ([docs/delivery.md](../../docs/delivery.md)).
+* The deploy identity's role-assignment condition must now allow `Storage Blob Data Contributor` and `Storage Blob Data Reader`, and the `Microsoft.DBforPostgreSQL` provider must be registered ([docs/delivery.md](../../docs/delivery.md)).
 * The evidence account is a **new** account (`stev...`). An environment that ran the earlier template keeps its old `st<prefix><hash>` account and file share, which the template no longer references and an incremental deployment does not delete. There is no importer for the old SQLite and JSONL data; if an environment holds data you need, export it from the share before deleting the account (`az storage account delete -g "$RG" -n <old account>`).
 
 ## Observability
@@ -510,4 +523,4 @@ done
 bash scripts/validate-bicep.sh      # main.bicep, main.bicepparam, examples and env/*.bicepparam, plus the prod write-switch check
 ```
 
-`main.bicepparam` and the examples compile without any environment variable (they carry placeholders). The `env/*.bicepparam` files read the image, registry, API client id and PostgreSQL administrator from environment variables (`CONTAINER_IMAGE`, `ACR_LOGIN_SERVER`, `ACR_RESOURCE_ID`, `ENTRA_API_CLIENT_ID`, `POSTGRES_ENTRA_ADMIN_OBJECT_ID`, `POSTGRES_ENTRA_ADMIN_NAME`) with no defaults, and optionally `FABRIC_MODE`, `POSTGRES_ENTRA_ADMIN_TYPE`, `POSTGRES_EXISTING_SERVER_NAME` and `CONTRACTS_JSON`; `scripts/validate-bicep.sh` supplies placeholders. CI (`.github/workflows/ci.yml`) runs the build steps and `scripts/validate-bicep.sh` on every push and pull request, and `.github/workflows/whatif.yml` shows the what-if for `dev` on pull requests.
+`main.bicepparam` and the examples compile without any environment variable (they carry placeholders). The `env/*.bicepparam` files read the image, registry, API client id and PostgreSQL administrator from environment variables (`CONTAINER_IMAGE`, `ACR_LOGIN_SERVER`, `ACR_RESOURCE_ID`, `ENTRA_API_CLIENT_ID`, `POSTGRES_ENTRA_ADMIN_OBJECT_ID`, `POSTGRES_ENTRA_ADMIN_NAME`) with no defaults, and optionally `FABRIC_MODE`, `POSTGRES_ENTRA_ADMIN_TYPE` and `POSTGRES_EXISTING_SERVER_NAME`; `scripts/validate-bicep.sh` supplies placeholders. CI (`.github/workflows/ci.yml`) runs the build steps and `scripts/validate-bicep.sh` on every push and pull request, and `.github/workflows/whatif.yml` shows the what-if for `dev` on pull requests.

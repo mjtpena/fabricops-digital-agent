@@ -16,9 +16,8 @@ name: Bicep what-if
 #
 # Repository variables (docs/delivery.md): AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_LOGIN_SERVER, WHATIF_CLIENT_ID,
 # WHATIF_RESOURCE_GROUP, WHATIF_ENTRA_API_CLIENT_ID, WHATIF_POSTGRES_ENTRA_ADMIN_OBJECT_ID, WHATIF_POSTGRES_ENTRA_ADMIN_NAME
-# and, optionally, WHATIF_POSTGRES_ENTRA_ADMIN_TYPE, WHATIF_POSTGRES_EXISTING_SERVER_NAME and WHATIF_CONTRACTS_JSON: the
-# dev environment's values of the POSTGRES_ENTRA_ADMIN_* / POSTGRES_EXISTING_SERVER_NAME / CONTRACTS_JSON variables
-# (identifiers and the contracts text, never secrets).
+# and, optionally, WHATIF_POSTGRES_ENTRA_ADMIN_TYPE and WHATIF_POSTGRES_EXISTING_SERVER_NAME: the dev environment's
+# values of the POSTGRES_ENTRA_ADMIN_* / POSTGRES_EXISTING_SERVER_NAME variables (identifiers, never secrets).
 
 on:
   pull_request:
@@ -53,7 +52,6 @@ jobs:
       POSTGRES_ENTRA_ADMIN_OBJECT_ID: ${{ vars.WHATIF_POSTGRES_ENTRA_ADMIN_OBJECT_ID }}
       POSTGRES_ENTRA_ADMIN_NAME: ${{ vars.WHATIF_POSTGRES_ENTRA_ADMIN_NAME }}
       POSTGRES_EXISTING_SERVER_NAME: ${{ vars.WHATIF_POSTGRES_EXISTING_SERVER_NAME }}
-      CONTRACTS_JSON: ${{ vars.WHATIF_CONTRACTS_JSON }}
     steps:
       - name: Check configuration
         env:

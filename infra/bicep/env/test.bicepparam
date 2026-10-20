@@ -13,8 +13,6 @@
 //     POSTGRES_ENTRA_ADMIN_TYPE       optional: Group (default), User or ServicePrincipal
 //     POSTGRES_EXISTING_SERVER_NAME   optional: use this existing server (for example a restore) instead of the one the
 //                          template creates (docs/operations/restore.md)
-//     CONTRACTS_JSON       the JSON text of the estate contracts file; required when fabricMode is 'rest', empty is fine
-//                          for 'mock' (infra/bicep/README.md, Estate contracts)
 //   There are no defaults for CONTAINER_IMAGE, ACR_LOGIN_SERVER, ACR_RESOURCE_ID, ENTRA_API_CLIENT_ID,
 //   POSTGRES_ENTRA_ADMIN_OBJECT_ID and POSTGRES_ENTRA_ADMIN_NAME: a missing variable fails the deployment instead of
 //   deploying a wrong value. `bash scripts/validate-bicep.sh` supplies placeholders so the file can be compiled locally.
@@ -50,10 +48,9 @@ param postgresExistingServerName = readEnvironmentVariable('POSTGRES_EXISTING_SE
 param deploymentEnvironment = 'test'
 // 'mock' serves the synthetic estate baked into the image, so test needs no Fabric access or contracts file.
 param fabricMode = readEnvironmentVariable('FABRIC_MODE', 'mock')
-// The estate contracts file is the Container App secret estate-contracts (from the CONTRACTS_JSON variable), mounted
-// read-only at contractsPath's default. Empty is fine in mock mode; rest mode fails the deployment without it.
-param contractsPath = '/mnt/contracts/estate.json'
-param contractsContent = readEnvironmentVariable('CONTRACTS_JSON', '')
+// The estate contracts file is a blob in the evidence storage account (container 'contracts', blob 'estate.json' by
+// default; infra/bicep/README.md, Estate contracts). In rest mode the app stays not ready until a valid file has been
+// uploaded there; mock mode does not read it.
 
 // The WRITE capability boundary stays closed in every environment until the executor ships (WS11).
 param enableWriteActions = false

@@ -89,12 +89,15 @@ param deploymentEnvironment string = 'prod'
 ])
 param fabricMode string = 'rest'
 
-@description('ORQENTIS_CONTRACTS_PATH: declared topology, data products and SLAs (required in rest mode). The default is where contractsContent is mounted (read-only); change it only if the file comes from somewhere else.')
-param contractsPath string = '/mnt/contracts/estate.json'
+@description('ORQENTIS_CONTRACTS_CONTAINER: the Blob container, in the evidence storage account, that holds the estate contracts file (declared topology, data products and SLAs; required in rest mode). The template creates it and gives the reader identity read access to it; whoever uploads the file needs Storage Blob Data Contributor on this container (infra/bicep/README.md, Estate contracts). A rest-mode app stays not ready (/health/ready answers 503) until a valid file is in it.')
+@minLength(3)
+@maxLength(63)
+param contractsContainerName string = 'contracts'
 
-@description('The JSON text of the estate contracts file (schemas/contracts.schema.json). Required when fabricMode is rest: the deployment fails otherwise. Stored as the Container App secret estate-contracts and mounted read-only at /mnt/contracts/estate.json. It holds identifiers, not credentials; it is a secure parameter only to keep it out of deployment logs. Container Apps limits the size of a secret (verify the current limit); for a very large estate use a Key Vault secret reference instead.')
-@secure()
-param contractsContent string = ''
+@description('ORQENTIS_CONTRACTS_BLOB_NAME: name of the estate contracts blob in contractsContainerName.')
+@minLength(1)
+@maxLength(1024)
+param contractsBlobName string = 'estate.json'
 
 @description('ORQENTIS_ENABLE_WRITE_ACTIONS. Also attaches the actor (WRITE) identity to the app. Approved actions still go through the policy engine and human approval.')
 param enableWriteActions bool = false
@@ -643,44 +646,6 @@ var ipSecurityRestrictions = [
 // Easy Auth does not authenticate these paths. Nothing under them reads the caller's identity.
 var anonymousPaths = anonymousHealthEndpoints ? ['/health', '/health/ready'] : []
 
-// Durable storage: PostgreSQL system of record + Blob evidence (ADR-0008). The estate contracts file is a Container
-// App secret mounted read-only as a file (the same pattern as the Key Vault certificate above), because the
-// container's own disk is ephemeral and there is no shared volume any more.
-var hasContracts = !empty(contractsContent)
-var contractsSecretName = 'estate-contracts'
-var contractsMountDir = '/mnt/contracts'
-var contractsFileName = 'estate.json'
-var contractsSecrets = hasContracts
-  ? [
-      {
-        name: contractsSecretName
-        value: contractsContent
-      }
-    ]
-  : []
-var contractsVolumes = hasContracts
-  ? [
-      {
-        name: contractsSecretName
-        storageType: 'Secret'
-        secrets: [
-          {
-            secretRef: contractsSecretName
-            path: contractsFileName
-          }
-        ]
-      }
-    ]
-  : []
-var contractsVolumeMounts = hasContracts
-  ? [
-      {
-        volumeName: contractsSecretName
-        mountPath: contractsMountDir
-      }
-    ]
-  : []
-
 // Durable storage inputs checked when the deployment runs (see modules/input-check.bicep): 'ok', or what is wrong.
 // Standard_B1ms allows about 50 connections (max_connections), about 15 of them reserved for the platform. During a
 // deploy the old revision (up to maxReplicas) and the new one (minReplicas) hold a pool each. Other SKUs are not
@@ -692,9 +657,7 @@ var storageCheck = length(postgresEntraAdminObjectId) != 36
       ? 'postgresEntraAdminName must be set to the name of the Microsoft Entra principal that administers PostgreSQL (pipeline variable POSTGRES_ENTRA_ADMIN_NAME); it is empty'
       : maxReplicas < minReplicas
           ? 'maxReplicas must be at least minReplicas'
-          : (fabricMode == 'rest' && !hasContracts)
-              ? 'fabricMode is rest, so contractsContent (the JSON text of the estate contracts file) must be set: the pipeline reads it from the CONTRACTS_JSON variable; see infra/bicep/README.md, Estate contracts'
-              : (!empty(postgresDelegatedSubnetId) != !empty(postgresPrivateDnsZoneId))
+          : (!empty(postgresDelegatedSubnetId) != !empty(postgresPrivateDnsZoneId))
                   ? 'PostgreSQL VNet integration needs both postgresDelegatedSubnetId and postgresPrivateDnsZoneId, or neither'
                   : (!empty(postgresDelegatedSubnetId) && (!empty(postgresAllowedIpRanges) || postgresAllowAzureServices))
                       ? 'PostgreSQL VNet integration (postgresDelegatedSubnetId) has no public endpoint, so postgresAllowedIpRanges must be empty and postgresAllowAzureServices false'
@@ -719,6 +682,9 @@ var durableStorageEnv = [
   { name: 'ORQENTIS_EVIDENCE_BLOB_URL', value: evidenceStorage.outputs.blobEndpoint }
   { name: 'ORQENTIS_EVIDENCE_CONTAINER', value: evidenceStorage.outputs.evidenceContainerName }
   { name: 'ORQENTIS_AUDIT_ANCHOR_CONTAINER', value: evidenceStorage.outputs.auditAnchorContainerName }
+  // The estate contracts file is a blob in the evidence account (ORQENTIS_EVIDENCE_BLOB_URL): no volume, no secret.
+  { name: 'ORQENTIS_CONTRACTS_CONTAINER', value: evidenceStorage.outputs.contractsContainerName }
+  { name: 'ORQENTIS_CONTRACTS_BLOB_NAME', value: contractsBlobName }
   { name: 'ORQENTIS_SCHEDULER_AUDIT_ANCHOR_ENABLED', value: auditAnchorEnabled ? 'true' : 'false' }
   { name: 'ORQENTIS_SCHEDULER_AUDIT_ANCHOR_INTERVAL_MINUTES', value: string(auditAnchorIntervalMinutes) }
   { name: 'ORQENTIS_INVESTIGATION_POLL_INTERVAL_SECONDS', value: string(investigationPollIntervalSeconds) }
@@ -741,7 +707,6 @@ var appEnv = concat(
     }
     { name: 'ORQENTIS_DEFAULT_TIMEZONE', value: defaultTimezone }
     { name: 'ORQENTIS_FABRIC_MODE', value: fabricMode }
-    { name: 'ORQENTIS_CONTRACTS_PATH', value: contractsPath }
     { name: 'ORQENTIS_ENABLE_WRITE_ACTIONS', value: enableWriteActions ? 'true' : 'false' }
     { name: 'ORQENTIS_REASONER', value: reasoner }
     { name: 'ORQENTIS_DATA_DIR', value: dataDir }
@@ -920,7 +885,7 @@ module readerSharedAcrPull 'modules/acr-pull.bicep' = if (!empty(containerRegist
 
 // ================================================================================================= durable storage
 
-// Fails the deployment with a readable reason when the durable storage, scale or contracts inputs cannot work (always
+// Fails the deployment with a readable reason when the durable storage or scale inputs cannot work (always
 // 'ok' otherwise). The modules below wait for it, so a rejected input never starts creating a database.
 module storageInputCheck 'modules/input-check.bicep' = {
   name: 'orqentis-check-durable-storage-inputs'
@@ -970,6 +935,7 @@ module evidenceStorage 'modules/evidence-storage.bicep' = {
     skuName: storageSkuName
     evidenceContainerName: evidenceContainerName
     auditAnchorContainerName: auditAnchorContainerName
+    contractsContainerName: contractsContainerName
     retentionDays: evidenceRetentionDays
     immutabilityState: evidenceImmutabilityState
     softDeleteDays: evidenceSoftDeleteDays
@@ -1054,8 +1020,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             value: appInsights.properties.ConnectionString
           }
         ],
-        keyVaultSecrets,
-        contractsSecrets
+        keyVaultSecrets
       )
     }
     template: {
@@ -1108,17 +1073,14 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               failureThreshold: 3
             }
           ]
-          volumeMounts: concat(
-            contractsVolumeMounts,
-            useClientCertificate
-              ? [
-                  {
-                    volumeName: fabricSpCertificateName
-                    mountPath: fabricSpCertificateMountPath
-                  }
-                ]
-              : []
-          )
+          volumeMounts: useClientCertificate
+            ? [
+                {
+                  volumeName: fabricSpCertificateName
+                  mountPath: fabricSpCertificateMountPath
+                }
+              ]
+            : []
         }
       ]
       // The app is stateless, so it can run as several replicas: the database serialises the audit chain (one row-locked
@@ -1130,24 +1092,21 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         minReplicas: minReplicas
         maxReplicas: maxReplicas
       }
-      volumes: concat(
-        contractsVolumes,
-        useClientCertificate
-          ? [
-              {
-                // The Key Vault secret (PEM) as a read-only file; the private key never touches a disk.
-                name: fabricSpCertificateName
-                storageType: 'Secret'
-                secrets: [
-                  {
-                    secretRef: fabricSpCertificateName
-                    path: fabricSpCertificateFile
-                  }
-                ]
-              }
-            ]
-          : []
-      )
+      volumes: useClientCertificate
+        ? [
+            {
+              // The Key Vault secret (PEM) as a read-only file; the private key never touches a disk.
+              name: fabricSpCertificateName
+              storageType: 'Secret'
+              secrets: [
+                {
+                  secretRef: fabricSpCertificateName
+                  path: fabricSpCertificateFile
+                }
+              ]
+            }
+          ]
+        : []
     }
   }
   dependsOn: [
@@ -1262,3 +1221,6 @@ output evidenceContainerName string = evidenceStorage.outputs.evidenceContainerN
 
 @description('Audit anchor container name (ORQENTIS_AUDIT_ANCHOR_CONTAINER).')
 output auditAnchorContainerName string = evidenceStorage.outputs.auditAnchorContainerName
+
+@description('Estate contracts container name (ORQENTIS_CONTRACTS_CONTAINER): upload the contracts file here (infra/bicep/README.md, Estate contracts).')
+output contractsContainerName string = evidenceStorage.outputs.contractsContainerName

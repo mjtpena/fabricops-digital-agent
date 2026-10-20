@@ -25,12 +25,10 @@ param entraClientId = '00000000-0000-0000-0000-000000000000'
 
 param deploymentEnvironment = 'prod'
 param fabricMode = 'rest'
-// The estate contracts file (rest mode): its JSON text becomes the Container App secret estate-contracts, mounted
-// read-only at /mnt/contracts/estate.json. Required when fabricMode is 'rest' (the deployment fails without it):
-//   export CONTRACTS_JSON="$(cat contracts/estate.json)"
-// or, for a manual deployment, read the file directly: param contractsContent = loadTextContent('../../contracts/estate.json')
-param contractsPath = '/mnt/contracts/estate.json'
-param contractsContent = readEnvironmentVariable('CONTRACTS_JSON', '')
+// The estate contracts file (rest mode) is a blob in the evidence storage account, uploaded after the deployment
+// (infra/bicep/README.md, Estate contracts); until it is there a rest-mode app stays not ready. These are the defaults.
+param contractsContainerName = 'contracts'
+param contractsBlobName = 'estate.json'
 
 // The WRITE capability boundary stays closed: the actor identity is created but not attached.
 param enableWriteActions = false

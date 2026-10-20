@@ -31,6 +31,7 @@ DB=$(app_env ORQENTIS_POSTGRES_DATABASE)                 # orqentis
 APP_ROLE=$(app_env ORQENTIS_POSTGRES_USER)               # id-<prefix>-reader, the app's database role
 BLOB_URL=$(app_env ORQENTIS_EVIDENCE_BLOB_URL)
 EVSA=${BLOB_URL#https://}; EVSA=${EVSA%%.*}              # the evidence storage account
+CONTRACTS_CONTAINER=$(app_env ORQENTIS_CONTRACTS_CONTAINER)   # contracts: the estate contracts file is a blob here, not in the database
 
 # The environment's PostgreSQL administrator group (docs/delivery.md, section 7):
 ADMIN_NAME=$(gh variable get POSTGRES_ENTRA_ADMIN_NAME --repo "$REPO" --env "$ENV")
@@ -246,6 +247,10 @@ not touch them**, in either direction.
 
   It lists the folders of the `evidence` container (`INC-<year>-<number>/`), so it needs `Storage Blob Data Reader` (or
   Contributor) on that container as well as the database role of section 6.
+* **The estate contracts file** is a blob too (container `$CONTRACTS_CONTAINER`, blob `estate.json`; versioned,
+  soft-deleted, immutable per version). A database restore does not touch it, in either direction: the app reads the
+  current version of the blob after the restore, as before. Nothing about the contracts needs restoring, and to go back to
+  an earlier version upload that version's content again (`infra/bicep/README.md`, section 4).
 * **Recovering a deleted or overwritten blob** has nothing to do with the database: `az storage blob undelete` (soft
   delete, `evidenceSoftDeleteDays`, default 14) or read an earlier version (`az storage blob list --include v`).
 * **External effects are not undone.** A restore does not roll back anything FabricOps did in Fabric or Power BI. Writes are
@@ -271,7 +276,7 @@ image digest with the new variable), or deploy by hand with the environment's va
 
 ```bash
 export POSTGRES_EXISTING_SERVER_NAME="$NEW" POSTGRES_ENTRA_ADMIN_OBJECT_ID="$ADMIN_OID" POSTGRES_ENTRA_ADMIN_NAME="$ADMIN_NAME"
-# plus CONTAINER_IMAGE, ACR_LOGIN_SERVER, ACR_RESOURCE_ID, ENTRA_API_CLIENT_ID (and CONTRACTS_JSON in rest mode): docs/delivery.md, section 7
+# plus CONTAINER_IMAGE, ACR_LOGIN_SERVER, ACR_RESOURCE_ID, ENTRA_API_CLIENT_ID : docs/delivery.md, section 7
 az deployment group create -g "$RG" -p "infra/bicep/env/$ENV.bicepparam"
 ```
 
@@ -348,9 +353,11 @@ Owner sign-off: ____________________  Date: ____________
   (`evidenceSoftDeleteDays`, 14) and version-level immutability (`evidenceRetentionDays`: 7 in `dev`, 30 in `test`,
   365 in `prod`). While the policy is `Unlocked` an account owner could still remove it; `Locked` is the owner's decision
   (`infra/bicep/README.md`, *Storage*). The storage account is zone-redundant in `prod`.
-* **What is not backed up.** The estate contracts file (its source of truth is the repository or the `CONTRACTS_JSON`
-  variable, and it is mounted from a Container App secret), the Container App and everything else in Bicep (redeploy it),
-  the Entra objects and groups, the GitHub variables (record the ones in docs/delivery.md, section 7), and the Log
-  Analytics workspace (its own retention).
+* **The estate contracts file is not in the database either.** It is the `contracts` blob (`$CONTRACTS_CONTAINER`) in the
+  same storage account, with the same protection as the evidence: versioning, soft delete and immutable versions. A
+  database restore never touches it. Keep the source copy of the file under version control as well (`contracts/` in the
+  repository or wherever your team keeps it), so that the blob is never the only copy.
+* **What is not backed up.** The Container App and everything else in Bicep (redeploy it), the Entra objects and groups, the
+  GitHub variables (record the ones in docs/delivery.md, section 7), and the Log Analytics workspace (its own retention).
 * **Is a backup available right now?** `az postgres flexible-server show -g "$RG" -n "$OLD" --query backup` shows the
   retention and the earliest restore date. Alert on it as part of the operations work (production-readiness criterion 6).

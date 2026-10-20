@@ -9,9 +9,12 @@
 //     deleting the account until every retention has run out. Locking is a deliberate production step.
 //   * Versioning, blob soft delete and container soft delete are on, so an overwrite or delete leaves a recoverable
 //     version for softDeleteDays.
-//   * Two containers: one for evidence and reports, one for the periodic audit-chain anchors. The reader identity
-//     (the app's operating identity) gets "Storage Blob Data Contributor" on those two containers ONLY, never on the
-//     account. The actor (WRITE) identity gets nothing here.
+//   * Three containers: evidence and reports, the periodic audit-chain anchors, and the estate contracts file. The
+//     reader identity (the app's operating identity) gets "Storage Blob Data Contributor" on the evidence and anchor
+//     containers and only "Storage Blob Data Reader" on the contracts container, never a role on the account. The
+//     actor (WRITE) identity gets nothing here. Nobody who UPLOADS contracts is granted anything by this template: the
+//     owner assigns "Storage Blob Data Contributor" on the contracts container to the people or identities that do
+//     (infra/bicep/README.md, Estate contracts).
 //   * hierarchical namespace is off: the Blob API is what the Azurite emulator speaks, and the same client adapter can
 //     target a OneLake blob URL instead (ORQENTIS_EVIDENCE_BLOB_URL).
 
@@ -44,6 +47,11 @@ param evidenceContainerName string = 'evidence'
 @minLength(3)
 @maxLength(63)
 param auditAnchorContainerName string = 'audit-anchors'
+
+@description('Name of the container for the estate contracts file. The app reads it; people upload to it.')
+@minLength(3)
+@maxLength(63)
+param contractsContainerName string = 'contracts'
 
 @description('Default retention (days since creation) of every blob version.')
 @minValue(1)
@@ -80,6 +88,10 @@ param readerPrincipalId string
 
 // Built-in role: Storage Blob Data Contributor (read, write and delete blobs; it cannot change policies or keys).
 var storageBlobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+// Built-in role: Storage Blob Data Reader (read and list blobs). The id was taken from the built-in role list and
+// could not be checked offline: confirm it on the first deployment (az role definition list --name "Storage Blob Data
+// Reader" --query "[0].name" -o tsv).
+var storageBlobDataReaderRoleId = '2a2b9908-6b94-4b4a-bb09-aaf3bc7f7a58'
 
 resource account 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: accountName
@@ -170,8 +182,19 @@ resource auditAnchorContainer 'Microsoft.Storage/storageAccounts/blobServices/co
   }
 }
 
-// Scoped to each container, not to the account: the app can read and write these two containers and nothing else
-// in this account (it cannot list or create containers, read account settings or touch policies).
+resource contractsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: contractsContainerName
+  properties: {
+    publicAccess: 'None'
+    immutableStorageWithVersioning: {
+      enabled: true
+    }
+  }
+}
+
+// Scoped to each container, not to the account: the app can read and write the evidence and anchor containers and
+// nothing else in this account (it cannot list or create containers, read account settings or touch policies).
 resource readerEvidenceAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(evidenceContainer.id, readerPrincipalId, storageBlobDataContributorRoleId)
   scope: evidenceContainer
@@ -194,6 +217,20 @@ resource readerAuditAnchorAccess 'Microsoft.Authorization/roleAssignments@2022-0
   }
 }
 
+// The contracts container is READ-ONLY for the app: a compromised reader identity cannot rewrite the declared estate
+// (topology, SLAs). Uploading is a human or pipeline task that the owner grants separately; this template assigns
+// nothing to an uploader.
+resource readerContractsAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(contractsContainer.id, readerPrincipalId, storageBlobDataReaderRoleId)
+  scope: contractsContainer
+  properties: {
+    description: 'Orqentis FabricOps reader identity: read the estate contracts file (this container only, read-only).'
+    principalId: readerPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataReaderRoleId)
+  }
+}
+
 @description('Storage account name.')
 output accountName string = account.name
 
@@ -205,3 +242,6 @@ output evidenceContainerName string = evidenceContainer.name
 
 @description('Audit anchor container name (ORQENTIS_AUDIT_ANCHOR_CONTAINER).')
 output auditAnchorContainerName string = auditAnchorContainer.name
+
+@description('Estate contracts container name (ORQENTIS_CONTRACTS_CONTAINER).')
+output contractsContainerName string = contractsContainer.name

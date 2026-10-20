@@ -10,8 +10,6 @@ param entraClientId = '00000000-0000-0000-0000-000000000000'
 // id and name of the group whose members run the bootstrap step (infra/bicep/README.md, "PostgreSQL bootstrap").
 param postgresEntraAdminObjectId = '00000000-0000-0000-0000-000000000000'
 param postgresEntraAdminName = 'sg-fabricops-postgres-admins'
-// Required in rest mode (the default): the JSON text of the estate contracts file, e.g. export CONTRACTS_JSON="$(cat contracts/estate.json)".
-param contractsContent = readEnvironmentVariable('CONTRACTS_JSON', '')
 
 param ingressMode = 'externalAuthenticated'
 // Optional: only these client ranges can connect (everything else is denied before authentication).

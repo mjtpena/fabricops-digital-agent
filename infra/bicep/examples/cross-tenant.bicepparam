@@ -22,9 +22,8 @@ param postgresEntraAdminName = 'sg-fabricops-postgres-admins'
 
 param deploymentEnvironment = 'prod'
 param fabricMode = 'rest'
-// The estate contracts file (JSON text) becomes the Container App secret estate-contracts, mounted at contractsPath.
-param contractsPath = '/mnt/contracts/estate.json'
-param contractsContent = readEnvironmentVariable('CONTRACTS_JSON', '')
+// The estate contracts file is uploaded to the 'contracts' blob container of the evidence storage account after the
+// deployment (infra/bicep/README.md, Estate contracts).
 
 // The Fabric estate's tenant (ORQENTIS_TENANT_ID and AZURE_TENANT_ID). NOT this deployment's tenant.
 param fabricTenantId = '11111111-1111-1111-1111-111111111111'

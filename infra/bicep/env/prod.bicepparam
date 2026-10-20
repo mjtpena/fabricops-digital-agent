@@ -14,8 +14,6 @@
 //     POSTGRES_ENTRA_ADMIN_TYPE       optional: Group (default), User or ServicePrincipal
 //     POSTGRES_EXISTING_SERVER_NAME   optional: use this existing server (for example a restore) instead of the one the
 //                          template creates (docs/operations/restore.md)
-//     CONTRACTS_JSON       the JSON text of the estate contracts file; required when fabricMode is 'rest', empty is fine
-//                          for 'mock' (infra/bicep/README.md, Estate contracts)
 //   There are no defaults for CONTAINER_IMAGE, ACR_LOGIN_SERVER, ACR_RESOURCE_ID, ENTRA_API_CLIENT_ID,
 //   POSTGRES_ENTRA_ADMIN_OBJECT_ID and POSTGRES_ENTRA_ADMIN_NAME: a missing variable fails the deployment instead of
 //   deploying a wrong value. `bash scripts/validate-bicep.sh` supplies placeholders so the file can be compiled locally.
@@ -49,15 +47,14 @@ param postgresEntraAdminType = readEnvironmentVariable('POSTGRES_ENTRA_ADMIN_TYP
 param postgresExistingServerName = readEnvironmentVariable('POSTGRES_EXISTING_SERVER_NAME', '')
 
 param deploymentEnvironment = 'prod'
-// 'rest' reads the real Fabric estate and needs the contracts file (the CONTRACTS_JSON variable) before the app can
-// start; the deployment fails without it. For the first deployment, before Fabric access and the contracts file are in
-// place, set the FABRIC_MODE variable on the `prod` GitHub environment to 'mock', then delete the variable once the
-// grants and the file exist (see infra/bicep/README.md, sections 4 and 5).
+// 'rest' reads the real Fabric estate and needs the contracts file (a blob, uploaded after the first deployment)
+// before the app can become ready. For the first deployment, before Fabric access and the contracts file are in place,
+// set the FABRIC_MODE variable on the `prod` GitHub environment to 'mock', then delete the variable once the grants and
+// the file exist (see infra/bicep/README.md, sections 4 and 5).
 param fabricMode = readEnvironmentVariable('FABRIC_MODE', 'rest')
-// The estate contracts file is the Container App secret estate-contracts (from the CONTRACTS_JSON variable), mounted
-// read-only at contractsPath's default. Empty is fine in mock mode; rest mode fails the deployment without it.
-param contractsPath = '/mnt/contracts/estate.json'
-param contractsContent = readEnvironmentVariable('CONTRACTS_JSON', '')
+// The estate contracts file is a blob in the evidence storage account (container 'contracts', blob 'estate.json' by
+// default; infra/bicep/README.md, Estate contracts). In rest mode the app stays not ready until a valid file has been
+// uploaded there; mock mode does not read it.
 
 // PRODUCTION WRITES STAY DISABLED. The write (actor) identity is created but never attached to the app.
 // scripts/validate-bicep.sh, run in CI, fails if this value changes. Enabling writes in prod is an architecture

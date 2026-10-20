@@ -16,8 +16,6 @@ name: Deploy environment
 #   POSTGRES_ENTRA_ADMIN_NAME       its name (for a group, the display name)
 #   POSTGRES_ENTRA_ADMIN_TYPE       optional: Group (default), User or ServicePrincipal
 #   POSTGRES_EXISTING_SERVER_NAME   optional: use this existing server (for example a restore) instead of creating one
-#   CONTRACTS_JSON       the JSON text of the estate contracts file; required when fabricMode is 'rest' (the deployment
-#                        fails with the reason if it is empty), not needed for 'mock'. Identifiers and SLAs, no credentials
 #   SMOKE_HEALTH_AUTHENTICATED  optional: 'true' only if /health is NOT excluded from Container Apps authentication
 #                        (anonymousHealthEndpoints = false); the default deployment excludes it
 # Repository variables: AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_LOGIN_SERVER, ACR_RESOURCE_ID.
@@ -57,11 +55,10 @@ jobs:
       ACR_RESOURCE_ID: ${{ vars.ACR_RESOURCE_ID }}
       ENTRA_API_CLIENT_ID: ${{ vars.ENTRA_API_CLIENT_ID }}
       RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
-      # Read by the .bicepparam file. Identifiers and the contracts text come from GitHub variables, never from secrets.
+      # Read by the .bicepparam file. Identifiers come from GitHub variables, never from secrets.
       POSTGRES_ENTRA_ADMIN_OBJECT_ID: ${{ vars.POSTGRES_ENTRA_ADMIN_OBJECT_ID }}
       POSTGRES_ENTRA_ADMIN_NAME: ${{ vars.POSTGRES_ENTRA_ADMIN_NAME }}
       POSTGRES_EXISTING_SERVER_NAME: ${{ vars.POSTGRES_EXISTING_SERVER_NAME }}
-      CONTRACTS_JSON: ${{ vars.CONTRACTS_JSON }}
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
