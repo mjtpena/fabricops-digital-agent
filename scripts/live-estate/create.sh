@@ -49,14 +49,15 @@ while (($#)); do
 done
 ((${#selected[@]})) || selected=(DEV TEST PROD CONSUMER)
 
+assert_tenant
+log "signed in as $(az account show --query user.name -o tsv | tr -d '\r'); tenant $TENANT_ID"
+
 if ((contracts_only)); then
   render_contracts
   exit 0
 fi
 
 require_capacity_active
-log "signed in as $(az account show --query user.name -o tsv | tr -d '\r'); tenant $TENANT_ID"
-[[ $(az account show --query tenantId -o tsv | tr -d '\r') == "$TENANT_ID" ]] || die "az is signed in to another tenant"
 
 for env in "${selected[@]}"; do
   case $env in

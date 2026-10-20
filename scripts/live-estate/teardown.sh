@@ -22,6 +22,8 @@ case "${1:-}" in
   *) die "unknown argument: $1" ;;
 esac
 
+assert_tenant
+
 for name in "${SANDBOX_WORKSPACES[@]}"; do
   id=$(workspace_id "$name")
   if [[ -z $id ]]; then

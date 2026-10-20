@@ -6,8 +6,9 @@ Usage (sandbox estate up, capacity running, credentials in the environment or ``
 
 Every response is captured by wrapping the adapter's own transport, so the fixtures are byte-for-byte what the
 service returned, minus identity: every GUID is remapped to a synthetic one (``00000000-0000-4000-8000-...``,
-consistently across files so references still resolve), e-mail addresses, bearer tokens, JWTs and tenant host names are
-replaced, and the result is rejected outright if anything on the deny-list survives. Fixtures land in
+consistently across files so references still resolve), e-mail addresses, bearer tokens, JWTs, tenant host names and the
+Power BI cluster host are replaced, and the result is rejected outright if anything on the deny-list survives (set
+``FABRICOPS_FIXTURE_DENY=<organisation>,<owner>,<domain>`` to add names that identify the tenant). Fixtures land in
 ``tests/fixtures/fabric_rest/`` and are replayed by ``tests/integration/test_fabric_rest_recorded.py``.
 """
 
@@ -36,17 +37,26 @@ BEARER = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
 JWT = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*")
 TRIAL_CAPACITY = re.compile(r"Trial-\d{8}T\d{6}Z-[A-Za-z0-9]+")
 TENANT_HOST = re.compile(r"[a-z0-9-]+\.(?:datawarehouse|pbidedicated)\.[a-z.]*fabric\.microsoft\.com", re.IGNORECASE)
+# Power BI cluster hosts such as wabi-<region>-<n>-primary-redirect.analysis.windows.net (they name the home region).
+PBI_CLUSTER_HOST = re.compile(r"[a-z0-9-]*wabi-[a-z0-9-]+\.analysis\.windows\.net", re.IGNORECASE)
 SYNTHETIC_EMAIL = "user@example.invalid"
+SYNTHETIC_HOST = "endpoint.example.invalid"
+SYNTHETIC_CLUSTER = "powerbi-cluster.example.invalid"
 
-# Anything matching these after sanitising means the fixture is not safe to commit.
+# Anything matching these after sanitising means the fixture is not safe to commit. Names that identify the
+# tenant or its owner do not belong in the repository either, so they come from the environment: set
+# FABRICOPS_FIXTURE_DENY to a comma-separated list (organisation, owner, domain) when recording.
 DENY = (
-    re.compile(r"datachain", re.IGNORECASE),
-    re.compile(r"michael", re.IGNORECASE),
-    re.compile(r"pe(?:ñ|n)a\b", re.IGNORECASE),
     re.compile(r"client_secret|AZURE_CLIENT_SECRET", re.IGNORECASE),
+    PBI_CLUSTER_HOST,
     JWT,
     BEARER,
 )
+
+
+def deny_patterns() -> tuple[re.Pattern[str], ...]:
+    extra = [t.strip() for t in os.environ.get("FABRICOPS_FIXTURE_DENY", "").split(",") if t.strip()]
+    return (*DENY, *(re.compile(re.escape(term), re.IGNORECASE) for term in extra))
 
 
 class UnsafeFixtureError(ValueError):
@@ -74,7 +84,8 @@ class Sanitiser:
         value = BEARER.sub("Bearer [redacted-token]", value)
         value = EMAIL.sub(SYNTHETIC_EMAIL, value)
         value = TRIAL_CAPACITY.sub("Trial-capacity", value)
-        return TENANT_HOST.sub("endpoint.example.invalid", value)
+        value = PBI_CLUSTER_HOST.sub(SYNTHETIC_CLUSTER, value)
+        return TENANT_HOST.sub(SYNTHETIC_HOST, value)
 
     def value(self, node: Any) -> Any:
         if isinstance(node, str):
@@ -87,7 +98,7 @@ class Sanitiser:
 
     @staticmethod
     def check(serialised: str) -> None:
-        for pattern in DENY:
+        for pattern in deny_patterns():
             if (found := pattern.search(serialised)) is not None:
                 raise UnsafeFixtureError(f"fixture still contains {pattern.pattern!r}: {found.group(0)[:40]!r}")
         for guid in GUID.findall(serialised):

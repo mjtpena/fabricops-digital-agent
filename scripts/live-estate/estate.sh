@@ -2,6 +2,8 @@
 # Estate building blocks used by create.sh and the fault injectors. Source after lib.sh.
 
 # ensure_workspace NAME: create the sandbox workspace on the sandbox capacity if missing; prints its id.
+# A workspace that already has a sandbox name but sits on any other capacity (or none) is never moved or adopted:
+# it is not ours, so this stops with an error.
 ensure_workspace() {
   local name=$1 id capacity body="$WORK/workspace.json"
   assert_sandbox_workspace "$name"
@@ -15,9 +17,7 @@ ensure_workspace() {
   else
     capacity=$(fab GET "/workspaces/$id" --query "capacityId || '-'" -o tsv)
     if [[ $capacity != "$CAPACITY_ID" ]]; then
-      log "assigning workspace $name to the sandbox capacity"
-      printf '{"capacityId":"%s"}' "$CAPACITY_ID" >"$body"
-      fab_lro POST "/workspaces/$id/assignToCapacity" "$body" >/dev/null
+      die "a workspace named '$name' ($id) already exists on another capacity ($capacity); refusing to move or adopt it. Rename or remove it yourself, or choose different sandbox names in config.env"
     fi
   fi
   printf '%s' "$id"

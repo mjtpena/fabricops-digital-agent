@@ -126,8 +126,12 @@ test service principal. Nothing here runs in CI or in `make check`: the live tes
 
 You need an `az login` that may create workspaces on the sandbox capacity, plus the test principal's
 credentials in `~/.fabricops/live-reader.env` (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`,
-never in the repository; override the path with `FABRICOPS_LIVE_ENV_FILE`). Ids and names live in
-`scripts/live-estate/config.env.example`; copy it to `config.env` to override anything.
+never in the repository; override the path with `FABRICOPS_LIVE_ENV_FILE`). The scripts read their names
+from `scripts/live-estate/config.env.example`, which holds placeholders for the tenant, subscription,
+capacity and test-principal ids: copy it to `config.env` (git-ignored) and fill them in; the scripts stop
+with a message while one is still a placeholder, and every entry point checks the `az` sign-in is in that
+tenant before it reads or changes anything. `python -m tests.live.record_fixtures` rejects fixtures that
+contain any name listed in `FABRICOPS_FIXTURE_DENY` (organisation, owner, domain).
 
 ```bash
 scripts/live-estate/capacity.sh status|resume|suspend   # F4 sandbox capacity, USD 0.84/h while running

@@ -4,7 +4,7 @@
 #
 #   notebook failure (the notebook raises)   -> activity Failed, nested RuntimeError text
 #   pipeline timeout (10 s activity timeout) -> activity TimedOut, empty error text
-#   auth-style failure (fake-credential Web connection) -> activity Failed, HTTP 401 from the source
+#   auth-style failure (fake-credential Web connection) -> activity Failed, AADSTS700016 from the Entra token endpoint
 #
 # Each fault is reverted afterwards, and a final success run proves the revert. Job history is kept by
 # Fabric for 30 days, so re-run this when those runs have aged out. Takes about 8 minutes.

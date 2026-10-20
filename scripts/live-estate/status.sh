@@ -7,6 +7,7 @@ set -euo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+assert_tenant
 echo "capacity $CAPACITY_NAME: $(capacity_state)"
 for name in "${SANDBOX_WORKSPACES[@]}"; do
   id=$(workspace_id "$name")

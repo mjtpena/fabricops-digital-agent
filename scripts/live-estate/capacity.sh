@@ -10,6 +10,8 @@ set -euo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+assert_tenant
+
 wait_state() {
   local want=$1 state deadline=$((SECONDS + 600))
   while ((SECONDS < deadline)); do

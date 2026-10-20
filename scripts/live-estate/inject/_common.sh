@@ -45,6 +45,7 @@ while (($#)); do
 done
 case $INJECT_ENV in DEV | TEST | PROD) ;; *) die "--env must be DEV, TEST or PROD" ;; esac
 if [[ -z $RUN ]]; then if ((REVERT)); then RUN=0; else RUN=1; fi; fi
+assert_tenant
 
 # inject_context: resolve the ids of the targeted environment into WS, LH, SEED, TRANSFORM, PIPELINE.
 inject_context() {

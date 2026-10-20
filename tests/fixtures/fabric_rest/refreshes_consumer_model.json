@@ -17,7 +17,7 @@
           "content-type": "application/json"
         },
         "json": {
-          "@odata.context": "https://wabi-south-east-asia-b-primary-redirect.analysis.windows.net/v1.0/myorg/groups/00000000-0000-4000-8000-000000000006/$metadata#refreshes",
+          "@odata.context": "https://powerbi-cluster.example.invalid/v1.0/myorg/groups/00000000-0000-4000-8000-000000000006/$metadata#refreshes",
           "value": [
             {
               "endTime": "2026-10-20T01:18:51.037Z",

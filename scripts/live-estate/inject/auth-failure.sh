@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Fault: the pipeline gains a first activity (a Web activity) that calls its source through the
-# connection fabricops-sandbox-fake-source, which holds a deliberately invalid, obviously fake credential.
-# The source answers 401 Unauthorized, the activity fails, and the notebook never runs.
+# Fault: the pipeline gains a first activity (a Web activity) that posts a token request through the
+# connection fabricops-sandbox-fake-source, which holds a deliberately invalid, obviously fake credential
+# and points at this tenant's Microsoft Entra token endpoint. Entra rejects the fake client
+# (AADSTS700016, "Application with identifier 'fabricops-fake' was not found"), the activity fails, and
+# the notebook never runs. Nothing is signed in.
 # --revert restores the baseline pipeline. The connection itself is created by create.sh and removed by
 # teardown.sh; it never holds a real credential.
 # shellcheck source=_common.sh

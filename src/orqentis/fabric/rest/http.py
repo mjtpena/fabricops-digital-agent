@@ -64,17 +64,45 @@ def _correlation_id(response: httpx.Response) -> str | None:
     return value
 
 
-_PRIVACY_TAGS = re.compile(r"</?(?:oii|eupi|pii|ii)>", re.IGNORECASE)
+# Power BI wraps identifiers in its messages in privacy markers. Observed live: ``<oii>customers_clean</oii>`` in
+# refresh errors and ``<eupi>{principal object id}</eupi>`` in a 403 body. No Microsoft page lists the markers the
+# service can emit; the set below is the vocabulary of Microsoft's data classification (end-user identifiable
+# information EUII, end-user pseudonymous identifiers EUPI, organization identifiable information OII, customer
+# content CCON) plus the short forms pii/pi/ii, so unknown members of the family are handled the same way.
+#
+# * End-user markers and customer content identify a person or carry the customer's own data: the content is
+#   REDACTED, never passed on to evidence, logs, audit or a model.
+# * OII markers wrap object names (a table, a tenant): the content is what makes the error diagnosable, so only
+#   the markers are removed.
+_REDACTED_MARKERS = "eupi|euii|pii|pi|ccon"
+_UNWRAPPED_MARKERS = "oii|ii"
+_PAIRED_PERSONAL = re.compile(rf"<(?P<tag>{_REDACTED_MARKERS})>.*?<\\?/(?P=tag)>", re.IGNORECASE | re.DOTALL)
+_UNCLOSED_PERSONAL = re.compile(rf"<(?:{_REDACTED_MARKERS})>.*\Z", re.IGNORECASE | re.DOTALL)
+_ANY_MARKER = re.compile(rf"<\\?/?(?:{_REDACTED_MARKERS}|{_UNWRAPPED_MARKERS})>", re.IGNORECASE)
+REDACTED = "[redacted]"
 
 
 def strip_privacy_tags(text: str) -> str:
-    """Drop Power BI's privacy markers but keep what they wrap.
+    """Remove Power BI privacy markers: redact end-user and customer-content ones, unwrap the rest.
 
-    Observed live: Power BI wraps identifiers in its messages, e.g. ``table '<oii>customers_clean</oii>'`` in
-    refresh errors and ``user <eupi>{object id}</eupi>`` in 403 bodies. The markers are telemetry plumbing, and
-    they sit inside the very words error classification matches on.
+    ``user <eupi>abc</eupi>`` becomes ``user [redacted]``; ``table '<oii>t</oii>'`` becomes ``table 't'``. An opening
+    end-user marker that is never closed redacts everything after it. Escaped closers (``<\\/oii>``, as found inside
+    JSON strings) are handled.
     """
-    return _PRIVACY_TAGS.sub("", text)
+    text = _PAIRED_PERSONAL.sub(REDACTED, text)
+    text = _UNCLOSED_PERSONAL.sub(REDACTED, text)
+    return _ANY_MARKER.sub("", text)
+
+
+def scrub_markers(value: Any) -> Any:
+    """:func:`strip_privacy_tags` over every string inside a JSON-like value."""
+    if isinstance(value, str):
+        return strip_privacy_tags(value)
+    if isinstance(value, list):
+        return [scrub_markers(v) for v in value]
+    if isinstance(value, dict):
+        return {k: scrub_markers(v) for k, v in value.items()}
+    return value
 
 
 def _text(value: Any) -> str | None:
@@ -114,21 +142,21 @@ def parse_error_body(response: httpx.Response) -> tuple[str | None, str | None, 
         body = response.json()
     except ValueError:
         text = response.text.strip()
-        return None, None, None, ({"body": redact_text(text[:500])} if text else {})
+        return None, None, None, ({"body": redact_text(strip_privacy_tags(text)[:500])} if text else {})
     if not isinstance(body, dict):
         return None, None, None, {}
     details: dict[str, Any] = {}
     error = body.get("error")
     if isinstance(error, dict):
         if error.get("details"):
-            details["more_details"] = redact(error["details"])
+            details["more_details"] = redact(scrub_markers(error["details"]))
         if isinstance(pbi := error.get("pbi.error"), dict):
-            details["pbi_error"] = redact(pbi)
+            details["pbi_error"] = redact(scrub_markers(pbi))
         return _text(error.get("code")), _text(error.get("message")), _text(body.get("requestId")), details
     if body.get("moreDetails"):
-        details["more_details"] = redact(body["moreDetails"])
+        details["more_details"] = redact(scrub_markers(body["moreDetails"]))
     if body.get("relatedResource"):
-        details["related_resource"] = redact(body["relatedResource"])
+        details["related_resource"] = redact(scrub_markers(body["relatedResource"]))
     return _text(body.get("errorCode")), _text(body.get("message")), _text(body.get("requestId")), details
 
 

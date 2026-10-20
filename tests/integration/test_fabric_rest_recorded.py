@@ -26,7 +26,6 @@ from orqentis.domain.taxonomy import IncidentCategory
 from orqentis.fabric.errors import FabricAuthError, FabricNotFoundError
 from orqentis.fabric.fixtures import EstateContracts
 from orqentis.fabric.rest.client import RestFabricClient, parse_datetime
-from orqentis.fabric.rest.http import strip_privacy_tags
 from orqentis.incidents.classification import ErrorClassifier
 from tests.live.record_fixtures import FIXTURE_DIR
 
@@ -315,7 +314,13 @@ async def test_recorded_refresh_history_403_for_viewer_maps_to_auth_error(make_c
     error = caught.value
     assert error.status_code == 403 and error.error_code == "Unauthorized" and not error.retryable
     assert error.request_id == response_json(label)["error"].get("requestId", error.request_id)
-    assert "<eupi>" not in error.message and "insufficient privileges" in error.message
+    # The principal's object id sat inside <eupi>...</eupi> in the recorded body: redacted, not merely unwrapped.
+    assert (
+        "<eupi>" not in error.message and "[redacted]" in error.message and "insufficient privileges" in error.message
+    )
+    subject = re.search(r"<eupi>([^<]+)</eupi>", response_json(label)["error"]["message"])
+    assert subject is not None and subject.group(1) not in error.message
+    assert subject.group(1) not in json.dumps(error.to_dict())
 
 
 def assert_not_found(error: FabricNotFoundError, code: str) -> None:
@@ -357,12 +362,3 @@ async def test_recorded_capacities_are_only_those_open_to_the_principal(make_cli
 async def test_recorded_deployment_pipelines_are_empty_for_a_viewer(make_client: Factory) -> None:
     client, _ = make_client("deployment_pipelines")
     assert await client.deployments.get_deployment_states("00000000-0000-4000-8000-0000000000ff") == []
-
-
-# --------------------------------------------------------------------------------- privacy markers
-def test_privacy_markers_are_dropped_but_their_content_is_kept() -> None:
-    assert strip_privacy_tags("table '<oii>customers_clean</oii>' of user <eupi>abc</eupi>") == (
-        "table 'customers_clean' of user abc"
-    )
-    assert strip_privacy_tags("a <b>bold</b> <ii>x</II>") == "a <b>bold</b> x"
-    assert strip_privacy_tags("no markers here") == "no markers here"

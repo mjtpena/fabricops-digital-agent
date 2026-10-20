@@ -206,6 +206,8 @@ def _failure(raw: Any) -> FailureDetail | None:
     if not isinstance(raw, dict):
         return None
     message, code = _clean(raw.get("message")), _clean(raw.get("errorCode"))
+    if message is not None:
+        message = _clean(strip_privacy_tags(message))  # activity and job errors can carry Power BI privacy markers
     if message is None and code is None:
         return None
     return FailureDetail(

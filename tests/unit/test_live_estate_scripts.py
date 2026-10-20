@@ -25,7 +25,6 @@ APPROVED_CALLS = {
     ("arm", "POST", "$CAPACITY_ARM_ID/suspend?api-version=2023-11-01"),
     # the four sandbox workspaces
     ("fab", "POST", "/workspaces"),
-    ("fab_lro", "POST", "/workspaces/$id/assignToCapacity"),
     ("fab", "DELETE", "/workspaces/$id"),
     # Viewer for the test principal (the body is asserted below)
     ("fab", "POST", "/workspaces/$ws/roleAssignments"),
@@ -83,13 +82,67 @@ def test_every_mutating_call_is_on_the_approved_list() -> None:
     assert seen <= APPROVED_CALLS, f"calls outside the approval: {sorted(seen - APPROVED_CALLS)}"
 
 
-def test_the_only_curl_post_is_the_job_start_and_never_an_admin_api() -> None:
+def test_raw_curl_is_confined_to_one_helper_that_only_gets_or_starts_a_job() -> None:
+    """`az rest` cannot expose response headers, so `_http` calls curl. Nothing else may."""
+    curl_calls = {s.name: re.findall(r"(?<![\w-])curl\s+(?!--version)", code(s)) for s in SCRIPTS}
     lib = code(LIVE / "lib.sh")
-    assert len(re.findall(r"_http POST ", lib)) == 1
-    assert "jobs/instances?jobType=" in lib.split("_http POST ", 1)[1].splitlines()[0]
+    # `need curl` is a dependency check; the one real invocation is `$(curl "${args[@]}" "$url" ...)` inside _http.
+    assert len(re.findall(r'\$\(curl "\$\{args\[@\]\}"', lib)) == 1
+    assert all(not hits for name, hits in curl_calls.items() if name != "lib.sh" and hits), curl_calls
+    assert not re.search(r"-X\s+(?!\"\$method\")\S+", lib), "curl's method must always be the _http argument"
+
+    # Every _http call: GET (operation polling), the one literal POST that starts a job, or the variable method
+    # that fab_lro forwards (its callers are checked against APPROVED_CALLS above).
+    calls = re.findall(r'\b_http\s+("\$method"|[A-Z]+)\s+("[^"]*"|\S+)', lib)
+    methods = [m for m, _ in calls]
+    assert set(methods) <= {"GET", "POST", '"$method"'}, methods
+    assert methods.count("POST") == 1
+    post_url = next(url for m, url in calls if m == "POST")
+    assert "/jobs/instances?jobType=" in post_url
+    assert methods.count('"$method"') == 1
+    fab_lro_body = lib.split("fab_lro() {", 1)[1].split("\n}\n", 1)[0]
+    assert '_http "$method"' in fab_lro_body, "the variable method may only be forwarded by fab_lro"
     for script in SCRIPTS:
         text = code(script)
+        if script.name != "lib.sh":
+            assert "_http" not in text.replace("_common.sh", ""), f"{script.name} calls the curl helper directly"
         assert "/admin" not in text and "tenantsettings" not in text.lower(), script.name
+
+
+def test_retry_policy_never_repeats_a_post_after_a_bare_5xx() -> None:
+    lib = code(LIVE / "lib.sh")
+    # curl path: GET/DELETE retry on 429 and any 5xx; every other method only on 429 and 503.
+    assert "GET | HEAD | DELETE) [[ $2 == 429 || $2 == 5?? || $2 == 000 ]] ;;" in lib
+    assert "*) [[ $2 == 429 || $2 == 503 ]] ;;" in lib
+    # az rest path: the base set is 429/503; 500/502/504 are added for GET and DELETE only.
+    assert "transient='429|503|TooManyRequests|Too Many Requests'" in lib
+    guarded = lib.split("transient+=", 1)[0].rsplit("if ", 1)[1]
+    assert "--method GET" in guarded and "--method DELETE" in guarded and "POST" not in guarded
+    assert "transient+='|500|502|504|Internal Server Error'" in lib
+
+
+def test_a_workspace_with_a_sandbox_name_on_another_capacity_is_never_moved_or_adopted() -> None:
+    estate = code(LIVE / "estate.sh")
+    assert "refusing to move or adopt" in estate
+    for script in SCRIPTS:
+        assert "assignToCapacity" not in code(script), script.name
+
+
+def test_every_entry_point_checks_the_tenant_first() -> None:
+    for name in ("create.sh", "teardown.sh", "capacity.sh", "status.sh", "inject/_common.sh"):
+        assert re.search(r"^assert_tenant$", code(LIVE / name), re.MULTILINE), name
+    assert "az account show --query tenantId" in code(LIVE / "lib.sh")
+    # create.sh must check the tenant before it touches the capacity.
+    create = code(LIVE / "create.sh")
+    assert create.index("assert_tenant") < create.index("require_capacity_active")
+
+
+def test_the_example_config_holds_placeholders_not_real_ids() -> None:
+    example = (LIVE / "config.env.example").read_text(encoding="utf-8")
+    assert not re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", example, re.IGNORECASE)
+    for variable in ("TENANT_ID", "SUBSCRIPTION_ID", "CAPACITY_ID", "TEST_SP_OBJECT_ID"):
+        assert re.search(rf'^{variable}="<[a-z-]+>"', example, re.MULTILINE), variable
+    assert "<placeholders>" in example and "config.env" in example
 
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: str(p.relative_to(LIVE)))

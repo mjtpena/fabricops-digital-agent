@@ -66,6 +66,21 @@ need base64
 need sed
 need grep
 
+# The four ids come from the git-ignored config.env; config.env.example only holds placeholders.
+for _id_var in TENANT_ID SUBSCRIPTION_ID CAPACITY_ID TEST_SP_OBJECT_ID; do
+  if [[ ! ${!_id_var} =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
+    die "$_id_var is not set to a real id (it is '${!_id_var}'): copy config.env.example to config.env and fill in the ids"
+  fi
+done
+unset _id_var
+
+# assert_tenant: the Azure CLI must be signed in to the sandbox tenant before anything is read or changed.
+assert_tenant() {
+  local current
+  current=$(az account show --query tenantId -o tsv | tr -d '\r') || die "az is not signed in; run az login"
+  [[ $current == "$TENANT_ID" ]] || die "az is signed in to another tenant (expected the sandbox tenant $TENANT_ID)"
+}
+
 # Substitute __KEY__ placeholders in a template: render FILE KEY=VALUE ... > output
 render() {
   local file=$1 kv
@@ -81,11 +96,13 @@ json_str() { grep -o "\"$1\" *: *\"[^\"]*\"" | head -1 | sed 's/^[^:]*: *"\(.*\)
 # --------------------------------------------------------------------------------------- az rest
 # Runs `az` with retries on throttling and transient service errors; prints the response body.
 az_retry() {
-  local attempt=0 err out msg transient='429|502|503|504|TooManyRequests|Too Many Requests'
+  # Retry policy: reads and deletes are safe to repeat, so any transient 5xx is retried. Anything else (a create, a
+  # definition update, a job start) is retried only when the service says it did not process the request:
+  # 429 and 503. A bare 500 or 502/504 on a POST may have been executed.
+  local attempt=0 err out msg transient='429|503|TooManyRequests|Too Many Requests'
   err="$WORK/az.err"
-  # A bare HTTP 500 is retried only for reads and deletes (a repeated create could be a duplicate).
   if [[ " $* " == *" --method GET "* || " $* " == *" --method DELETE "* ]]; then
-    transient+='|500|Internal Server Error'
+    transient+='|500|502|504|Internal Server Error'
   fi
   while :; do
     attempt=$((attempt + 1))
@@ -154,7 +171,16 @@ onelake() {
 # `az rest` cannot expose response headers, which long-running operations need (Location).
 _token() { az account get-access-token --resource "$1" --query accessToken -o tsv | tr -d '\r'; }
 
-# _http METHOD URL RESOURCE [BODY_FILE]; sets HTTP_STATUS, HTTP_HEADERS, HTTP_BODY. Retries 429/5xx.
+# _retryable METHOD STATUS: same policy as az_retry. GET and DELETE are retried on 429, any 5xx and transport
+# failure (000); every other method only on 429 and 503, honouring Retry-After.
+_retryable() {
+  case $1 in
+    GET | HEAD | DELETE) [[ $2 == 429 || $2 == 5?? || $2 == 000 ]] ;;
+    *) [[ $2 == 429 || $2 == 503 ]] ;;
+  esac
+}
+
+# _http METHOD URL RESOURCE [BODY_FILE]; sets HTTP_STATUS, HTTP_HEADERS, HTTP_BODY. Retries per _retryable.
 _http() {
   local method=$1 url=$2 resource=$3 body=${4:-} attempt=0 wait
   local hfile="$WORK/auth.hdr"
@@ -171,7 +197,7 @@ _http() {
     if [[ -n $body ]]; then args+=(--data-binary "@$(winpath "$body")"); elif [[ $method == POST ]]; then args+=(-d ''); fi
     HTTP_STATUS=$(curl "${args[@]}" "$url" || true)
     rm -f "$hfile"
-    if [[ $HTTP_STATUS == 429 || $HTTP_STATUS == 5?? || $HTTP_STATUS == 000 ]] && ((attempt < 6)); then
+    if _retryable "$method" "$HTTP_STATUS" && ((attempt < 6)); then
       wait=$(header_value Retry-After)
       wait=${wait:-$((attempt * 10))}
       log "HTTP $HTTP_STATUS from $method ${url%%\?*}; retrying in ${wait}s"

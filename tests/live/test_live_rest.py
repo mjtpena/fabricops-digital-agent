@@ -215,6 +215,7 @@ async def test_refresh_history_needs_more_than_viewer(rest_client: RestFabricCli
     assert error.status_code == 403 and error.error_code == "Unauthorized" and not error.retryable
     assert error.request_id and error.correlation_id
     assert "bearer" not in error.message.lower()
+    assert "<eupi>" not in error.message and "[redacted]" in error.message  # the principal's own id is not echoed
 
 
 async def test_semantic_model_has_no_fabric_job_instances(rest_client: RestFabricClient, sandbox: Sandbox) -> None:
