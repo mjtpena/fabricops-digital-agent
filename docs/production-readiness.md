@@ -37,7 +37,7 @@ one PR to `main`. Briefs live in [`docs/programme/briefs/`](programme/briefs/).
 | WS2 | Portability and contracts | 1 | | approved, waiting for CIª83a41: review 1 (13 findings) + verification round (credential guard restored with negative cases) all fixed; orchestrator re-ran gates green |
 | WS3 | Identity and API hardening | 1 | | approved, waiting for CI | `ws3-identity` (Sonnet) | [#3](https://github.com/mjtpena/fabricops-digital-agent/pull/3) | Review 1 + independent red-team ([comment](https://github.com/mjtpena/fabricops-digital-agent/pull/3#issuecomment-6281103223)) → 19 findings fixed; verification: all fixed, starred fixes proven by revert, 8-process race gives exactly 1 write; 406 tests, 182 security tests |
 | WS4 | Delivery pipeline | 1 | A6 (done) for the push dry run | approved, waiting for CI | `ws4-delivery` (Sonnet) | [#6](https://github.com/mjtpena/fabricops-digital-agent/pull/6) | f264048: review 1 (15 findings) + verification round (immutable OIDC subjects, environment-first ordering, ruleset integration_id) all fixed; Azure Linux 3 base, Trivy 0 findings; orchestrator re-ran gates green |
-| WS5 | Live sandbox estate and live test harness | 1 | D8, A3–A5 | in review | orchestrator's local subagent (Sonnet, shares the `az` login) | [#7](https://github.com/mjtpena/fabricops-digital-agent/pull/7) | Estate live (4 workspaces, idempotent create/teardown, 6 injectors, 29 live tests); 4/6 injectors open incidents today (refresh failure and SLA breach need WS7 rules); 2 adapter mapping bugs fixed; review: READY pending CI + minors in progress; capacity paused |
+| WS5 | Live sandbox estate and live test harness | 1 | D8, A3–A5 | approved, waiting for CI | orchestrator's local subagent (Sonnet, shares the `az` login) | [#7](https://github.com/mjtpena/fabricops-digital-agent/pull/7) | d06b957: estate live (4 workspaces, idempotent create/teardown, 6 reversible injectors, 29 live tests); 4/6 injectors open incidents (refresh failure, SLA breach need WS7); 2 adapter mapping bugs + Power BI privacy-marker redaction fixed; review minors fixed; no tenant ids outside the live log; capacity paused. WS7 inputs: generic notebook-exception signature, schema-drift column extraction, signature_match redaction over-match, D9 |
 | WS6 | Durable storage and stateless app | 2 | D1, WS1 | not started | | | |
 | WS7 | Signals and detection breadth | 2 | D2, WS1, WS5 | not started | | | |
 | WS8 | Notifications and web UI | 2 | D3, WS3 (WS6 preferred) | not started | | | |
@@ -101,6 +101,7 @@ Spend to date (programme resources): ≈ USD 0. `RG-FABRICDEMO` month-to-date at
 |---|---|
 | 2026-10-20 | Kickoff: repo verified, live tenant discovered read-only, WS0 opened, ledger created |
 | 2026-10-20 | D8: sandbox uses the existing F4 `fabricdemocap2026`, with resume/pause authorised |
+| 2026-10-20 | WS5 (#7) approved pending CI; D9 raised (refresh history needs dataset Write) |
 | 2026-10-20 | All Wave 1 PRs (#3–#6) approved after review, independent red-team (WS3) and verification rounds; merges wait on CI (B1). Merge order: #1, #2, #3, #5, #4, #6 |
 | 2026-10-20 | Wave 1 first-round reviews done (4 deep reviews + independent WS3 red-team); fixes sent back to each session |
 | 2026-10-20 | Wave 1 started: WS1–WS4 sub-sessions, WS5 live subagent |
