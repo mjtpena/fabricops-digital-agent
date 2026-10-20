@@ -87,8 +87,9 @@ async def test_collection_reads_runs_and_reports_the_refresh_gap(container: Cont
     types = {e.event_type for e in ingestion.new_events}
     assert {EventType.PIPELINE_RUN_SUCCEEDED, EventType.PIPELINE_RUN_FAILED} <= types
     # Viewer cannot read Power BI refresh history (docs/security.md section 11): reported, not fatal.
-    assert set(ingestion.errors) == {"semantic-model-refreshes"}
-    assert "403" in ingestion.errors["semantic-model-refreshes"]
+    # Since WS1 the error key carries the scope (one entry per model): "semantic-model-refreshes:<model id>".
+    assert {key.partition(":")[0] for key in ingestion.errors} == {"semantic-model-refreshes"}
+    assert all("403" in message for message in ingestion.errors.values())
 
 
 async def test_failed_runs_become_incidents_and_investigations_stay_grounded(container: Container) -> None:

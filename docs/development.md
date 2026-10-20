@@ -387,7 +387,28 @@ Fault injectors, each reversible with `--revert` (see the header of each script)
 | `pipeline-timeout.sh` | 10 second activity timeout | activity `TimedOut` with an empty error object |
 | `auth-failure.sh` | a first activity calls the Microsoft Entra token endpoint through a connection holding a fake credential | an `AADSTS700016` error in the activity |
 | `refresh-failure.sh` | the semantic model is repointed at a missing Delta table | a failed refresh (readable only with write permission) |
-| `sla-breach.sh` | contracts only: every declared deadline becomes `00:00:01` | `BREACHED` SLA evidence at investigation time |
+| `sla-breach.sh --env PROD` | every declared deadline becomes `00:00:01`, and the environment's pipeline runs once, successfully, after it (the evaluator calls a data product MET if its freshness item succeeded in the 24 hours before the deadline, so a contracts change alone breaches nothing) | a `SLA_ASSESSED` event in state `breached` ("Refreshed late at ...") for that environment; no incident (no SLA rule yet) |
+
+### Autonomous live run (scheduler on, as production runs)
+
+To watch detection and investigation happen on their own against the sandbox, run the app with the scheduler on and a
+short collect interval, record what it does, and inject faults:
+
+```bash
+ORQENTIS_DATA_DIR=var/live-e2e ORQENTIS_SCHEDULER_ENABLED=true ORQENTIS_SCHEDULER_COLLECT_INTERVAL_MINUTES=1 \
+  ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_INTERVAL_MINUTES=1 ORQENTIS_SCHEDULER_SLA_SWEEP_INTERVAL_MINUTES=1 \
+  ORQENTIS_SCHEDULER_CATALOG_REFRESH_INTERVAL_MINUTES=1 scripts/live-estate/serve-live.sh --port 8791 &
+python scripts/live-estate/e2e/watch.py var/live-e2e watch.jsonl &        # read-only poll of the app's SQLite stores
+scripts/live-estate/inject/notebook-failure.sh --env TEST               # blocks until the run has failed; prints its id
+python scripts/live-estate/e2e/analyse.py watch.jsonl --wait <run id>    # until the investigation has finished
+python scripts/live-estate/e2e/analyse.py watch.jsonl <run id>           # latencies from the Fabric failure time
+python scripts/live-estate/e2e/summary.py INC-2026-0001                  # severity, root cause, runbook, approvals, evidence
+scripts/live-estate/inject/notebook-failure.sh --env TEST --revert
+```
+
+The latencies are bounded by the schedule: the collect interval (the event is read at the next tick), the auto-investigate
+interval (the investigation starts at the next tick) and the investigation itself, which takes a few seconds. Results of the
+first such run are in [live-environment.md](live-environment.md#live-end-to-end-run-1-2026-10-20).
 
 ## Extending
 
