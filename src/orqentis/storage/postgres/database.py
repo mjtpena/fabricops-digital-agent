@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -41,6 +42,8 @@ _ACQUIRE_TIMEOUT_SECONDS = 30.0
 # yet valid for a freshly created role usually clears within seconds. A statement that already ran is never retried.
 _CONNECT_ATTEMPTS = 3
 _CONNECT_RETRYABLE = (OSError, asyncpg.PostgresConnectionError, asyncpg.InvalidPasswordError, asyncio.TimeoutError)
+
+_SCHEMA_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 
 Record = asyncpg.Record
 if TYPE_CHECKING:
@@ -69,8 +72,10 @@ class PostgresConfig:
     application_name: str = "orqentis-fabricops"
 
     def __post_init__(self) -> None:
-        if not self.schema.replace("_", "a").isalnum() or self.schema[0].isdigit():
-            raise ValueError(f"Invalid PostgreSQL schema name: {self.schema!r}")
+        if not _SCHEMA_NAME.fullmatch(self.schema):
+            raise ValueError(
+                f"Invalid PostgreSQL schema name (lower case letters, digits, underscore): {self.schema!r}"
+            )
 
 
 def _ssl_context(config: PostgresConfig) -> ssl.SSLContext | Literal["disable"]:

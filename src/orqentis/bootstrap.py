@@ -222,7 +222,11 @@ async def open_postgres_session(
         track.append(blob.close)
 
         async def database_token() -> str:
-            return await tokens.get_token(settings.postgres_scope)
+            try:
+                return await tokens.get_token(settings.postgres_scope)
+            except Exception as exc:
+                # A ConnectionError is retried by the pool's connect loop (a hiccup of the identity endpoint).
+                raise ConnectionError(f"Could not get an Entra token for PostgreSQL: {type(exc).__name__}") from exc
 
         config = PostgresConfig(
             host=settings.postgres_host,

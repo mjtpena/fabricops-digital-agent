@@ -294,7 +294,10 @@ failure so it can never pass silently.
 pytest tests/contract tests/concurrency tests/integration/test_postgres_backend.py tests/integration/test_postgres_migrations.py
 ```
 
-Running the app against a local PostgreSQL (a throwaway container with trust authentication and Azurite):
+Running the app on PostgreSQL from your machine: a throwaway PostgreSQL container with trust authentication, and a real
+storage account (or OneLake path) that your `az login` can write to for the evidence. Azurite cannot validate Entra
+tokens over plain HTTP, which is why the tests substitute the Blob client with one that signs with a per-run key;
+everything else is the production code path.
 
 ```bash
 export ORQENTIS_STORAGE_BACKEND=postgres ORQENTIS_POSTGRES_HOST=127.0.0.1 ORQENTIS_POSTGRES_PORT=5432 \

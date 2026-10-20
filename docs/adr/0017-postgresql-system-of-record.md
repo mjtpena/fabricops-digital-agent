@@ -44,7 +44,7 @@ safety properties that other ADRs already depend on:
 * The provider caches a token until five minutes before it expires, and asyncpg asks for the password only when it
   opens a connection, so no connection is ever opened with a token about to lapse. Established connections stay valid
   after their token expires (the token is checked at login only); the pool closes idle connections after five
-  minutes, so a long-lived replica keeps re-authenticating. A connection that cannot be opened is retried four times
+  minutes, so a long-lived replica keeps re-authenticating. A connection that cannot be opened is attempted three times
   with backoff (a failover, a role that was created seconds ago).
 * TLS is `verify-full` by default (`ORQENTIS_POSTGRES_SSL_ROOT_CERT` adds a CA bundle). `auth=none` and `ssl=disable`
   exist for a throwaway local container with trust authentication and are **rejected outside `local`**.
