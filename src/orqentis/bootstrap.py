@@ -10,11 +10,11 @@ import contextlib
 import inspect
 import shutil
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 
 from orqentis.actions.gateway import ActionGateway
-from orqentis.agents.investigator import FabricOpsInvestigator
+from orqentis.agents.investigator import FabricOpsInvestigator, TokenPrices
 from orqentis.agents.reasoning import Reasoner
 from orqentis.agents.rule_based import RuleBasedReasoner
 from orqentis.approvals.provider import LocalApprovalProvider
@@ -43,10 +43,12 @@ from orqentis.notifications.port import Notifier
 from orqentis.notifications.sink import NOOP_SINK, NotificationService
 from orqentis.observability.audit import LocalAuditLog
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import Metrics, get_metrics
 from orqentis.policies.engine import PolicyEngine
 from orqentis.reports.builder import ReportBuilder
 from orqentis.reports.publisher import ReportPublisher
 from orqentis.runbooks.catalog import RunbookCatalog
+from orqentis.runtime.audit_verification import AuditVerificationTask
 from orqentis.runtime.collection import CollectionService
 from orqentis.runtime.investigations import AutoInvestigationTask, InvestigationJobRunner
 from orqentis.runtime.lease import InProcessLeaderLease, LeaderLease
@@ -112,6 +114,7 @@ class Container:
     # Notifications (ADR-0018): started and stopped with the scheduler by the API runtime. Without a notifier it
     # discards events.
     notifications: NotificationService = NOOP_SINK
+    metrics: Metrics = field(default_factory=get_metrics)
 
     async def collect_and_detect(self) -> tuple[IngestionResult, list[Incident]]:
         """Collect, then run detection. Serialised with the scheduled collection (see ``CollectionService``)."""
@@ -206,6 +209,7 @@ async def build_container(
     write_client: FabricWriteClient | None = None,
     clock: Clock | None = None,
     notifier: Notifier | None = None,
+    metrics: Metrics | None = None,
 ) -> Container:
     """Wire the application. If anything fails part-way, what was already opened is closed again.
 
@@ -222,6 +226,7 @@ async def build_container(
             clock=clock,
             notifier=notifier,
             cleanup=cleanup,
+            metrics=metrics or get_metrics(),
         )
     except BaseException:
         for close in reversed(cleanup):
@@ -241,6 +246,7 @@ async def _build_container(
     clock: Clock | None,
     notifier: Notifier | None,
     cleanup: list[Callable[[], Awaitable[None] | None]],
+    metrics: Metrics,
 ) -> Container:
     if reset:
         reset_local_state(settings)
@@ -291,8 +297,8 @@ async def _build_container(
             if await repository.get(past.incident_id) is None:
                 await repository.save(past)
 
-    notifications = build_notification_service(settings, audit, notifier=notifier)
-    incidents = IncidentService(repository, event_store, audit, clock, notifications)
+    notifications = build_notification_service(settings, audit, notifier=notifier, metrics=metrics)
+    incidents = IncidentService(repository, event_store, audit, clock, notifications, metrics=metrics)
     approvals = ApprovalService(
         LocalApprovalProvider(state_db),
         incidents,
@@ -300,6 +306,7 @@ async def _build_container(
         clock,
         ttl=timedelta(minutes=settings.approval_ttl_minutes),
         notifications=notifications,
+        metrics=metrics,
     )
     if write_client is None:
         write_client = (
@@ -330,7 +337,10 @@ async def _build_container(
         clock=clock,
     )
     registry = ToolRegistry(
-        [*build_read_tools(read_deps), *build_mutation_request_tools(gateway, catalog, clock)], audit, clock
+        [*build_read_tools(read_deps), *build_mutation_request_tools(gateway, catalog, clock)],
+        audit,
+        clock,
+        metrics=metrics,
     )
 
     primary: Reasoner
@@ -351,6 +361,11 @@ async def _build_container(
         clock=clock,
         max_tool_calls=settings.agent_max_tool_calls,
         fallback=fallback,
+        metrics=metrics,
+        token_prices=TokenPrices(
+            input_per_million=settings.llm_input_cost_per_million_tokens,
+            output_per_million=settings.llm_output_cost_per_million_tokens,
+        ),
     )
     reports = ReportPublisher(ReportBuilder(clock, timezone=settings.default_timezone), evidence_store)
     workflow = PipelineFailureWorkflow(
@@ -385,12 +400,13 @@ async def _build_container(
         clock,
         lookback=timedelta(hours=settings.collection_max_lookback_hours),
         overlap=timedelta(minutes=settings.collection_overlap_minutes),
+        metrics=metrics,
     )
     detection = DetectionEngine(incidents, clock, events=event_store)
 
     # Autonomous runtime: the scheduler is built here but started by the API lifespan (see runtime/service.py).
     detection_runner = DetectionRunner(event_store, detection)
-    collection = CollectionService(ingestor, detection_runner)
+    collection = CollectionService(ingestor, detection_runner, metrics=metrics, clock=clock)
     catalog_refresher = CatalogRefresher(fabric, contracts, catalog, graph, dependency_store, incidents, audit, clock)
     sla_sweeper = SLASweeper(
         catalog, SLAEvaluator(event_store, clock), graph, repository, event_store, detection_runner, clock
@@ -403,6 +419,7 @@ async def _build_container(
         clock,
         max_concurrency=settings.investigation_max_concurrency,
         timeout=investigation_timeout,
+        metrics=metrics,
     )
     auto_investigation = AutoInvestigationTask(
         incidents,
@@ -414,10 +431,16 @@ async def _build_container(
         orphan_after=investigation_timeout + timedelta(minutes=5),
     )
 
+    audit_verification = AuditVerificationTask(audit, metrics=metrics)
+
     # Jobs receive a JobContext (lease holder + fencing token). Nothing here writes through a fenced store yet; the
     # PostgreSQL work will pass it down so a deposed leader's late write is rejected.
     async def collect_job(ctx: JobContext) -> None:
-        await collection.run()
+        try:
+            await collection.run()
+        finally:
+            # Expiry by the clock changes no stored row, so the gauge is refreshed here as well as on every change.
+            await approvals.publish_pending_metric()
 
     async def auto_investigate_job(ctx: JobContext) -> None:
         await auto_investigation.run()
@@ -427,6 +450,9 @@ async def _build_container(
 
     async def catalog_refresh_job(ctx: JobContext) -> None:
         await catalog_refresher.refresh()
+
+    async def audit_verify_job(ctx: JobContext) -> None:
+        await audit_verification.run()
 
     lease = InProcessLeaderLease(clock)
     scheduler = Scheduler(
@@ -459,6 +485,12 @@ async def _build_container(
                 enabled=settings.scheduler_catalog_refresh_enabled,
                 run_immediately=False,
             ),
+            JobSpec(
+                "audit-verify",
+                timedelta(minutes=settings.scheduler_audit_verify_interval_minutes),
+                audit_verify_job,
+                enabled=settings.scheduler_audit_verify_enabled,
+            ),
         ],
         lease,
         clock,
@@ -467,7 +499,9 @@ async def _build_container(
         start_delay=timedelta(seconds=settings.scheduler_startup_delay_seconds),
         default_job_timeout=timedelta(minutes=settings.scheduler_job_timeout_minutes),
         audit=audit,
+        metrics=metrics,
     )
+    await approvals.publish_pending_metric()
 
     _log.info(
         "container ready",
@@ -507,4 +541,5 @@ async def _build_container(
         scheduler=scheduler,
         _databases=(state_db, events_db),
         notifications=notifications,
+        metrics=metrics,
     )

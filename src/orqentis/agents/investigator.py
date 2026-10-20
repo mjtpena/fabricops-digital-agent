@@ -17,12 +17,27 @@ from orqentis.domain.principals import AGENT_PRINCIPAL
 from orqentis.evidence.recorder import EvidenceRecorder
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import DISABLED, Metrics
 from orqentis.observability.tracing import get_tracer
 from orqentis.tools.models import ToolCallRecord
 from orqentis.tools.registry import ToolContext, ToolRegistry
 
 _log = get_logger(__name__)
 AGENT_NAME = "FabricOpsInvestigator"
+
+
+@dataclass(frozen=True)
+class TokenPrices:
+    """USD per million tokens, from settings. Zero (the default) means "unknown": no cost metric is emitted."""
+
+    input_per_million: float = 0.0
+    output_per_million: float = 0.0
+
+    def cost(self, input_tokens: int | None, output_tokens: int | None) -> float | None:
+        cost = (input_tokens or 0) * self.input_per_million / 1_000_000 + (
+            output_tokens or 0
+        ) * self.output_per_million / 1_000_000
+        return cost or None
 
 
 @dataclass
@@ -43,6 +58,8 @@ class FabricOpsInvestigator:
         clock: Clock,
         max_tool_calls: int,
         fallback: Reasoner | None = None,
+        metrics: Metrics = DISABLED,
+        token_prices: TokenPrices | None = None,
     ) -> None:
         self._reasoner = reasoner
         self._fallback = fallback
@@ -51,6 +68,8 @@ class FabricOpsInvestigator:
         self._audit = audit
         self._clock = clock
         self._max_tool_calls = max_tool_calls
+        self._metrics = metrics
+        self._prices = token_prices or TokenPrices()
         self._grounding = GroundingValidator(clock)
 
     @property
@@ -86,10 +105,18 @@ class FabricOpsInvestigator:
                 errors.append(f"{reasoner_name} failed: {type(exc).__name__}: {exc}")
                 status = AgentDecisionStatus.FAILED
                 _log.warning("reasoner failed; using fallback", extra={"reasoner": reasoner_name, "error": str(exc)})
+                self._metrics.reasoner_fallback(reasoner_name)
                 output = await self._fallback.diagnose(package, tools=toolbox)
                 reasoner_name = f"{self._fallback.name} (fallback after {self._reasoner.name} failure)"
             if output.usage and output.usage.total_tokens is not None:
                 span.set_attribute("gen_ai.usage.total_tokens", output.usage.total_tokens)
+            if output.usage:
+                self._metrics.llm_usage(
+                    model=output.usage.model or output.model,
+                    input_tokens=output.usage.input_tokens,
+                    output_tokens=output.usage.output_tokens,
+                    cost_usd=self._prices.cost(output.usage.input_tokens, output.usage.output_tokens),
+                )
 
         grounded = self._grounding.validate(
             output.diagnosis, incident=incident, runbooks=package.context.runbooks, produced_by=reasoner_name

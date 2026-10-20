@@ -550,7 +550,8 @@ az deployment group create -g rg-fabricops-prod -p infra/bicep/env/prod.biceppar
 ```
 
 (The app keeps one replica and SQLite state, so back up or accept the in-place revision change: see
-`infra/bicep/README.md`, *MVP storage and its limits*.) An in-pipeline rollback input is a follow-up.
+`infra/bicep/README.md`, *MVP storage and its limits*.) An in-pipeline rollback input is a follow-up. What to check before and after a rollback, and the alert receivers a
+deployment must supply, are in [operations.md](operations.md) (sections 4 and 10).
 
 ### Accepting a scan finding
 

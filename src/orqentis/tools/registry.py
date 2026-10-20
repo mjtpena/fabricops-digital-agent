@@ -19,6 +19,7 @@ from orqentis.domain.principals import Principal
 from orqentis.fabric.errors import FabricCapabilityUnavailableError, FabricError, FabricNotFoundError
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import DISABLED, UNKNOWN, Metrics
 from orqentis.observability.redaction import redact
 from orqentis.observability.tracing import get_tracer
 from orqentis.tools.models import ToolCallRecord, ToolCapability, ToolError, ToolResponse, ToolStatus
@@ -86,12 +87,15 @@ def to_jsonable(value: Any) -> Any:
 
 
 class ToolRegistry:
-    def __init__(self, specs: Sequence[ToolSpec], audit: AuditTrail, clock: Clock) -> None:
+    def __init__(
+        self, specs: Sequence[ToolSpec], audit: AuditTrail, clock: Clock, *, metrics: Metrics = DISABLED
+    ) -> None:
         self._specs = {s.name: s for s in specs}
         if len(self._specs) != len(specs):
             raise ValueError("Duplicate tool names")
         self._audit = audit
         self._clock = clock
+        self._metrics = metrics
 
     def get(self, name: str) -> ToolSpec | None:
         return self._specs.get(name)
@@ -148,6 +152,8 @@ class ToolRegistry:
             latency_ms = round((time.perf_counter() - t0) * 1000, 2)
             span.set_attribute("orqentis.tool.status", status.value)
             span.set_attribute("orqentis.tool.latency_ms", latency_ms)
+        # A name the model made up must not become a metric attribute: only registered tools are labelled by name.
+        self._metrics.tool_call(name if spec is not None else UNKNOWN, status)
 
         response = ToolResponse(
             tool_call_id=call_id,

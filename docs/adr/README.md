@@ -19,3 +19,4 @@
 | [0015](0015-principal-classification-and-api-hardening.md) | Principal classification from token claims, Automation role and API hardening | Accepted |
 | [0016](0016-delivery-pipeline.md) | Delivery pipeline: build once, scan, promote by digest | Accepted |
 | [0018](0018-notifications-and-web-ui.md) | Notifications and the web UI: outbox, SSRF guard, CSRF, Easy Auth sign-in (implements ADR-0010) | Accepted |
+| [0019](0019-metrics-alerts-and-operations.md) | Metrics, alerts, a scheduled audit verification and the operations guide | Accepted |

@@ -20,6 +20,9 @@
 | Container App secrets (optional) | `fabric-sp-client-secret` / `fabric-sp-certificate` | Key Vault references (`keyVaultUrl` + the reader identity), only in `service_principal` mode |
 | Container App secrets (optional) | `notify-teams-webhook-url`, `notify-webhook-url`, `notify-webhook-signing-secret`, `ui-csrf-secret`, `microsoft-provider-authentication-secret` | Key Vault references, only for the parameters that are set (see *Notifications and the web UI*) |
 | Deployment check | `modules/input-check.bicep` (second instance) | Fails the deployment with a readable reason for malformed notification / sign-in inputs |
+| Action group | `ag-<prefix>` | `modules/monitoring.bicep` (`monitoringEnabled`): email receivers and an optional Teams Workflows webhook, both supplied at deployment time |
+| Alert rules (6) | `<prefix>-app-down`, `-restart-loop`, `-5xx-rate`, `-collector-errors`, `-collection-heartbeat`, `-audit-verification-failure` | One metric alert and five log alerts, each with severity, window, threshold parameter, the action group and a runbook link (see *Monitoring and alerts*) |
+| Workbook | `Orqentis FabricOps (<prefix>)` | Collections and errors, detection latency, incidents, investigations, approvals, model tokens and cost, scheduler, restarts, 5xx |
 
 The app runs with these settings (see `src/orqentis/config/settings.py`):
 
@@ -40,6 +43,7 @@ The app runs with these settings (see `src/orqentis/config/settings.py`):
 | `ORQENTIS_ENABLE_WRITE_ACTIONS` | `enableWriteActions` (default `false`) |
 | `ORQENTIS_REASONER` | `reasoner` (default `rule_based`) |
 | `ORQENTIS_AZURE_OPENAI_ENDPOINT` / `_DEPLOYMENT` | `azureOpenAiEndpoint` / `azureOpenAiDeployment` (only set when non-empty) |
+| `ORQENTIS_LLM_INPUT_COST_PER_MILLION_TOKENS` / `ORQENTIS_LLM_OUTPUT_COST_PER_MILLION_TOKENS` | `llmInputCostPerMillionTokens` / `llmOutputCostPerMillionTokens` (USD, decimal text; only set when non-empty; they only feed the estimated-cost metric) |
 | `ORQENTIS_DATA_DIR` | `/var/lib/orqentis` (Azure Files mount) |
 | `ORQENTIS_LOG_FORMAT` | `json` |
 | `ORQENTIS_SCHEDULER_ENABLED` | `schedulerEnabled` (default `true`) |
@@ -50,6 +54,7 @@ The app runs with these settings (see `src/orqentis/config/settings.py`):
 | `ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_BATCH_SIZE` / `_MAX_ATTEMPTS` | `autoInvestigateBatchSize` / `autoInvestigateMaxAttempts` (default `5` / `3`) |
 | `ORQENTIS_SCHEDULER_SLA_SWEEP_ENABLED` / `_INTERVAL_MINUTES` | `slaSweepEnabled` / `slaSweepIntervalMinutes` (default `true` / `15`) |
 | `ORQENTIS_SCHEDULER_CATALOG_REFRESH_ENABLED` / `_INTERVAL_MINUTES` | `catalogRefreshEnabled` / `catalogRefreshIntervalMinutes` (default `true` / `60`) |
+| `ORQENTIS_SCHEDULER_AUDIT_VERIFY_ENABLED` / `_INTERVAL_MINUTES` | `auditVerifyEnabled` / `auditVerifyIntervalMinutes` (default `true` / `60`): the audit chain is verified on a schedule; failure raises the audit-verification alert |
 | `ORQENTIS_INVESTIGATION_MAX_CONCURRENCY` / `_TIMEOUT_SECONDS` | `investigationMaxConcurrency` / `investigationTimeoutSeconds` (default `2` / `600`) |
 | `ORQENTIS_FABRIC_MAX_CONCURRENCY` / `_RATE_PER_SECOND` / `_RATE_BURST` | `fabricMaxConcurrency` / `fabricRatePerSecond` / `fabricRateBurst` (default `4` / `5` / `10`) |
 | `ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES` | `fabricJobInstancesMaxPages` (default `10`) |
@@ -475,6 +480,27 @@ Constraints that follow from this:
 
 * Application traces and logs go to Application Insights through `APPLICATIONINSIGHTS_CONNECTION_STRING`, which is a Container App secret and not a plain environment value. Local authentication stays enabled on the Application Insights component because the exporter authenticates with the connection string. Entra-only ingestion would need code support for a credential.
 * Container stdout (JSON logs, `ORQENTIS_LOG_FORMAT=json`) and system logs go to the Log Analytics workspace (`ContainerAppConsoleLogs_CL`, `ContainerAppSystemLogs_CL`).
+* The application's own metrics (collections, incidents, investigations, tools, model tokens, scheduler, audit verification; `src/orqentis/observability/metrics.py`) are exported with the traces and land in the workspace's `AppMetrics` table. Application logs deliberately reach the workspace through the console logs only, not a second time as `AppTraces` (that would double the ingestion bill).
+* `logDailyQuotaGb` caps the workspace's daily ingestion (`-1`, the default, is no cap; `env/dev.bicepparam` sets `1`). A cap stops ingestion when it is reached, including the metrics the alerts read, so the heartbeat alert fires: use it for a sandbox, not for production.
+
+## Monitoring and alerts
+
+`monitoringEnabled` (default `true`) deploys `modules/monitoring.bicep`: an action group, six alert rules and a workbook. Everything in the module is derived from the ids `main.bicep` passes in (workspace, Container App), so `what-if` works anywhere. Per-alert meaning, the first things to check and how to test-fire each one are in [`docs/operations.md`](../../docs/operations.md); the design is in [ADR-0019](../../docs/adr/0019-metrics-alerts-and-operations.md).
+
+| Alert rule | Severity | Fires when | Window / threshold parameters (defaults) |
+|---|---|---|---|
+| `<prefix>-app-down` (metric alert on `Replicas`) | 1 | the Container App had no running replica for the whole window | `alertAppDownWindowMinutes` (5) |
+| `<prefix>-restart-loop` (log alert) | 1 | the process started, or its container was terminated, `alertRestartThreshold` times in the window | `alertRestartWindowMinutes` (15), `alertRestartThreshold` (3) |
+| `<prefix>-5xx-rate` (log alert) | 2 | at least `alertHttp5xxRatePercent` % of the requests in the window answered 5xx (windows with fewer than `alertHttp5xxMinRequests` requests are ignored; health probes are excluded) | `alertHttp5xxWindowMinutes` (10), `alertHttp5xxRatePercent` (5), `alertHttp5xxMinRequests` (20) |
+| `<prefix>-collector-errors` (log alert, one alert per collector) | 2 | one collector had `alertCollectorErrorRuns` failing runs in the window | `alertCollectorErrorWindowMinutes` (15), `alertCollectorErrorRuns` (2) |
+| `<prefix>-collection-heartbeat` (log alert) | 1 | no successful collection (a collect + detect run in which not everything failed) for the window; switched off while `schedulerEnabled` or `collectEnabled` is `false` | `alertHeartbeatMinutes` (15) |
+| `<prefix>-audit-verification-failure` (log alert) | 0 | a scheduled audit verification failed or could not read the log, or an append was refused after a shrink. It does not auto-resolve (a person closes it) and re-notifies at most every 6 hours | `alertAuditFailureWindowMinutes` (0: derived as twice `auditVerifyIntervalMinutes`, rounded up to an allowed window: 120 by default) |
+
+`alertEvaluationFrequencyMinutes` (default `5`; 1, 5, 10, 15, 30, 45 or 60) sets how often the log alerts are evaluated; the metric alert is evaluated every minute. Azure accepts only certain windows for a log alert, so each window parameter is limited to 5, 10, 15, 30, 45, 60, 120, 180, 240, 300, 360, 1440 or 2880 minutes (the app-down window to 1, 5, 15, 30 or 60), and no window may be shorter than the evaluation frequency: the deployment stops with a message naming the windows that are too short. Each rule description and each notification carries the runbook link `<alertRunbookBaseUrl>#alert-...` (`alertRunbookBaseUrl` defaults to `docs/operations.md` on `main` of the public repository; point it at your fork or an internal copy).
+
+**Who is told.** `alertEmailReceivers` (an array of addresses) and `alertTeamsWebhookUri` (`@secure()`, a Microsoft Teams Workflows webhook URL) are the action group's receivers. The parameter files never contain them: `env/*.bicepparam` read the environment variables `ALERT_EMAIL_RECEIVERS` (comma separated) and `ALERT_TEAMS_WEBHOOK_URI` of whoever deploys, and both default to empty. With both empty the rules still evaluate and show in the portal, but nobody is notified; the deployment outputs `alertEmailReceiverCount` so a pipeline or a person can check. The CD workflow does not set these variables yet, and a deployment that omits a receiver removes it, because the template owns the action group: set the variables wherever the deployment runs (`docs/operations.md`, *Alert receivers*). The webhook URL carries its own signature: keep it in the deployer's secret store, not in a parameter file, a repository or a CI variable. Action group receivers are readable by anyone who can read the action group, so keep Reader on the resource group to the operators.
+
+**Prerequisites and limits.** The log alerts read `AppMetrics`, `AppRequests` and the Container Apps log tables of the workspace; they exist only after the first rows have been ingested, which is why the rules are deployed with `skipQueryValidation`. The metrics reach `AppMetrics` only while `APPLICATIONINSIGHTS_CONNECTION_STRING` is set (the template always sets it). The app-down alert relies on the platform metric `Replicas`; it does not see a replica that runs but is not ready (that shows as a restart loop, a missing heartbeat or 5xx).
 
 ## Validate locally
 

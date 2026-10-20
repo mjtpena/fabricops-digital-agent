@@ -13,6 +13,7 @@ from orqentis.notifications.ssrf import Resolver, WebhookPoster, system_resolver
 from orqentis.notifications.teams import TeamsWorkflowsNotifier
 from orqentis.notifications.webhook import GenericWebhookNotifier
 from orqentis.observability.audit import AuditTrail
+from orqentis.observability.metrics import DISABLED, Metrics
 
 
 def build_notifier(
@@ -52,6 +53,7 @@ def build_notification_service(
     audit: AuditTrail,
     *,
     notifier: Notifier | None = None,
+    metrics: Metrics = DISABLED,
 ) -> NotificationService:
     """A dispatcher in front of the configured notifier, or a service that discards events when there is none.
 
@@ -68,4 +70,5 @@ def build_notification_service(
         max_attempts=settings.notify_max_attempts,
         backoff_base=settings.notify_backoff_base_seconds,
         backoff_max=settings.notify_backoff_max_seconds,
+        metrics=metrics,
     )

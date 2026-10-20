@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
+from orqentis import __version__
 from orqentis.config.settings import FabricMode, Settings
 from orqentis.observability.logging import get_logger
 from orqentis.runtime.supervisor import BuildStatus, BuildSupervisor
@@ -59,6 +60,17 @@ class Runtime:
 
     # ------------------------------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
+        # One console line per process start: a container that restarts in a loop is counted from these by the
+        # restart-loop alert (docs/operations.md), also when it dies before it could export a metric.
+        _log.info(
+            "orqentis process started",
+            extra={
+                "version": __version__,
+                "environment": self._settings.deployment_environment,
+                "fabric_mode": self._settings.fabric_mode.value,
+                "scheduler_enabled": self._settings.scheduler_enabled,
+            },
+        )
         if self._injected is not None:
             await self._become_ready(self._injected)
             return

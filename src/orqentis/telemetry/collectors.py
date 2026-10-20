@@ -15,6 +15,7 @@ from orqentis.domain.runs import RunStatus
 from orqentis.fabric.errors import FabricError
 from orqentis.fabric.ports import FabricClient
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import DISABLED, Metrics
 from orqentis.storage.event_store import COLLECTOR_SCOPE, EventStore
 from orqentis.telemetry.normalization import (
     activity_failure_event,
@@ -165,6 +166,10 @@ class IngestionResult:
     new_events: list[OperationalEvent] = field(default_factory=list)
     collected: int = 0
     errors: dict[str, str] = field(default_factory=dict)
+    # Units of work: a whole collector, or one scope of a scoped collector. ``Metrics`` and ``CollectionService`` use
+    # the split to tell "some failed" (degraded) from "everything failed" (blind).
+    units_ok: int = 0
+    units_failed: int = 0
     # The (since, until) window each collector (or, for scoped collectors, each ``collector:scope``) was asked for;
     # ones that failed are listed too.
     windows: dict[str, tuple[datetime, datetime]] = field(default_factory=dict)
@@ -197,6 +202,7 @@ class TelemetryIngestor:
         *,
         lookback: timedelta = timedelta(days=7),
         overlap: timedelta = timedelta(minutes=15),
+        metrics: Metrics = DISABLED,
     ) -> None:
         if lookback <= timedelta(0):
             raise ValueError("lookback must be positive")
@@ -207,6 +213,7 @@ class TelemetryIngestor:
         self._clock = clock
         self._lookback = lookback
         self._overlap = overlap
+        self._metrics = metrics
 
     def _window_start(self, watermark: datetime | None, until: datetime, label: str) -> tuple[datetime, bool]:
         """``(since, clock_repair_needed)`` for one watermark."""
@@ -236,12 +243,19 @@ class TelemetryIngestor:
         )
         return result
 
-    async def _store(self, events: list[OperationalEvent], result: IngestionResult) -> None:
+    async def _store(self, events: list[OperationalEvent], result: IngestionResult) -> int:
+        """Append the events; returns how many were new to the event store."""
         result.collected += len(events)
         events.sort(key=lambda e: e.timestamp)
-        result.new_events.extend(await self._event_store.append(events))
+        appended = await self._event_store.append(events)
+        result.new_events.extend(appended)
+        return len(appended)
+
+    def _seconds_since(self, started: datetime) -> float:
+        return (self._clock.now() - started).total_seconds()
 
     async def _run_whole(self, collector: Collector, until: datetime, result: IngestionResult) -> None:
+        started = self._clock.now()
         watermarks = await self._event_store.get_watermarks(collector.name)
         since, repair = self._window_start(watermarks.get(COLLECTOR_SCOPE), until, collector.name)
         result.windows[collector.name] = (since, until)
@@ -250,15 +264,27 @@ class TelemetryIngestor:
         except FabricError as exc:
             # One failing collector must not blind the others, and its watermark stays where it was.
             result.errors[collector.name] = exc.message
+            result.units_failed += 1
+            self._metrics.collector_run(collector.name, seconds=self._seconds_since(started), errors=1, new_events=0)
             _log.warning("collector failed", extra={"collector": collector.name, "error": exc.to_dict()})
             return
-        await self._store(events, result)
+        except Exception:
+            self._metrics.collector_run(collector.name, seconds=self._seconds_since(started), errors=1, new_events=0)
+            raise
+        new_events = await self._store(events, result)
         await self._event_store.advance_watermarks(collector.name, {COLLECTOR_SCOPE: until}, force=repair)
+        result.units_ok += 1
+        self._metrics.collector_run(
+            collector.name, seconds=self._seconds_since(started), errors=0, new_events=new_events
+        )
 
     async def _run_scoped(self, collector: ScopedCollector, until: datetime, result: IngestionResult) -> None:
+        started = self._clock.now()
         watermarks = await self._event_store.get_watermarks(collector.name)
         done: dict[str, datetime] = {}
         repaired: dict[str, datetime] = {}
+        failed_scopes = 0
+        new_events = 0
         try:
             for scope in collector.scopes():
                 label = f"{collector.name}:{scope}"
@@ -268,11 +294,22 @@ class TelemetryIngestor:
                     events = await collector.collect_scope(scope, since=since, until=until)
                 except FabricError as exc:
                     result.errors[label] = exc.message
+                    result.units_failed += 1
+                    failed_scopes += 1
                     _log.warning("collector failed", extra={"collector": label, "error": exc.to_dict()})
                     continue
-                await self._store(events, result)
+                new_events += await self._store(events, result)
+                result.units_ok += 1
                 (repaired if repair else done)[scope] = until
+        except Exception:
+            self._metrics.collector_run(
+                collector.name, seconds=self._seconds_since(started), errors=failed_scopes + 1, new_events=new_events
+            )
+            raise
         finally:
             # Also when this run is cut short: what was stored is recorded, so the next run does not redo it.
             await self._event_store.advance_watermarks(collector.name, done)
             await self._event_store.advance_watermarks(collector.name, repaired, force=True)
+        self._metrics.collector_run(
+            collector.name, seconds=self._seconds_since(started), errors=failed_scopes, new_events=new_events
+        )
