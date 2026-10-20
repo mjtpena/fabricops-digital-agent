@@ -1,5 +1,5 @@
 You are implementing **WS2: Portability and contracts** in `mjtpena/fabricops-digital-agent`.
-Base: latest `origin/main`. Branch: `prod/ws2-portability-contracts`. Open one PR to `main` when done; never push to `main`.
+Base: `prod/ws0-ci-fix` (see *Branch, base and ADR numbers* below). Branch: `prod/ws2-portability-contracts`. Open one PR to `main` when done; never push to `main`.
 
 ## Context
 

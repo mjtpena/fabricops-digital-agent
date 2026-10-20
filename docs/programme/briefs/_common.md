@@ -11,8 +11,16 @@ audit trail records everything. It is a modular monolith built on ports and adap
 composition root is `src/orqentis/bootstrap.py`.
 
 Read first: `README.md`, `docs/architecture.md`, `docs/security.md`, `docs/threat-model.md`,
-`docs/development.md`, `docs/adr/*`, `infra/bicep/README.md`, and the programme ledger
-`docs/production-readiness.md`.
+`docs/development.md`, `docs/adr/*`, `infra/bicep/README.md`.
+
+Accepted programme decisions you may rely on (their ADRs 0008–0012 land on `main` separately):
+production storage is PostgreSQL Flexible Server (Entra-only) for incidents, approvals, events,
+leases and the audit chain, with evidence in immutable Blob storage (ADR-0008); capacity signals
+come from the Capacity Metrics semantic model and schema drift from Delta `_delta_log` over OneLake
+(ADR-0009); humans get a notifier port (Teams Workflows webhook, generic webhook) and a minimal
+server-rendered UI behind Easy Auth (ADR-0010); deployment is single-tenant with `dev`, `test`,
+`prod` resource groups and a shared registry (ADR-0011); the LLM is a dedicated Azure OpenAI
+deployment with the rule-based reasoner as fallback (ADR-0012).
 
 ## Invariants (must hold; reviewers will check every one)
 
@@ -47,6 +55,16 @@ These files are shared with workstreams running in parallel: `src/orqentis/boots
 `docs/architecture.md`, `docs/security.md`. Change them **additively** (add settings, parameters,
 wiring and sections; do not reorder, rename or reformat existing content). Before opening the PR,
 merge the latest `origin/main` and resolve conflicts.
+
+## Branch, base and ADR numbers
+
+* Your worktree is cut from `prod/ws0-ci-fix` (WS0, PR #1, pending merge to `main`): it contains the
+  CI image fix and the Windows fixes the local gates need. Push your work to the remote branch
+  named in your brief (`git push -u origin HEAD:<branch>`) and open the PR from it to `main`. If
+  WS0 is still unmerged at that point, your PR also shows its commits; that is expected. Merge
+  `origin/main` before opening the PR.
+* ADR numbers are reserved to avoid collisions: WS1 → 0013, WS2 → 0014, WS3 → 0015,
+  WS4 → 0016. Add rows to `docs/adr/README.md`.
 
 ## Working environment
 

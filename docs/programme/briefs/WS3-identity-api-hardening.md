@@ -1,5 +1,5 @@
 You are implementing **WS3: Identity and API hardening** in `mjtpena/fabricops-digital-agent`.
-Base: latest `origin/main`. Branch: `prod/ws3-identity-hardening`. Open one PR to `main` when done; never push to `main`.
+Base: `prod/ws0-ci-fix` (see *Branch, base and ADR numbers* below). Branch: `prod/ws3-identity-hardening`. Open one PR to `main` when done; never push to `main`.
 
 ## Context
 

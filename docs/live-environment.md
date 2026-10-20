@@ -6,7 +6,9 @@ what, when, why, and how to undo it. No secrets, tokens or tenant data are recor
 Rules (from the programme brief):
 
 * Everything created is prefixed `fabricops-` / `FabricOps Sandbox` and tagged
-  `owner=fabricops-programme`, `purpose=sandbox|dev|test|prod`. Fabric capacity names allow only
+  `owner=fabricops-programme`, `purpose=sandbox|dev|test|prod` (`purpose=shared` for resources used
+  by every environment, such as the container registry). Entra applications carry the same
+  information in their `notes` field. Fabric capacity names allow only
   lowercase letters and digits, so capacities use `fabricops` without the hyphen.
 * Existing workspaces and resources not created by the programme are never modified, read for
   data, or granted access. Reading the metadata of a workspace approved for monitoring is allowed.
@@ -33,4 +35,10 @@ Rules (from the programme brief):
 
 | Date (UTC) | Change | Why | Approved | Undo |
 |---|---|---|---|---|
-| | *(no changes yet)* | | | |
+| 2026-10-20 | GitHub repository default branch set to `main` | Programme PRs, Dependabot and defaults target `main` (B2) | Owner, 2026-10-20 | `gh repo edit mjtpena/fabricops-digital-agent --default-branch claude/amazing-feynman-sbw9fs` |
+| 2026-10-20 | Azure budget `fabricops-programme` on subscription *Sandbox Environment 2026*: AUD 1,100/month over `rg-fabricops-*` and `RG-FABRICDEMO`; alerts at 50/80/100% actual and 100% forecast to the owner's work email | Cost cap D5 (USD 750; billing currency is AUD) | Owner (A5, D5) | `az rest --method delete --url "https://management.azure.com/subscriptions/c8ce2a82-b8b8-4b82-b493-1f82ec33b961/providers/Microsoft.Consumption/budgets/fabricops-programme?api-version=2023-05-01"` |
+| 2026-10-20 | Resource group `rg-fabricops-shared` (Australia East, tags `owner=fabricops-programme`, `purpose=shared`) | Shared registry for all environments (ADR-0011) | Owner (A6) | `az group delete -n rg-fabricops-shared --subscription c8ce2a82-b8b8-4b82-b493-1f82ec33b961` |
+| 2026-10-20 | Container registry `crfabricopsshared` (Basic, admin user disabled) in `rg-fabricops-shared` | Images built once, promoted by digest (WS4) | Owner (A6) | Deleted with the resource group, or `az acr delete -n crfabricopsshared` |
+| 2026-10-20 | Entra app + service principal `fabricops-cicd-dev` (appId `c3960e5b-b0fd-4bee-a247-667fbc753018`), no secrets; federated credentials `gh-env-dev` (`repo:mjtpena/fabricops-digital-agent:environment:dev`) and `gh-ref-main` (`...:ref:refs/heads/main`) | GitHub Actions OIDC identity for `dev` (WS4) | Owner (A6) | `az ad app delete --id c3960e5b-b0fd-4bee-a247-667fbc753018` |
+| 2026-10-20 | Role assignment `AcrPush` for `fabricops-cicd-dev` on `crfabricopsshared` (assignment `a7da63e6-0625-46a7-9117-01a63738221d`) | Push images from CD | Owner (A6) | `MSYS_NO_PATHCONV=1 az role assignment delete --ids /subscriptions/c8ce2a82-b8b8-4b82-b493-1f82ec33b961/resourceGroups/rg-fabricops-shared/providers/Microsoft.ContainerRegistry/registries/crfabricopsshared/providers/Microsoft.Authorization/roleAssignments/a7da63e6-0625-46a7-9117-01a63738221d` |
+| 2026-10-20 | Entra app + service principal `fabricops-live-reader` (appId `c4764336-c6b6-45fc-9cd8-d83bcff1e353`); one client secret, expires 2026-11-19, stored only on the orchestrator machine outside the repository | Least-privilege identity for live tests and permission discovery (WS5); Fabric grants are logged as they are made | Owner (A4) | `az ad app delete --id c4764336-c6b6-45fc-9cd8-d83bcff1e353` |

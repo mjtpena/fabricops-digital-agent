@@ -1,5 +1,5 @@
 You are implementing **WS1: Autonomous runtime** in `mjtpena/fabricops-digital-agent`.
-Base: latest `origin/main`. Branch: `prod/ws1-autonomous-runtime`. Open one PR to `main` when done; never push to `main`.
+Base: `prod/ws0-ci-fix` (see *Branch, base and ADR numbers* below). Branch: `prod/ws1-autonomous-runtime`. Open one PR to `main` when done; never push to `main`.
 
 ## Context
 
@@ -72,8 +72,7 @@ readiness separated from liveness so that startup never fails probes.
    deployed environments, off by default in `local` unless enabled; intervals; budgets; lookback;
    overlap). Keep `.env.example`, `settings.py`, `infra/bicep/main.bicep`, `infra/bicep/README.md`
    and `docs/` consistent.
-9. **ADR** for the scheduler, lease and async-job design (`docs/adr/0008-...`; check the next free
-   number on `main` first).
+9. **ADR** for the scheduler, lease and async-job design (`docs/adr/0013-...`, the number reserved for WS1).
 
 ## Out of scope
 

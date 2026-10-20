@@ -1,5 +1,5 @@
 You are implementing **WS4: Delivery pipeline** in `mjtpena/fabricops-digital-agent`.
-Base: latest `origin/main`. Branch: `prod/ws4-delivery-pipeline`. Open one PR to `main` when done; never push to `main`.
+Base: `prod/ws0-ci-fix` (see *Branch, base and ADR numbers* below). Branch: `prod/ws4-delivery-pipeline`. Open one PR to `main` when done; never push to `main`.
 
 ## Context
 
@@ -19,6 +19,17 @@ environments `dev`, `test`, `prod`; `prod` (and `test`) need required reviewers.
 GitHub Actions uses **OIDC federated credentials only** (`azure/login` with `client-id`,
 `tenant-id`, `subscription-id` from environment *variables*, which are identifiers, not secrets).
 Prefer a separate Entra identity per environment so that the `dev` pipeline cannot touch `prod`.
+
+Already provisioned by the orchestrator (do not hard-code these in workflows; read them from
+GitHub environment variables): registry `crfabricopsshared` (`crfabricopsshared.azurecr.io`, Basic,
+admin user disabled) in `rg-fabricops-shared`; Entra app `fabricops-cicd-dev` (client id
+`c3960e5b-b0fd-4bee-a247-667fbc753018`, no client secrets) with federated credentials for
+`repo:mjtpena/fabricops-digital-agent:environment:dev` and `...:ref:refs/heads/main`, holding only
+`AcrPush` on that registry. Tenant `4b7e9d9f-8e54-43da-a1dd-2d1cc793721a`, subscription
+`c8ce2a82-b8b8-4b82-b493-1f82ec33b961`. The environment resource groups do not exist yet; deploy
+steps must tolerate that for the dry run. For the branch dry run, state in the PR which OIDC subject
+the job presents (for example `ref:refs/heads/prod/ws4-delivery-pipeline`) so the orchestrator can add a
+temporary federated credential, or run the push job under the `dev` environment.
 
 `ubuntu-latest` began migrating to Ubuntu 26 on 2026-10-19; pin runner images.
 

@@ -55,14 +55,14 @@ Hot files (additive changes only; merged in dependency order): `src/orqentis/boo
 
 | Id | Question | Recommended default | Decision | Date | ADR |
 |---|---|---|---|---|---|
-| D0 | Tenant scope; which existing workspaces may be monitored | Treat the tenant as an organisation tenant. Monitor only the sandbox workspaces FabricOps creates | pending | | |
-| D1 | Production storage (supersedes the open question in ADR-0003) | PostgreSQL Flexible Server (Entra-only, managed identity) for incidents, approvals, dependencies, events, leases and audit chain head; Blob/ADLS Gen2 with version-level immutability for evidence and reports behind one ADLS-API adapter (OneLake-capable); Eventhouse optional sink only | pending | | |
-| D2 | Capacity signal source; schema drift via Delta `_delta_log` | Capacity Metrics semantic model via `executeQueries`, confirmed by a WS7 spike; schema drift from `_delta_log` over OneLake for contract-declared tables with the minimum read grant | pending | | |
-| D3 | Human interface | Notifier port (Teams Workflows webhook + generic webhook); minimal server-rendered UI behind Easy Auth; Teams Adaptive Card approvals deferred | pending | | |
-| D4 | Deployment model | Single-tenant, one deployment per customer tenant/subscription. Here: `rg-fabricops-{dev,test,prod}` in the *Sandbox Environment 2026* subscription, Australia East | pending | | |
-| D5 | Monthly cost cap; approval for billable resources | Cap proposed in the kickoff message; budget with 50/80/100% alerts | pending | | |
-| D6 | Merge authority | Orchestrator merges workstream PRs after green CI and the review gate; owner approves every `prod` deploy and `v1.0.0`; owner does repo-admin settings | pending | | |
-| D7 | LLM resource and model | New dedicated Azure OpenAI account in Australia East; `gpt-5.5` GlobalStandard; WS10 compares newer deployments on the golden set | pending | | |
+| D0 | Tenant scope; which existing workspaces may be monitored | Treat the tenant as an organisation tenant. Monitor only the sandbox workspaces FabricOps creates | Accepted: organisation tenant; monitor only programme-created sandbox workspaces | 2026-10-20 |  |
+| D1 | Production storage (supersedes the open question in ADR-0003) | PostgreSQL Flexible Server (Entra-only, managed identity) for incidents, approvals, dependencies, events, leases and audit chain head; Blob/ADLS Gen2 with version-level immutability for evidence and reports behind one ADLS-API adapter (OneLake-capable); Eventhouse optional sink only | Accepted as recommended | 2026-10-20 | [0008](adr/0008-production-storage.md) |
+| D2 | Capacity signal source; schema drift via Delta `_delta_log` | Capacity Metrics semantic model via `executeQueries`, confirmed by a WS7 spike; schema drift from `_delta_log` over OneLake for contract-declared tables with the minimum read grant | Accepted as recommended (capacity source confirmed by a WS7 spike) | 2026-10-20 | [0009](adr/0009-capacity-and-schema-signals.md) |
+| D3 | Human interface | Notifier port (Teams Workflows webhook + generic webhook); minimal server-rendered UI behind Easy Auth; Teams Adaptive Card approvals deferred | Accepted as recommended | 2026-10-20 | [0010](adr/0010-human-interface.md) |
+| D4 | Deployment model | Single-tenant, one deployment per customer tenant/subscription. Here: `rg-fabricops-{dev,test,prod}` in the *Sandbox Environment 2026* subscription, Australia East | Accepted as recommended | 2026-10-20 | [0011](adr/0011-deployment-model-and-environments.md) |
+| D5 | Monthly cost cap; approval for billable resources | Cap proposed in the kickoff message; budget with 50/80/100% alerts | Accepted: USD 750/month. Billing currency is AUD, so the budget is AUD 1,100 (≈ USD 750) with alerts at 50/80/100% actual and 100% forecast to the owner's work email. A1, A2 withdrawn (D8); A3–A6 approved | 2026-10-20 |  |
+| D6 | Merge authority | Orchestrator merges workstream PRs after green CI and the review gate; owner approves every `prod` deploy and `v1.0.0`; owner does repo-admin settings | Accepted as recommended | 2026-10-20 |  |
+| D7 | LLM resource and model | New dedicated Azure OpenAI account in Australia East; `gpt-5.5` GlobalStandard; WS10 compares newer deployments on the golden set | Accepted as recommended | 2026-10-20 | [0012](adr/0012-llm-hosting.md) |
 | D8 | Sandbox Fabric capacity | New F2 `fabricopssandbox` | **Use the existing `fabricdemocap2026` (F4, Australia East, `RG-FABRICDEMO`, *Sandbox Environment 2026*). The orchestrator may resume it for live work and pause it when idle.** Consequences: USD 0.84/h while running; pausing also takes its 4 other workspaces offline; their load is part of the capacity signals; no new capacity is created (A1 and A2 withdrawn) | 2026-10-20 | |
 
 ## 4. Blockers and risks
@@ -70,7 +70,7 @@ Hot files (additive changes only; merged in dependency order): `src/orqentis/boo
 | Id | Item | Owner | Status |
 |---|---|---|---|
 | B1 | **GitHub Actions jobs do not start:** "recent account payments have failed or your spending limit needs to be increased" (run 39342626445). Every PR's review gate needs green CI | repo owner | open |
-| B2 | Repository default branch is `claude/amazing-feynman-sbw9fs`, not `main` | repo owner | open |
+| B2 | Repository default branch was `claude/amazing-feynman-sbw9fs`, not `main` | orchestrator (owner-approved) | resolved 2026-10-20: default branch is `main` |
 | R1 | `ubuntu-latest` migrates to Ubuntu 26 from 2026-10-19. WS4 pins runner images | WS4 | open |
 | R2 | The tenant hosts other production subscriptions and workspaces. All FabricOps resources stay in prefixed, tagged resource groups and workspaces | orchestrator | open |
 | R3 | "Service principals can call Fabric public APIs" is enabled for the whole organisation, not a scoped group. FabricOps docs recommend a scoped group; changing it is the tenant owner's call | owner | accepted for now |
@@ -78,7 +78,16 @@ Hot files (additive changes only; merged in dependency order): `src/orqentis/boo
 
 ## 5. Cost
 
-Monthly cap: pending (D5). Spend to date: USD 0 (no billable resources created).
+Monthly cap: USD 750 (D5), implemented as Azure budget `fabricops-programme` = AUD 1,100/month (billing
+currency AUD) over `rg-fabricops-*` and `RG-FABRICDEMO` (the shared sandbox capacity's group, which also holds
+two small non-programme resources, so the budget errs on the early side).
+
+| Resource | Rate | Notes |
+|---|---|---|
+| `crfabricopsshared` ACR Basic | USD 0.1666/day (≈ USD 5/month) | created 2026-10-20 |
+| `fabricdemocap2026` F4 (shared, D8) | USD 0.84/h while running | paused when idle; resume/pause logged in `docs/live-environment.md` |
+
+Spend to date (programme resources): ≈ USD 0. `RG-FABRICDEMO` month-to-date at kickoff: AUD 9.60 (pre-programme).
 
 ## 6. Change history
 
@@ -86,3 +95,4 @@ Monthly cap: pending (D5). Spend to date: USD 0 (no billable resources created).
 |---|---|
 | 2026-10-20 | Kickoff: repo verified, live tenant discovered read-only, WS0 opened, ledger created |
 | 2026-10-20 | D8: sandbox uses the existing F4 `fabricdemocap2026`, with resume/pause authorised |
+| 2026-10-20 | D0–D7 accepted; ADRs 0008–0012; default branch set to `main`; budget, shared ACR, CI/CD OIDC identity and test service principal created (A4–A6) |
