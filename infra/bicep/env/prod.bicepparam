@@ -73,3 +73,13 @@ param containerMemory = '1Gi'
 param logRetentionInDays = 90
 param storageSkuName = 'Standard_ZRS'
 param fileShareQuotaGiB = 32
+
+// Alerts (WS9, docs/operations.md): an action group, six alert rules and a workbook are deployed with the app.
+// Who is told is NOT in this file: parameter files never hold people or webhooks. Set these in the environment of
+// whoever deploys (the CD pipeline does not set them yet; docs/operations.md, "Alert receivers"):
+//   ALERT_EMAIL_RECEIVERS     comma-separated addresses, for example "oncall@example.com,team@example.com"
+//   ALERT_TEAMS_WEBHOOK_URI   a Teams Workflows webhook URL (a secret: keep it in the deployer's secret store)
+// Both empty: the rules still evaluate and show in the portal, but nobody is notified.
+var alertEmailList = readEnvironmentVariable('ALERT_EMAIL_RECEIVERS', '')
+param alertEmailReceivers = empty(alertEmailList) ? [] : split(alertEmailList, ',')
+param alertTeamsWebhookUri = readEnvironmentVariable('ALERT_TEAMS_WEBHOOK_URI', '')
