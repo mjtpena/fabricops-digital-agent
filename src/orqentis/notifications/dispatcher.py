@@ -27,6 +27,7 @@ from orqentis.notifications.model import NotificationEvent, NotificationMessage
 from orqentis.notifications.port import DeliveryError, Notifier
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import DISABLED, Metrics
 
 _log = get_logger(__name__)
 
@@ -39,6 +40,9 @@ def _jitter() -> float:
 
 AUDIT_ACTOR = "system:notifications"
 AUDIT_ACTION = "notification.send"
+
+# What ends a message, as the ``orqentis.notifications`` metric records it. RETRYING is an attempt, not an end.
+_METRIC_OUTCOMES = {"SENT": "sent", "FAILED": "failed", "DROPPED": "dropped", "ABANDONED": "abandoned"}
 
 
 def backoff_delay(
@@ -71,6 +75,7 @@ class NotificationDispatcher:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[], float] = _jitter,
         drain_seconds: float = 5.0,
+        metrics: Metrics = DISABLED,
     ) -> None:
         self._notifier = notifier
         self._audit = audit
@@ -83,6 +88,7 @@ class NotificationDispatcher:
         self._sleep = sleep
         self._jitter = jitter
         self._drain_seconds = drain_seconds
+        self._metrics = metrics
         self._outbox: deque[NotificationMessage] = deque()
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._unaudited_drops: deque[NotificationMessage] = deque(maxlen=1000)
@@ -229,6 +235,9 @@ class NotificationDispatcher:
         retry_in: float | None = None,
         reason: str | None = None,
     ) -> None:
+        if (ended := _METRIC_OUTCOMES.get(outcome)) is not None:
+            # Before the audit write, so an audit failure cannot hide a failed delivery from the metric.
+            self._metrics.notification(self._notifier.name, ended)
         details: dict[str, object] = {
             "event_id": message.event_id,
             "kind": message.kind.value,

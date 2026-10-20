@@ -120,6 +120,12 @@ param azureOpenAiDeployment string = ''
 @description('Optional: full resource id of the Azure OpenAI account (/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<name>). When set, the reader identity gets "Cognitive Services OpenAI User" on it; it may be in another resource group or subscription.')
 param azureOpenAiResourceId string = ''
 
+@description('Price of one million INPUT tokens of the model deployment, in USD (ORQENTIS_LLM_INPUT_COST_PER_MILLION_TOKENS), for the estimated-cost metric. A decimal number as text, taken from the model price list; empty (default) means "not configured": tokens are counted, no cost is emitted.')
+param llmInputCostPerMillionTokens string = ''
+
+@description('Price of one million OUTPUT tokens, in USD (ORQENTIS_LLM_OUTPUT_COST_PER_MILLION_TOKENS). See llmInputCostPerMillionTokens.')
+param llmOutputCostPerMillionTokens string = ''
+
 // ------------------------------------------------------------------------------------------------- autonomous runtime
 
 @description('ORQENTIS_SCHEDULER_ENABLED. true: the app collects, detects, investigates, sweeps SLAs and refreshes its catalog on a schedule. false: it only acts when called through the API.')
@@ -186,6 +192,14 @@ param catalogRefreshEnabled bool = true
 @minValue(1)
 @maxValue(10080)
 param catalogRefreshIntervalMinutes int = 60
+
+@description('Verify the audit hash chain on a schedule; a failure raises the audit-verification alert (ORQENTIS_SCHEDULER_AUDIT_VERIFY_ENABLED).')
+param auditVerifyEnabled bool = true
+
+@description('Minutes between audit verifications (ORQENTIS_SCHEDULER_AUDIT_VERIFY_INTERVAL_MINUTES). Each run reads the whole audit log.')
+@minValue(1)
+@maxValue(10080)
+param auditVerifyIntervalMinutes int = 60
 
 @description('Investigations running at once; further ones queue (ORQENTIS_INVESTIGATION_MAX_CONCURRENCY).')
 @minValue(1)
@@ -546,6 +560,159 @@ param evidenceAllowedIpRanges array = []
 @description('With evidenceNetworkDefaultAction Deny: resource ids of subnets (with the Microsoft.Storage service endpoint) allowed to connect.')
 param evidenceAllowedSubnetIds array = []
 
+@description('Log Analytics daily ingestion cap in GB (-1: no cap). A cap keeps a sandbox cheap, but once it is reached nothing is ingested until the next day, including the metrics the alerts read: the heartbeat alert then fires. Use it in dev, not in prod (docs/cost.md).')
+@minValue(-1)
+@maxValue(1000)
+param logDailyQuotaGb int = -1
+
+// ------------------------------------------------------------------------------------------------- monitoring
+
+@description('Deploy the action group, the six alert rules and the workbook (modules/monitoring.bicep). Alert rules cost a little (docs/cost.md); turn off only for throwaway environments.')
+param monitoringEnabled bool = true
+
+@description('Email addresses that receive every alert. Parameter files must not hold real people: the env/*.bicepparam files read them from the ALERT_EMAIL_RECEIVERS environment variable (comma separated) at deployment time. Empty: the action group exists but notifies nobody by email.')
+param alertEmailReceivers array = []
+
+@description('Optional Microsoft Teams Workflows webhook URL for the action group. It is a secret (it carries its own signature): pass it at deployment time (the env/*.bicepparam files read ALERT_TEAMS_WEBHOOK_URI), never commit it. Empty: no webhook receiver. Note that a deployment without it removes a receiver added earlier, because the template owns the action group.')
+@secure()
+param alertTeamsWebhookUri string = ''
+
+@description('Base URL of docs/operations.md; every alert links to one section of it.')
+param alertRunbookBaseUrl string = 'https://github.com/mjtpena/fabricops-digital-agent/blob/main/docs/operations.md'
+
+@description('Minutes between evaluations of the log alert rules. Every log alert window below must be at least this long: the deployment is refused, naming the windows that are too short, otherwise.')
+@allowed([
+  1
+  5
+  10
+  15
+  30
+  45
+  60
+])
+param alertEvaluationFrequencyMinutes int = 5
+
+@description('app-down: minutes without a running replica before the alert fires.')
+@allowed([
+  1
+  5
+  15
+  30
+  60
+])
+param alertAppDownWindowMinutes int = 5
+
+@description('restart-loop: window in minutes in which restarts are counted. Azure accepts only these log alert windows: 5, 10, 15, 30, 45, 60, 120, 180, 240, 300, 360, 1440 or 2880 minutes.')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
+param alertRestartWindowMinutes int = 15
+
+@description('restart-loop: alert at this many restarts in the window. One deploy is one restart.')
+@minValue(2)
+@maxValue(100)
+param alertRestartThreshold int = 3
+
+@description('5xx: window in minutes over which the share of 5xx responses is computed (a log alert window, see alertRestartWindowMinutes).')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
+param alertHttp5xxWindowMinutes int = 10
+
+@description('5xx: alert when at least this percentage of the requests in the window answered 5xx.')
+@minValue(1)
+@maxValue(100)
+param alertHttp5xxRatePercent int = 5
+
+@description('5xx: ignore windows with fewer requests than this.')
+@minValue(1)
+@maxValue(100000)
+param alertHttp5xxMinRequests int = 20
+
+@description('collector-errors: window in minutes in which failing collector runs are counted (a log alert window, see alertRestartWindowMinutes).')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
+param alertCollectorErrorWindowMinutes int = 15
+
+@description('collector-errors: alert when one collector had at least this many failing runs in the window.')
+@minValue(1)
+@maxValue(1000)
+param alertCollectorErrorRuns int = 2
+
+@description('heartbeat: alert when there was no successful collection for this many minutes (a log alert window, see alertRestartWindowMinutes). The alert is switched off automatically while schedulerEnabled or collectEnabled is false.')
+@allowed([
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
+param alertHeartbeatMinutes int = 15
+
+@description('audit-verification: window in minutes in which a failed verification is visible to the rule. 0 (the default) derives it from auditVerifyIntervalMinutes: at least twice the interval, rounded up to the next log alert window (120 for the default hourly verification). Otherwise one of the log alert windows (see alertRestartWindowMinutes).')
+@allowed([
+  0
+  5
+  10
+  15
+  30
+  45
+  60
+  120
+  180
+  240
+  300
+  360
+  1440
+  2880
+])
+param alertAuditFailureWindowMinutes int = 0
+
 // ================================================================================================= variables
 
 var readerIdentityName = 'id-${prefix}-reader'
@@ -838,6 +1005,8 @@ var appEnv = concat(
     { name: 'ORQENTIS_SCHEDULER_SLA_SWEEP_INTERVAL_MINUTES', value: string(slaSweepIntervalMinutes) }
     { name: 'ORQENTIS_SCHEDULER_CATALOG_REFRESH_ENABLED', value: catalogRefreshEnabled ? 'true' : 'false' }
     { name: 'ORQENTIS_SCHEDULER_CATALOG_REFRESH_INTERVAL_MINUTES', value: string(catalogRefreshIntervalMinutes) }
+    { name: 'ORQENTIS_SCHEDULER_AUDIT_VERIFY_ENABLED', value: auditVerifyEnabled ? 'true' : 'false' }
+    { name: 'ORQENTIS_SCHEDULER_AUDIT_VERIFY_INTERVAL_MINUTES', value: string(auditVerifyIntervalMinutes) }
     { name: 'ORQENTIS_INVESTIGATION_MAX_CONCURRENCY', value: string(investigationMaxConcurrency) }
     { name: 'ORQENTIS_INVESTIGATION_TIMEOUT_SECONDS', value: string(investigationTimeoutSeconds) }
     { name: 'ORQENTIS_FABRIC_MAX_CONCURRENCY', value: string(fabricMaxConcurrency) }
@@ -857,6 +1026,12 @@ var appEnv = concat(
   durableStorageEnv,
   empty(azureOpenAiEndpoint) ? [] : [{ name: 'ORQENTIS_AZURE_OPENAI_ENDPOINT', value: azureOpenAiEndpoint }],
   empty(azureOpenAiDeployment) ? [] : [{ name: 'ORQENTIS_AZURE_OPENAI_DEPLOYMENT', value: azureOpenAiDeployment }],
+  empty(llmInputCostPerMillionTokens)
+    ? []
+    : [{ name: 'ORQENTIS_LLM_INPUT_COST_PER_MILLION_TOKENS', value: llmInputCostPerMillionTokens }],
+  empty(llmOutputCostPerMillionTokens)
+    ? []
+    : [{ name: 'ORQENTIS_LLM_OUTPUT_COST_PER_MILLION_TOKENS', value: llmOutputCostPerMillionTokens }],
   empty(authorityHost) ? [] : [{ name: 'ORQENTIS_AUTHORITY_HOST', value: authorityHost }],
   empty(fabricApiBaseUrl) ? [] : [{ name: 'ORQENTIS_FABRIC_API_BASE_URL', value: fabricApiBaseUrl }],
   empty(powerbiApiBaseUrl) ? [] : [{ name: 'ORQENTIS_POWERBI_API_BASE_URL', value: powerbiApiBaseUrl }],
@@ -896,6 +1071,9 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
       name: 'PerGB2018'
     }
     retentionInDays: logRetentionInDays
+    workspaceCapping: {
+      dailyQuotaGb: logDailyQuotaGb
+    }
     features: {
       enableLogAccessUsingOnlyResourcePermissions: true
     }
@@ -1323,6 +1501,38 @@ resource authConfig 'Microsoft.App/containerApps/authConfigs@2024-03-01' = {
   }
 }
 
+// ================================================================================================= monitoring
+
+// Action group, six alert rules and the workbook (WS9, ADR-0019). Everything is derived from the resources above.
+module monitoring 'modules/monitoring.bicep' = if (monitoringEnabled) {
+  name: 'orqentis-monitoring'
+  params: {
+    location: location
+    prefix: prefix
+    tags: tags
+    logAnalyticsWorkspaceId: logAnalytics.id
+    containerAppId: containerApp.id
+    containerAppName: containerApp.name
+    emailReceivers: alertEmailReceivers
+    teamsWebhookUri: alertTeamsWebhookUri
+    runbookBaseUrl: alertRunbookBaseUrl
+    evaluationFrequencyMinutes: alertEvaluationFrequencyMinutes
+    appDownWindowMinutes: alertAppDownWindowMinutes
+    restartWindowMinutes: alertRestartWindowMinutes
+    restartThreshold: alertRestartThreshold
+    http5xxWindowMinutes: alertHttp5xxWindowMinutes
+    http5xxRatePercent: alertHttp5xxRatePercent
+    http5xxMinRequests: alertHttp5xxMinRequests
+    collectorErrorWindowMinutes: alertCollectorErrorWindowMinutes
+    collectorErrorRuns: alertCollectorErrorRuns
+    heartbeatMinutes: alertHeartbeatMinutes
+    // A deliberately paused scheduler (or collect job) must not page anyone for a missing heartbeat.
+    heartbeatAlertEnabled: schedulerEnabled && collectEnabled
+    auditFailureWindowMinutes: alertAuditFailureWindowMinutes
+    auditVerifyIntervalMinutes: auditVerifyIntervalMinutes
+  }
+}
+
 // ================================================================================================= outputs
 
 @description('Name of the Container App.')
@@ -1396,3 +1606,12 @@ output auditEpochContainerName string = evidenceStorage.outputs.auditEpochContai
 
 @description('Estate contracts container name (ORQENTIS_CONTRACTS_CONTAINER): upload the contracts file here (infra/bicep/README.md, Estate contracts).')
 output contractsContainerName string = evidenceStorage.outputs.contractsContainerName
+
+@description('Resource id of the alert action group (empty when monitoringEnabled is false).')
+output alertActionGroupId string = monitoring.?outputs.actionGroupId ?? ''
+
+@description('Names of the alert rules (empty when monitoringEnabled is false).')
+output alertRuleNames array = monitoring.?outputs.alertRuleNames ?? []
+
+@description('Email receivers on the action group; 0 means alerts notify nobody by email.')
+output alertEmailReceiverCount int = monitoring.?outputs.emailReceiverCount ?? 0

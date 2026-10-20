@@ -703,7 +703,8 @@ az deployment group create -g rg-fabricops-prod -p infra/bicep/env/prod.biceppar
 
 (The image rolls back; the database does not. Schema migrations are forward-only and each is backward compatible with
 the previous release, so the previous digest runs against the migrated schema. To undo a change to the *data*, use the
-point-in-time restore in [operations/restore.md](operations/restore.md).) An in-pipeline rollback input is a follow-up.
+point-in-time restore in [operations/restore.md](operations/restore.md).) An in-pipeline rollback input is a follow-up. What to check before and after a rollback, and the alert receivers a
+deployment must supply, are in [operations.md](operations.md) (sections 4 and 10).
 
 ### Accepting a scan finding
 

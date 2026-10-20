@@ -21,6 +21,20 @@ def test_the_shipped_migrations_are_numbered_without_gaps_and_have_checksums() -
     assert all(len(m.checksum) == 64 and m.sql.strip() for m in migrations)
 
 
+async def test_migrations_run_with_info_logging_enabled(
+    pg_config: PostgresConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reproduced: a reserved LogRecord key in the log call crashed the first migration once INFO was enabled."""
+    db = await PostgresDatabase.connect(pg_config, None)
+    try:
+        with caplog.at_level("INFO", logger="orqentis.storage.postgres.migrations"):
+            applied = await MigrationRunner(db).migrate()
+        assert len(applied) == len(load_migrations())
+        assert [r.getMessage() for r in caplog.records].count("migration applied") == len(applied)
+    finally:
+        await db.close()
+
+
 async def test_migrate_applies_everything_once_and_records_checksums(pg_config: PostgresConfig) -> None:
     db = await PostgresDatabase.connect(pg_config, None)
     try:

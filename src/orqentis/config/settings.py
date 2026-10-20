@@ -199,6 +199,11 @@ class Settings(BaseSettings):
     foundry_project_endpoint: str | None = None
     foundry_model: str | None = None
     agent_max_tool_calls: int = Field(default=12, ge=0, le=50)
+    # Prices (USD per million tokens) behind the estimated-cost metric orqentis.llm.cost. 0 means "not configured":
+    # tokens are still counted, no cost is emitted. Take the numbers from the model's price list; they are not defaults
+    # here because they differ per model, region and agreement.
+    llm_input_cost_per_million_tokens: float = Field(default=0.0, ge=0, le=100_000)
+    llm_output_cost_per_million_tokens: float = Field(default=0.0, ge=0, le=100_000)
 
     # Action / approval boundary
     enable_write_actions: bool = False
@@ -226,6 +231,9 @@ class Settings(BaseSettings):
     # Anchor the audit chain head (sequence + hash) to an immutable blob (postgres backend).
     scheduler_audit_anchor_enabled: bool = True
     scheduler_audit_anchor_interval_minutes: int = Field(default=15, ge=1, le=24 * 60)
+    # Verifies the audit hash chain (and the immutable anchor, once the storage layer has one); failure raises an alert.
+    scheduler_audit_verify_enabled: bool = True
+    scheduler_audit_verify_interval_minutes: int = Field(default=60, ge=1, le=7 * 24 * 60)
     investigation_max_concurrency: int = Field(default=2, ge=1, le=16)
     investigation_timeout_seconds: int = Field(default=600, ge=30, le=6 * 3600)
     # Durable investigation jobs (postgres backend): every replica polls for queued jobs and claims them; a claim that

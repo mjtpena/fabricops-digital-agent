@@ -26,6 +26,7 @@ from orqentis.config.clock import Clock
 from orqentis.domain.principals import SYSTEM_PRINCIPAL
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import DISABLED, Metrics
 from orqentis.observability.redaction import redact_text
 from orqentis.runtime.fencing import Fence, fenced
 from orqentis.runtime.lease import LeaderLease, Lease
@@ -138,6 +139,7 @@ class Scheduler:
         default_job_timeout: timedelta | None = timedelta(minutes=30),
         audit: AuditTrail | None = None,
         sleep: Sleep = asyncio.sleep,
+        metrics: Metrics = DISABLED,
     ) -> None:
         names = [j.name for j in jobs]
         if len(set(names)) != len(names):
@@ -156,6 +158,7 @@ class Scheduler:
         self._default_timeout = default_job_timeout
         self._audit = audit
         self._sleep = sleep
+        self._metrics = metrics
         self._lease: Lease | None = None
         self._tick_lock = asyncio.Lock()
         self._loop_task: asyncio.Task[None] | None = None
@@ -184,6 +187,7 @@ class Scheduler:
         async with self._tick_lock:
             await self._cancel_running()
             lease, self._lease = self._lease, None
+            self._metrics.set_leader(False)
             if lease is not None:
                 try:
                     await self._lease_port.release(lease)
@@ -225,6 +229,7 @@ class Scheduler:
                     continue
                 if state.running:
                     state.skipped_overlaps += 1
+                    self._metrics.job_overrun(spec.name)
                     state.advance_past(now)
                     _log.warning(
                         "scheduled job still running; slot skipped",
@@ -279,6 +284,8 @@ class Scheduler:
                 if lease is None:
                     return False
                 self._lease = lease
+                self._metrics.set_leader(True)
+                self._metrics.lease_changed("acquired")
                 await self._record_leadership("ACQUIRED", lease)
                 return True
             if self._lease.expires_at - now <= self._lease_ttl / 3:
@@ -297,6 +304,9 @@ class Scheduler:
 
     async def _lose_leadership(self, reason: str) -> None:
         lost, self._lease = self._lease, None
+        self._metrics.set_leader(False)
+        if lost is not None:
+            self._metrics.lease_changed("lost")
         _log.warning("scheduler leadership lost", extra={"reason": reason})
         await self._cancel_running()
         if lost is not None:
@@ -323,7 +333,8 @@ class Scheduler:
     # ------------------------------------------------------------------------------------------------- jobs
     async def _run(self, state: _JobState, context: JobContext) -> None:
         spec = state.spec
-        state.last_started_at = self._clock.now()
+        started = self._clock.now()
+        state.last_started_at = started
         state.run_count += 1
         timeout = spec.timeout or self._default_timeout
         error: str | None = None
@@ -352,6 +363,9 @@ class Scheduler:
             state.last_finished_at = self._clock.now()
             state.last_outcome = outcome
             state.last_error = error
+            self._metrics.job_finished(
+                spec.name, outcome=outcome, seconds=(state.last_finished_at - started).total_seconds()
+            )
         await self._settle(state, failed=outcome in {"failed", "timeout"}, outcome=outcome, error=error)
 
     @staticmethod

@@ -147,7 +147,7 @@ class MigrationRunner:
                 for migration in status.pending:
                     await self._apply(migration)
                     applied_now.append(migration)
-                    _log.info("migration applied", extra={"version": migration.version, "name": migration.name})
+                    _log.info("migration applied", extra={"version": migration.version, "migration": migration.name})
             finally:
                 await lock_conn.execute("SELECT pg_advisory_unlock($1)", _MIGRATION_LOCK_KEY)
         return applied_now

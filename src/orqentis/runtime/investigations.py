@@ -32,6 +32,7 @@ from orqentis.incidents.investigation import INVESTIGABLE, InvestigationNotPossi
 from orqentis.incidents.service import IncidentService
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import DISABLED, Metrics
 from orqentis.observability.redaction import redact_text
 from orqentis.runtime.fencing import ClaimFence, FencingError, claim_fenced, fenced
 from orqentis.runtime.job_store import (
@@ -88,6 +89,7 @@ class InvestigationJobRunner:
         poll_interval: timedelta = timedelta(seconds=2),
         claim_ttl: timedelta = timedelta(seconds=120),
         max_claims: int = 3,
+        metrics: Metrics = DISABLED,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
@@ -107,6 +109,7 @@ class InvestigationJobRunner:
         self._running: dict[str, asyncio.Task[None]] = {}  # job id -> its task, in this process
         self._lost: set[str] = set()  # jobs whose claim another worker took over while we were running them
         self._unentered: dict[str, ClaimedJob] = {}  # claimed, task created, task body not started yet
+        self._metrics = metrics
         self._tasks: set[asyncio.Task[None]] = set()
         self._pumping = False
         self._pump_again = False
@@ -327,6 +330,7 @@ class InvestigationJobRunner:
             else None
         )
         budget: asyncio.Timeout | None = None
+        label = "succeeded"  # the outcome as the operational metrics name it
         try:
             if claimed.recovered:
                 # The worker that had this job died; its incident is still INVESTIGATING and cannot be investigated.
@@ -350,23 +354,34 @@ class InvestigationJobRunner:
             )
             await self._finish(claimed, InvestigationJobStatus.SUCCEEDED, result=outcome)
         except asyncio.CancelledError:
+            label = "cancelled"
             await self._on_cancelled(claimed)
             raise
         except FencingError:
             # The claim was taken over while the investigation was writing: the new holder owns the job and incident.
+            label = "cancelled"
             _log.warning("investigation write refused: the claim was lost", extra={"job_id": job.job_id})
             self._lost.add(job.job_id)
         except TimeoutError as exc:
             if budget is not None and budget.expired():
+                label = "timeout"
                 await self._fail(claimed, f"Timed out after {self._timeout.total_seconds():g}s", reset=True)
             else:
+                label = "failed"
                 await self._fail(
                     claimed, f"{type(exc).__name__}: {redact_text(str(exc))}"[:_MAX_ERROR_TEXT], reset=True
                 )
         except Exception as exc:
             # InvestigationService has already returned the incident to DETECTED and audited the abort.
+            label = "failed"
             await self._fail(claimed, f"{type(exc).__name__}: {redact_text(str(exc))}"[:_MAX_ERROR_TEXT], reset=False)
         finally:
+            started = job.started_at
+            self._metrics.investigation_finished(
+                outcome=label,
+                trigger=job.trigger,
+                seconds=(self._clock.now() - started).total_seconds() if started is not None else 0.0,
+            )
             if heartbeat is not None:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)

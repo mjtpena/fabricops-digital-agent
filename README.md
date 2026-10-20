@@ -292,6 +292,8 @@ schemas/          JSON Schema of the contracts file (generated from the model)
 * [Threat model](docs/threat-model.md): STRIDE analysis and residual risks
 * [Development](docs/development.md): setup, configuration, extending runbooks, signatures, scenarios
 * [Delivery](docs/delivery.md): CI/CD pipeline, OIDC setup, environments, releases, rollback
+* [Operations](docs/operations.md): on-call guide, what each alert means, restore, secret rotation, upgrade and rollback, pausing the scheduler
+* [Cost](docs/cost.md): every billable resource, its default size and list price, and how to keep a sandbox cheap
 * [Teams notifications](docs/teams-notifications.md): create the Workflows webhook, store it in Key Vault, check and troubleshoot
 * [ADRs](docs/adr): recorded architecture decisions
 

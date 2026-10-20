@@ -18,6 +18,7 @@ from orqentis.fabric.ports import FabricClient
 from orqentis.incidents.service import IncidentService
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import DISABLED, Metrics
 from orqentis.storage.incidents import IncidentQuery
 from orqentis.topology.catalog import CatalogDiff, EstateCatalog, diff_entities
 from orqentis.topology.environment_audit import EnvironmentChangeRecorder
@@ -44,7 +45,9 @@ class CatalogRefresher:
         *,
         contracts_holder: ContractsHolder | None = None,
         recorder: EnvironmentChangeRecorder | None = None,
+        metrics: Metrics = DISABLED,
     ) -> None:
+        self._metrics = metrics
         self._fabric = fabric
         self._contracts = contracts
         self._holder = contracts_holder
@@ -72,6 +75,9 @@ class CatalogRefresher:
         try:
             contracts_changed = await self._holder.reload() if self._holder is not None else False
         except ContractsError as exc:
+            self._metrics.contracts_reload_failed(
+                type(exc).__name__
+            )  # every refused run, for an alert on a persisting one
             await self._report_reload_failure(exc)
             raise
         if self._reported_failure is not None:

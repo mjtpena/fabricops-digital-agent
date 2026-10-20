@@ -242,6 +242,16 @@ The score is capped at 0.95. Levels are HIGH (0.75 and above), MEDIUM (0.45 and 
 * Each investigation trace records step latency, every tool call (caller, latency, status), the
   agent decision (model, prompt version, token usage, rejected outputs), policy decisions and
   approval ids.
+* Metrics (`observability/metrics.py`, [ADR-0019](adr/0019-metrics-alerts-and-operations.md)): collection duration and errors per
+  collector, events ingested, incidents opened and detection latency, investigation duration and outcome, tool errors, model tokens and
+  estimated cost, pending approvals, scheduler job runs/failures/overruns, lease changes and a collection heartbeat. Components take a
+  `Metrics` object by constructor argument; with no meter provider installed every call is a no-op, and nothing is exported unless
+  Application Insights or the console exporter is configured. Attribute values are bounded (enums and our own names, never Fabric
+  text or a name the model made up).
+* A scheduled job, `audit-verify`, verifies the audit hash chain (and, with the PostgreSQL storage, its immutable anchor) and reports a
+  failure as a metric and an ERROR log line.
+* `infra/bicep/modules/monitoring.bicep` deploys an action group, six alerts (app down, restart loop, 5xx rate, collector errors,
+  collection heartbeat, audit verification failure) and a workbook; `docs/operations.md` is the guide for running it.
 
 ## 12. Extending
 
@@ -254,6 +264,7 @@ The score is capped at 0.95. Levels are HIGH (0.75 and above), MEDIUM (0.45 and 
 | An investigation workflow | Implement `InvestigationWorkflow` (`supports`, `run`) and register it in `bootstrap.py`. |
 | A storage backend | Implement the port and wire it in `bootstrap.py`; domain code is unchanged. |
 | A scheduled job | Add a `JobSpec` (name, interval, async function) in `bootstrap.py` and a `scheduler_<name>_*` setting pair (enabled, interval). |
+| A metric | Add the instrument and a typed helper to `observability/metrics.py`, document it in `docs/operations.md` (a test keeps the list complete), and take `metrics: Metrics = DISABLED` in the component that records it. |
 
 ## 13. Autonomous runtime
 

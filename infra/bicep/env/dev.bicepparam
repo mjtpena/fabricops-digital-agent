@@ -124,3 +124,18 @@ param postgresBackupRetentionDays = 7
 // needs a valid Entra token for a database role. A VNet-integrated server (postgresDelegatedSubnetId) is the
 // stricter alternative once dev has a network. Whoever runs the bootstrap step also needs a rule: postgresAllowedIpRanges.
 param postgresAllowAzureServices = true
+
+// Alerts (WS9, docs/operations.md): an action group, six alert rules and a workbook are deployed with the app.
+// Who is told is NOT in this file: parameter files never hold people or webhooks. Set these in the environment of
+// whoever deploys (the CD pipeline does not set them yet; docs/operations.md, "Alert receivers"):
+//   ALERT_EMAIL_RECEIVERS     comma-separated addresses, for example "oncall@example.com,team@example.com"
+//   ALERT_TEAMS_WEBHOOK_URI   a Teams Workflows webhook URL (a secret: keep it in the deployer's secret store)
+// Both empty: the rules still evaluate and show in the portal, but nobody is notified.
+var alertEmailList = readEnvironmentVariable('ALERT_EMAIL_RECEIVERS', '')
+// Whitespace around an address is trimmed ("a@example.com, b@example.com") and empty entries are dropped.
+param alertEmailReceivers = filter(map(split(alertEmailList, ','), address => trim(address)), address => !empty(address))
+param alertTeamsWebhookUri = readEnvironmentVariable('ALERT_TEAMS_WEBHOOK_URI', '')
+
+// A daily cap keeps the sandbox bill bounded. Reaching it stops ingestion (the heartbeat alert then fires) until the
+// next day; docs/cost.md.
+param logDailyQuotaGb = 1

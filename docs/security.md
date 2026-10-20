@@ -196,6 +196,13 @@ parameter (`auditOperatorsPrincipalId`).
 After a restore the database can be behind its anchor; that is reported until an operator records the loss with
 `orqentis audit start-epoch` ([ADR-0017](adr/0017-postgresql-system-of-record.md),
 [operations/restore.md](operations/restore.md)).
+A scheduled job (`audit-verify`, hourly) runs the same verification and, with the PostgreSQL backend, `verify_anchor()` (every anchor and epoch
+marker against the stored records, and the age of the newest anchor). A failure is a metric (`orqentis.audit.verifications{result=invalid}`)
+and an ERROR log line, and raises the severity-0 *audit verification failure* alert ([docs/operations.md](operations.md)). The job audits only a
+change of health, never every run, and never repairs the log.
+
+The target architecture ships audit records to an append-only Eventhouse table or immutable
+storage.
 
 ## 6. Tool allowlists and input validation
 
@@ -299,6 +306,9 @@ boundaries above:
   (which can contain file paths) stay in the redacted logs.
 * Catalog refreshes are audited with the ids that changed, and an empty estate is refused so a
   permission glitch cannot silently blind monitoring.
+* Silence and tampering raise alerts (heartbeat, collector errors, restart loop, audit verification failure). Metric attributes are
+  bounded and never carry Fabric text or a model-chosen name. The alert action group's receivers (email addresses, a Teams Workflows
+  webhook URL, which is a secret) are deployment-time inputs and never appear in the repository, a parameter file or an output.
 
 **Deploys and several writers.** Container Apps (single-revision mode) runs the old and the new revision
 side by side during an update, and test/prod run two replicas. With the PostgreSQL system of record

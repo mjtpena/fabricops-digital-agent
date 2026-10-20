@@ -240,3 +240,31 @@ async def test_a_follower_promoted_after_applying_a_change_still_repairs_the_sha
     diff = await container.catalog_refresher.refresh()  # now this replica leads: its own diff is empty...
     assert diff.is_empty
     assert {e.id for e in await store.list_edges()} == {"d1", "d2", "d3", "d4"}  # ...and it repaired the table
+
+
+async def test_every_refused_reload_run_is_counted_even_though_it_is_audited_once(
+    tmp_path: Path, contracts_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.support.metrics import MetricsHarness
+
+    mock_fabric(monkeypatch)
+    harness = MetricsHarness()
+    settings = make_settings(
+        tmp_path / "m",
+        fabric_mode=FabricMode.REST,
+        tenant_id="tenant-test",
+        contracts_path=contracts_file,
+        runbooks_dir=REPO / "runbooks",
+        fixtures_dir=REPO / "fixtures",
+    )
+    metered = await build_container(settings, reset=True, clock=FixedClock(NOW), metrics=harness.metrics)
+    try:
+        publish(contracts_file, b"not json")
+        for _ in range(3):
+            with pytest.raises(ContractsInvalidError):
+                await metered.catalog_refresher.refresh()
+        assert harness.total("orqentis.contracts.reload.failures", error_type="ContractsInvalidError") == 3
+        assert len(await failed_records(metered)) == 1  # one audit record for the one refused file
+    finally:
+        await metered.investigation_jobs.shutdown()
+        await metered.aclose()

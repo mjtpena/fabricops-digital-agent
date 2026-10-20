@@ -185,11 +185,13 @@ async def test_the_catalog_job_and_friends_are_configured_from_settings(tmp_path
         scheduler_collect_interval_minutes=2,
         scheduler_sla_sweep_enabled=False,
         scheduler_catalog_refresh_interval_minutes=30,
+        scheduler_audit_verify_interval_minutes=45,
     )
     c = await build_container(settings, reset=True)
     try:
         jobs = {j.name: j for j in c.scheduler.status().jobs}
-        assert set(jobs) == {"collect-detect", "auto-investigate", "sla-sweep", "catalog-refresh"}
+        assert set(jobs) == {"collect-detect", "auto-investigate", "sla-sweep", "catalog-refresh", "audit-verify"}
+        assert jobs["audit-verify"].interval_seconds == 2700 and jobs["audit-verify"].enabled
         assert jobs["collect-detect"].interval_seconds == 120 and jobs["collect-detect"].enabled
         assert jobs["sla-sweep"].enabled is False
         assert jobs["catalog-refresh"].interval_seconds == 1800

@@ -15,6 +15,7 @@ from orqentis.notifications import events as notification_events
 from orqentis.notifications.sink import NOOP_SINK, NotificationSink
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import DISABLED, Metrics
 from orqentis.storage.event_store import EventStore
 from orqentis.storage.incidents import IncidentRepository
 
@@ -60,12 +61,15 @@ class IncidentService:
         audit: AuditTrail,
         clock: Clock,
         notifications: NotificationSink = NOOP_SINK,
+        *,
+        metrics: Metrics = DISABLED,
     ) -> None:
         self._repo = repository
         self._events = event_store
         self._audit = audit
         self._clock = clock
         self._notifications = notifications
+        self._metrics = metrics
 
     @property
     def repository(self) -> IncidentRepository:
@@ -121,6 +125,13 @@ class IncidentService:
             },
         )
         _log.info("incident created", extra={"incident_id": incident_id, "category": incident.category})
+        self._metrics.incident_opened(
+            category=incident.category,
+            severity=incident.severity,
+            environment=incident.environment,
+            # Failure time (the triggering event) to now: what the detection loop adds to the time the failure took.
+            detection_latency_seconds=(now - candidate.detected_at).total_seconds(),
+        )
         self._notifications.publish(notification_events.incident_opened(incident, occurred_at=now))
         return incident
 

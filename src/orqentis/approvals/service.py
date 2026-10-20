@@ -19,6 +19,10 @@ from orqentis.incidents.service import IncidentService
 from orqentis.notifications import events as notification_events
 from orqentis.notifications.sink import NOOP_SINK, NotificationSink
 from orqentis.observability.audit import AuditTrail
+from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import DISABLED, Metrics
+
+_log = get_logger(__name__)
 
 
 class ApprovalError(Exception):
@@ -73,12 +77,14 @@ class ApprovalService:
         *,
         ttl: timedelta,
         notifications: NotificationSink = NOOP_SINK,
+        metrics: Metrics = DISABLED,
     ) -> None:
         self._provider = provider
         self._incidents = incidents
         self._audit = audit
         self._clock = clock
         self._ttl = ttl
+        self._metrics = metrics
         self._notifications = notifications
         self._locks: dict[str, tuple[asyncio.Lock, int]] = {}
 
@@ -156,6 +162,7 @@ class ApprovalService:
             # another replica): that one stands, and nothing new was requested, audited or announced.
             action.approval_id = stored.approval_id
             return stored
+        await self.publish_pending_metric()
         await self._audit.record(
             actor=requested_by.id,
             action="approval.request",
@@ -226,6 +233,7 @@ class ApprovalService:
                 incident_id=stored.incident_id,
                 details={"approval_id": approval_id, "comment": comment, "action_type": action.action_type.value},
             )
+            await self.publish_pending_metric()
             await self._sync_incident(
                 stored,
                 action,
@@ -233,6 +241,21 @@ class ApprovalService:
                 summary=f"Approval {approval_id} {stored.status.value} by {principal.id}",
             )
             return stored
+
+    async def publish_pending_metric(self) -> int:
+        """Count the open requests that have not expired and publish it as ``orqentis.approvals.pending``.
+
+        Read-only: unlike :meth:`list` this does not expire anything, so the scheduler can call it freely. Expiry by the
+        clock alone changes no stored row, which is why the collection job refreshes the gauge as well.
+        """
+        try:
+            now = self._clock.now()
+            pending = sum(1 for a in await self._provider.list(status=ApprovalStatus.PENDING) if a.expires_at >= now)
+        except Exception:
+            _log.warning("could not count pending approvals", exc_info=True)
+            return -1
+        self._metrics.set_approvals_pending(pending)
+        return pending
 
     async def save(self, approval: ApprovalRequest) -> None:
         """Unconditional write, bypassing compare-and-set. For tests; production code uses ``transition``."""
@@ -258,6 +281,8 @@ class ApprovalService:
                 details={"approval_id": approval.approval_id, "reason": reason},
             )
             cancelled.append(approval)
+        if cancelled:
+            await self.publish_pending_metric()
         return cancelled
 
     async def _expire_if_due(self, approval: ApprovalRequest) -> ApprovalRequest:
@@ -269,6 +294,7 @@ class ApprovalService:
                 # Someone decided it first: report what is stored now, not our stale copy.
                 return await self._provider.get(approval.approval_id) or approval
             approval = stored
+            await self.publish_pending_metric()
             await self._audit.record(
                 actor="system:approvals",
                 action="approval.expire",

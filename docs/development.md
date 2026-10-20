@@ -98,6 +98,19 @@ In mock mode the clock is frozen at the scenario's "now" (`ORQENTIS_CLOCK=scenar
 once; use `ORQENTIS_CLOCK=system` to see jobs recur. Tests never wait for real time: they advance a
 `FixedClock` and call `Scheduler.tick()` (see `tests/unit/test_scheduler.py`).
 
+### Looking at the metrics locally
+
+Metrics are recorded through OpenTelemetry and exported nowhere by default. To see them, print them:
+
+```bash
+ORQENTIS_OTEL_CONSOLE_EXPORTER=true orqentis demo --no-report   # spans, then the metrics on exit
+OTEL_METRIC_EXPORT_INTERVAL=5000 ORQENTIS_OTEL_CONSOLE_EXPORTER=true make serve   # every 5 seconds
+```
+
+The instruments and their attributes are listed in `docs/operations.md` and in `src/orqentis/observability/metrics.py`;
+tests read them back from an in-memory reader (`tests/support/metrics.py`). `ORQENTIS_LLM_INPUT_COST_PER_MILLION_TOKENS` /
+`ORQENTIS_LLM_OUTPUT_COST_PER_MILLION_TOKENS` turn the token counts into the estimated-cost metric.
+
 ### Running the web UI and notifications locally
 
 `make serve` serves the UI at `http://127.0.0.1:8000/ui`. A browser cannot send the `X-Orqentis-User` / `X-Orqentis-Roles` development

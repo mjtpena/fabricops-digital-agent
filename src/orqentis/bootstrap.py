@@ -10,12 +10,12 @@ import contextlib
 import inspect
 import shutil
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from orqentis.actions.gateway import ActionGateway
-from orqentis.agents.investigator import FabricOpsInvestigator
+from orqentis.agents.investigator import FabricOpsInvestigator, TokenPrices
 from orqentis.agents.reasoning import Reasoner
 from orqentis.agents.rule_based import RuleBasedReasoner
 from orqentis.approvals.provider import ApprovalProvider, LocalApprovalProvider
@@ -52,10 +52,12 @@ from orqentis.observability.anchors import AnchorableAudit, AuditAnchorStore, Au
 from orqentis.observability.audit import AuditTrail, LocalAuditLog
 from orqentis.observability.epochs import EpochMarkerStore
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import Metrics, get_metrics
 from orqentis.policies.engine import PolicyEngine
 from orqentis.reports.builder import ReportBuilder
 from orqentis.reports.publisher import ReportPublisher
 from orqentis.runbooks.catalog import RunbookCatalog
+from orqentis.runtime.audit_verification import AuditAnchorVerifier, AuditVerificationTask
 from orqentis.runtime.collection import CollectionService
 from orqentis.runtime.investigations import AutoInvestigationTask, InvestigationJobRunner
 from orqentis.runtime.job_store import JobStore
@@ -133,6 +135,7 @@ class Container:
     # Notifications (ADR-0018): started and stopped with the scheduler by the API runtime. Without a notifier it
     # discards events.
     notifications: NotificationService = NOOP_SINK
+    metrics: Metrics = field(default_factory=get_metrics)
 
     async def collect_and_detect(self) -> tuple[IngestionResult, list[Incident]]:
         """Collect, then run detection. Serialised with the scheduled collection (see ``CollectionService``)."""
@@ -166,6 +169,8 @@ class _Storage:
     anchors: AuditAnchorStore | None = None
     epochs: EpochMarkerStore | None = None  # read-only for the app: only an operator opens an epoch
     audit_head: AnchorableAudit | None = None
+    # Set with PostgreSQL: the scheduled audit verification also checks every anchor and epoch marker (verify_anchor).
+    audit_anchor_verifier: AuditAnchorVerifier | None = None
     databases: tuple[SqliteDatabase, ...] = ()
     closers: tuple[Callable[[], Awaitable[None]], ...] = ()
 
@@ -308,6 +313,7 @@ async def _build_postgres_storage(
         epochs=blob.epochs,
         contracts=blob.contracts,
         audit_head=pg.audit,
+        audit_anchor_verifier=pg.audit,
         closers=session._closers,
     )
 
@@ -415,6 +421,7 @@ async def build_container(
     write_client: FabricWriteClient | None = None,
     clock: Clock | None = None,
     notifier: Notifier | None = None,
+    metrics: Metrics | None = None,
 ) -> Container:
     """Wire the application. If anything fails part-way, what was already opened is closed again.
 
@@ -431,6 +438,7 @@ async def build_container(
             clock=clock,
             notifier=notifier,
             cleanup=cleanup,
+            metrics=metrics or get_metrics(),
         )
     except BaseException:
         for close in reversed(cleanup):
@@ -450,6 +458,7 @@ async def _build_container(
     clock: Clock | None,
     notifier: Notifier | None,
     cleanup: list[Callable[[], Awaitable[None] | None]],
+    metrics: Metrics,
 ) -> Container:
     settings.check_storage_for_environment()
     if reset:
@@ -509,8 +518,8 @@ async def _build_container(
             if await repository.get(past.incident_id) is None:
                 await repository.save(past)
 
-    notifications = build_notification_service(settings, audit, notifier=notifier)
-    incidents = IncidentService(repository, event_store, audit, clock, notifications)
+    notifications = build_notification_service(settings, audit, notifier=notifier, metrics=metrics)
+    incidents = IncidentService(repository, event_store, audit, clock, notifications, metrics=metrics)
     approvals = ApprovalService(
         storage.approvals,
         incidents,
@@ -518,6 +527,7 @@ async def _build_container(
         clock,
         ttl=timedelta(minutes=settings.approval_ttl_minutes),
         notifications=notifications,
+        metrics=metrics,
     )
     if write_client is None:
         write_client = (
@@ -548,7 +558,10 @@ async def _build_container(
         clock=clock,
     )
     registry = ToolRegistry(
-        [*build_read_tools(read_deps), *build_mutation_request_tools(gateway, catalog, clock)], audit, clock
+        [*build_read_tools(read_deps), *build_mutation_request_tools(gateway, catalog, clock)],
+        audit,
+        clock,
+        metrics=metrics,
     )
 
     primary: Reasoner
@@ -569,6 +582,11 @@ async def _build_container(
         clock=clock,
         max_tool_calls=settings.agent_max_tool_calls,
         fallback=fallback,
+        metrics=metrics,
+        token_prices=TokenPrices(
+            input_per_million=settings.llm_input_cost_per_million_tokens,
+            output_per_million=settings.llm_output_cost_per_million_tokens,
+        ),
     )
     reports = ReportPublisher(ReportBuilder(clock, timezone=settings.default_timezone), evidence_store)
     workflow = PipelineFailureWorkflow(
@@ -603,12 +621,13 @@ async def _build_container(
         clock,
         lookback=timedelta(hours=settings.collection_max_lookback_hours),
         overlap=timedelta(minutes=settings.collection_overlap_minutes),
+        metrics=metrics,
     )
     detection = DetectionEngine(incidents, clock, events=event_store)
 
     # Autonomous runtime: the scheduler is built here but started by the API lifespan (see runtime/service.py).
     detection_runner = DetectionRunner(event_store, detection, mutex=storage.mutex)
-    collection = CollectionService(ingestor, detection_runner)
+    collection = CollectionService(ingestor, detection_runner, metrics=metrics, clock=clock)
     catalog_refresher = CatalogRefresher(
         fabric,
         contracts,
@@ -620,6 +639,7 @@ async def _build_container(
         clock,
         contracts_holder=contracts_holder,
         recorder=recorder,
+        metrics=metrics,
     )
     sla_sweeper = SLASweeper(
         catalog, SLAEvaluator(event_store, clock), graph, repository, event_store, detection_runner, clock
@@ -635,6 +655,7 @@ async def _build_container(
         timeout=investigation_timeout,
         poll_interval=timedelta(seconds=settings.investigation_poll_interval_seconds),
         claim_ttl=timedelta(seconds=settings.investigation_claim_ttl_seconds),
+        metrics=metrics,
     )
     auto_investigation = AutoInvestigationTask(
         incidents,
@@ -649,8 +670,15 @@ async def _build_container(
     # Jobs receive a JobContext (lease holder + fencing token) and run inside a Fence (runtime/fencing.py): with
     # PostgreSQL every write they make is checked against the lease in its own transaction, so a deposed leader's late
     # write is refused. The local adapters belong to one process and ignore it.
+    audit_verification = AuditVerificationTask(audit, metrics=metrics, anchor=storage.audit_anchor_verifier)
+
+    # (the hash chain and, with PostgreSQL, every anchor and epoch marker; see PostgresAuditTrail.verify_anchor)
     async def collect_job(ctx: JobContext) -> None:
-        await collection.run()
+        try:
+            await collection.run()
+        finally:
+            # Expiry by the clock changes no stored row, so the gauge is refreshed here as well as on every change.
+            await approvals.publish_pending_metric()
 
     async def auto_investigate_job(ctx: JobContext) -> None:
         await auto_investigation.run()
@@ -692,6 +720,18 @@ async def _build_container(
             run_immediately=False,
         ),
     ]
+
+    async def audit_verify_job(ctx: JobContext) -> None:
+        await audit_verification.run()
+
+    job_specs.append(
+        JobSpec(
+            "audit-verify",
+            timedelta(minutes=settings.scheduler_audit_verify_interval_minutes),
+            audit_verify_job,
+            enabled=settings.scheduler_audit_verify_enabled,
+        )
+    )
     anchoring: AuditAnchorTask | None = None
     if storage.anchors is not None and storage.audit_head is not None:
         # Copies the audit chain head (sequence + hash) to an immutable blob, so that rewriting the database cannot
@@ -724,7 +764,9 @@ async def _build_container(
         start_delay=timedelta(seconds=settings.scheduler_startup_delay_seconds),
         default_job_timeout=timedelta(minutes=settings.scheduler_job_timeout_minutes),
         audit=audit,
+        metrics=metrics,
     )
+    await approvals.publish_pending_metric()
 
     # Every replica keeps its own memory (catalog, graph, contracts) current; the leader's scheduled job does it there.
     replica_sync = ReplicaCatalogSync(
@@ -774,4 +816,5 @@ async def _build_container(
         _databases=storage.databases,
         _closers=storage.closers,
         notifications=notifications,
+        metrics=metrics,
     )
