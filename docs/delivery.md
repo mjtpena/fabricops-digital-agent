@@ -343,7 +343,7 @@ gh variable set ACR_RESOURCE_ID       --repo $REPO --body "$ACR_ID"
 gh variable set ACR_PUSH_CLIENT_ID    --repo $REPO --body "$BUILD_APP_ID"          # build job: AcrPush only
 ```
 
-Environment variables:
+Environment variables (`ALERT_ACTION_GROUP_ID` is optional and has its own paragraph below the table):
 
 ```bash
 set_env_vars() {   # set_env_vars <env> <deploy app id> <API app id>
@@ -368,7 +368,24 @@ gh variable set AZURE_CLIENT_ID --repo $REPO --env release --body "$BUILD_APP_ID
 | `AZURE_RESOURCE_GROUP` | environment (`dev`, `test`, `prod`) | `rg-fabricops-<env>` | deploy |
 | `ENTRA_API_CLIENT_ID` | environment (`dev`, `test`, `prod`) | that environment's API app registration client id | `.bicepparam`, smoke test token audience |
 | `FABRIC_MODE` | environment, optional | `mock` or `rest`; overrides the default in the `.bicepparam` | `prod` first deployment (below) |
+| `ALERT_ACTION_GROUP_ID` | environment, optional | resource id of the action group the alerts notify, created and managed **outside** the pipeline (an identifier only; see *Alert receivers* below) | `.bicepparam` (`alertExistingActionGroupId`) |
 | `SMOKE_HEALTH_AUTHENTICATED` | repository or environment, optional | `true` only if `/health` is **not** excluded from Container Apps authentication (`anonymousHealthEndpoints = false`) | smoke test |
+
+**Alert receivers never go through CI.** GitHub Actions prints each step's environment in the job log, and this repository
+is public, so an email address or a webhook URL held in a variable would be published (variables are not masked in the log). The alerts therefore notify an **action group that is created and managed outside the pipeline**
+(`az monitor action-group create`), and the pipeline carries only its resource id in `ALERT_ACTION_GROUP_ID`
+(an identifier, like the other ids above):
+
+```bash
+GROUP_ID=$(az monitor action-group show -g rg-fabricops-dev -n ag-fabricops-dev-oncall --query id -o tsv)
+gh variable set ALERT_ACTION_GROUP_ID --repo $REPO --env dev --body "$GROUP_ID"
+```
+
+When it is set, the template creates and changes no action group and every alert uses that one; add people with
+`az monitor action-group update` or the portal. Unset, the template creates its own group, which then has no receivers unless
+`ALERT_EMAIL_RECEIVERS` / `ALERT_TEAMS_WEBHOOK_URI` are exported in the shell that deploys: that path is for private
+repositories and local deployments only, and the workflows never read those two (a test keeps it so). Details and the
+permissions the deploy identity needs: [operations.md](operations.md), section 4.
 
 Per-environment settings that are not variables (image reference, tags, CPU, retention, `enableWriteActions`) live in
 `infra/bicep/env/<env>.bicepparam` and change through a reviewed pull request. `prod` keeps `enableWriteActions =

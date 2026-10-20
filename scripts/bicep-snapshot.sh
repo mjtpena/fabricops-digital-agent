@@ -46,7 +46,15 @@ export CONTAINER_IMAGE="registry.invalid/orqentis-fabricops@sha256:0000000000000
 export ACR_LOGIN_SERVER="registry.invalid"
 export ACR_RESOURCE_ID="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.ContainerRegistry/registries/crexample"
 export ENTRA_API_CLIENT_ID="00000000-0000-0000-0000-000000000001"
-unset FABRIC_MODE
+unset FABRIC_MODE ALERT_EMAIL_RECEIVERS ALERT_TEAMS_WEBHOOK_URI ALERT_ACTION_GROUP_ID
+# One opt-in, for the check that the alerts use a separately managed action group (scripts/check_action_group_snapshots.py).
+if [[ -n "${SNAPSHOT_ALERT_ACTION_GROUP_ID:-}" ]]; then
+  export ALERT_ACTION_GROUP_ID="$SNAPSHOT_ALERT_ACTION_GROUP_ID"
+fi
+# ... and one to prove that receivers are refused when a separately managed action group is also given.
+if [[ -n "${SNAPSHOT_ALERT_EMAIL_RECEIVERS:-}" ]]; then
+  export ALERT_EMAIL_RECEIVERS="$SNAPSHOT_ALERT_EMAIL_RECEIVERS"
+fi
 
 subscription_id="00000000-0000-0000-0000-000000000000"
 tenant_id="00000000-0000-0000-0000-000000000002"
