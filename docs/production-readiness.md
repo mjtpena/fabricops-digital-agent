@@ -103,6 +103,7 @@ Spend to date (programme resources): ≈ USD 2: sandbox capacity ≈ 2.0 h at US
 | 2026-10-20 | Kickoff: repo verified, live tenant discovered read-only, WS0 opened, ledger created |
 | 2026-10-20 | D8: sandbox uses the existing F4 `fabricdemocap2026`, with resume/pause authorised |
 | 2026-10-20 | Wave 1 merged to `main` in dependency order: #1 WS0, #2 ledger, #3 WS3, #5 WS2, #4 WS1, #6 WS4, #7 WS5. Repository made public (B1). Base image moved to MCR Azure Linux 3 after ECR Public also rate-limited runners |
+| 2026-10-20 | `dev` deployed by CD and smoke-tested (mock mode); dev reader granted Viewer on the sandbox; OneLake table grant pending the next capacity session |
 | 2026-10-20 | Wave 2 started: owner approved B1–B9 and decided D9; WS6, WS8, WS9 sessions started; GitHub environments and rulesets, dev API registration, dev deploy and what-if identities and repository variables configured; first CD run to dev |
 | 2026-10-20 | WS5 (#7) approved pending CI; D9 raised (refresh history needs dataset Write) |
 | 2026-10-20 | All Wave 1 PRs (#3–#6) approved after review, independent red-team (WS3) and verification rounds; merges wait on CI (B1). Merge order: #1, #2, #3, #5, #4, #6 |
