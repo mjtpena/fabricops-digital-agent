@@ -81,6 +81,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106", "S108"]
 "src/orqentis/api/routers/**" = ["B008"]  # FastAPI Query()/Depends() defaults
+# Fabric notebook definitions run inside the Fabric Spark runtime, which injects the `spark` session global.
+"scripts/live-estate/definitions/*.ipynb" = ["F821"]
 
 [tool.mypy]
 python_version = "3.12"
