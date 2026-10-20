@@ -1,0 +1,19 @@
+# Keeps pinned references current. The Dockerfile pins its base image by digest and the workflows pin actions
+# by version; without an updater those pins go stale and stop receiving security fixes.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      base-image:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
