@@ -131,16 +131,6 @@ def parse_client_principal(header: str) -> ClientPrincipal:
     return ClientPrincipal(claims={k: tuple(v) for k, v in claims.items()}, name_claim=name_claim)
 
 
-def object_id_from_header(header: str | None) -> str | None:
-    """Best-effort object id for keying (rate limits). Never raises, never authenticates."""
-    if not header:
-        return None
-    try:
-        return parse_client_principal(header).object_id
-    except MalformedClientPrincipalError:
-        return None
-
-
 def _same(a: str, b: str) -> bool:
     return a.strip().lower() == b.strip().lower()
 

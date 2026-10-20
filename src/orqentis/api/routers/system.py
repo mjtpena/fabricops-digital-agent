@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Query
 
 from orqentis import __version__
-from orqentis.api.authz import CollectPrincipal, ReadPrincipal
+from orqentis.api.authz import CollectPrincipal, ReadPrincipal, VerifyPrincipal
 from orqentis.api.deps import ContainerDep
 from orqentis.api.schemas import CollectionResult, Health
 from orqentis.observability.audit import AuditRecord, AuditVerification
@@ -44,5 +44,5 @@ async def audit(
 
 
 @router.get("/audit/verify", response_model=AuditVerification)
-async def verify_audit(c: ContainerDep, _: ReadPrincipal) -> AuditVerification:
+async def verify_audit(c: ContainerDep, _: VerifyPrincipal) -> AuditVerification:
     return await c.audit.verify()

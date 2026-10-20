@@ -231,17 +231,40 @@ def test_dev_headers_mean_nothing_under_easy_auth(client: TestClient) -> None:
     assert refused.status_code == 403 and refused.json()["error"] == "APPROVAL_FORBIDDEN"
 
 
+def test_interactive_docs_and_openapi_are_not_served_under_easy_auth(client: TestClient, tmp_path: Path) -> None:
+    """Regression: they used to answer any authenticated caller, including one with no FabricOps role."""
+    for headers in (NO_ROLE, OPERATOR, AUTOMATION, {}):
+        for path in ("/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"):
+            assert client.get(path, headers=headers).status_code == 404, path
+    # Locally they stay available for development.
+    with TestClient(create_app(make_settings(tmp_path))) as local:
+        assert local.get("/openapi.json").status_code == 200
+        assert local.get("/docs").status_code == 200
+
+
 def test_missing_principal_is_401_and_health_stays_open(client: TestClient) -> None:
     assert client.get("/incidents").status_code == 401
     assert client.post("/telemetry/collect").status_code == 401
     assert client.get("/health").status_code == 200
 
 
-def test_read_role_enforcement_can_be_turned_off_under_easy_auth(
+def test_turning_off_the_read_role_opens_reads_only_never_collection_or_investigation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spy: SpyWriteClient
 ) -> None:
+    """Regression: api_require_read_role=false used to switch off the roles of collect and investigate as well."""
+    role_less_app = ea.header(ea.app_token("oid-app"))
     with build_client(tmp_path, monkeypatch, spy, api_require_read_role=False) as client:
         assert client.get("/incidents", headers=NO_ROLE).status_code == 200
+        assert client.get("/incidents", headers=role_less_app).status_code == 200
+        incident_id = client.get("/incidents", headers=OPERATOR).json()[0]["incident_id"]
+        for headers in (NO_ROLE, role_less_app, READER):
+            collect = client.post("/telemetry/collect", headers=headers)
+            investigate_ = client.post(f"/incidents/{incident_id}/investigate", headers=headers)
+            assert collect.status_code == 403 and collect.json()["error"] == "ROLE_REQUIRED"
+            assert investigate_.status_code == 403 and investigate_.json()["error"] == "ROLE_REQUIRED"
+        assert client.post("/telemetry/collect", headers=AUTOMATION).status_code == 200
+        approvals = client.get("/approvals", headers=OPERATOR).json()
+        assert approvals == []  # the role-less callers opened nothing
 
 
 def test_read_role_enforcement_can_be_turned_on_under_dev_headers(tmp_path: Path) -> None:
@@ -262,6 +285,16 @@ def test_read_role_switch_is_read_from_the_environment(tmp_path: Path, monkeypat
     assert easy.read_role_required is False
 
 
+def test_action_roles_are_always_on_under_easy_auth(tmp_path: Path) -> None:
+    easy = {"api_auth_mode": ApiAuthMode.EASY_AUTH}
+    assert make_settings(tmp_path, **easy).action_roles_required is True
+    assert make_settings(tmp_path, **easy, api_require_read_role=False).action_roles_required is True
+    assert make_settings(tmp_path, **easy, api_require_read_role=True).action_roles_required is True
+    # Locally the production role model is opt-in, so demos and existing examples keep working.
+    assert make_settings(tmp_path).action_roles_required is False
+    assert make_settings(tmp_path, api_require_read_role=True).action_roles_required is True
+
+
 def test_read_role_default_follows_the_auth_mode(tmp_path: Path) -> None:
     assert make_settings(tmp_path).read_role_required is False
     assert make_settings(tmp_path, api_auth_mode=ApiAuthMode.EASY_AUTH).read_role_required is True
@@ -274,11 +307,7 @@ def test_read_role_default_follows_the_auth_mode(tmp_path: Path) -> None:
 # ---- structural guard: a new route cannot silently skip authentication or the human-only check ---------------
 
 PUBLIC_PATHS = {"/health", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
-GUARDED_MUTATIONS = {
-    authz.require_collect,
-    authz.require_investigate,
-    authz.require_decider,
-}
+GUARDED_MUTATIONS = {authz.require_collect, authz.require_investigate, authz.require_decider}
 DECIDING_ROUTES = {
     "/approvals/{approval_id}/approve",
     "/approvals/{approval_id}/reject",
@@ -316,6 +345,8 @@ def test_every_route_authenticates_and_every_mutation_is_role_guarded() -> None:
             continue
         calls = dependency_calls(route)
         assert current_principal in calls, f"{route.path} does not authenticate"
+        # A bare CurrentPrincipal authenticates but applies no role model: every route needs an authz guard.
+        assert calls & set(authz.ROUTE_GUARDS), f"{route.methods} {route.path} has no authz guard"
         if route.methods & {"POST", "PUT", "PATCH", "DELETE"}:
             assert calls & GUARDED_MUTATIONS, f"{route.methods} {route.path} has no role guard"
         if route.path in DECIDING_ROUTES:

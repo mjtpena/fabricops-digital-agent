@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     api_auth_mode: ApiAuthMode = ApiAuthMode.DEV_HEADERS
     # Roles for reads. None (default): required under easy_auth, not enforced under dev_headers (local only).
     # With enforcement every API call needs a FabricOps role (Reader, Automation, Operator or PlatformAdmin).
+    # Collection and investigation always need their roles under easy_auth, whatever this says.
     api_require_read_role: bool | None = None
     # Request limits (per replica, in memory). Bodies over the limit get 413. Mutating calls and the expensive
     # ones (telemetry collection, investigations, audit verification) are limited per principal and get 429.
@@ -132,9 +133,19 @@ class Settings(BaseSettings):
 
     @property
     def read_role_required(self) -> bool:
+        """Whether read endpoints need a FabricOps role (default: yes under easy_auth, no under dev_headers)."""
         if self.api_require_read_role is not None:
             return self.api_require_read_role
         return self.api_auth_mode is ApiAuthMode.EASY_AUTH
+
+    @property
+    def action_roles_required(self) -> bool:
+        """Whether collection and investigation need their roles. Under easy_auth this cannot be turned off.
+
+        ``api_require_read_role=false`` only opens the read endpoints. Locally (dev_headers) the roles apply
+        when ``api_require_read_role=true`` asks for the production role model.
+        """
+        return self.api_auth_mode is ApiAuthMode.EASY_AUTH or self.api_require_read_role is True
 
     @property
     def event_store_path(self) -> Path:

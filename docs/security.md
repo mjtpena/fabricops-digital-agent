@@ -82,16 +82,22 @@ roles only to people. Both are enforced by the checks above even when Entra is m
 | `FabricOps.Operator` | yes | yes | yes | LOW/MEDIUM risk, human only |
 | `FabricOps.PlatformAdmin` | yes | yes | yes | HIGH_RISK, human only |
 
-Under Easy Auth a caller needs one of these roles for every endpoint except `/health`
-(`ORQENTIS_API_REQUIRE_READ_ROLE`, on by default under `easy_auth`). A principal with no role gets 403.
+Under Easy Auth a caller needs one of these roles for every endpoint except `/health`. A principal with no role
+gets 403. `ORQENTIS_API_REQUIRE_READ_ROLE=false` opens the plain read endpoints only: collection, investigation and
+audit verification keep their roles, and approving stays human-only. The interactive docs and `/openapi.json` are
+not served under Easy Auth (they would answer callers with no role).
 
 ### 2.3 Request limits
 
 * Bodies over `ORQENTIS_API_MAX_BODY_BYTES` (64 KiB by default) get **413**, both when `Content-Length`
   declares too much and when a chunked body grows past the limit.
-* Mutating calls (`ORQENTIS_API_RATE_LIMIT_MUTATING_PER_MINUTE`, 30) and expensive ones, telemetry
+* Approve, reject and execute (`ORQENTIS_API_RATE_LIMIT_MUTATING_PER_MINUTE`, 30) and expensive calls, telemetry
   collection, investigations and audit verification (`ORQENTIS_API_RATE_LIMIT_EXPENSIVE_PER_MINUTE`, 6),
-  are limited per principal and answer **429** with `Retry-After`. Reads are not limited by the app.
+  are limited per **authenticated** principal and answer **429** with `Retry-After`. The budget is charged after
+  the caller has been authenticated and keyed on the principal id from the validated claims, never on a raw header,
+  so a forged `X-MS-CLIENT-PRINCIPAL` on `/health` or an unrouted path cannot drain anyone's budget. Refused
+  attempts are charged too, which bounds the audit records an authenticated caller can cause. Reads are not
+  limited by the app. Unauthenticated traffic is rejected by Easy Auth before it reaches the app.
 * Limits live in memory per replica (the MVP runs one). A global limit, WAF and edge logging belong
   in Front Door or API Management.
 
@@ -190,6 +196,12 @@ to keep these defences under test.
   the host volume. The target is Eventhouse plus OneLake, with Entra ID RBAC.
 * `easy_auth` trusts the front end's header. Do not expose the container without the built-in
   authentication layer.
+* **The app trusts `X-MS-CLIENT-PRINCIPAL` and does not validate bearer tokens itself.** If an externally reachable
+  app ever runs without Container Apps authentication (the first deployment before the auth config applies,
+  authentication disabled by mistake, a platform fault), a forged header can name a `FabricOps.PlatformAdmin` and be
+  believed. Deploy with `ingressMode = 'internal'` first, verify authentication, then switch (infra README, "First
+  deployment and the Easy Auth window"), and check in every deployment that tokenless and forged-header requests get 401.
+  In-app token validation is the follow-up that removes this dependency (ADR-0015).
 * Rate limits are per replica and in memory, and plain reads are not limited (see 2.3). The default ingress is
   external (authenticated); use `allowedIpRanges` or `vnet` where the API must not be internet-reachable.
 * Easy Auth's claim-name mapping and the `sub == oid` behaviour of app tokens are handled from documentation

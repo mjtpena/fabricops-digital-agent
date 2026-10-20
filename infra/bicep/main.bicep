@@ -14,7 +14,7 @@
 //   * Container Apps environment (logs to Log Analytics) and the FabricOps Container App, protected by
 //     Container Apps built-in authentication (Microsoft Entra ID). The app trusts X-MS-CLIENT-PRINCIPAL,
 //     which only that front end can set. Exposure is chosen with ingressMode (default: external and
-//     authenticated; see README "Network exposure").
+//     authenticated; see README "Network exposure", including the safe first deployment).
 //   * Optional: Cognitive Services OpenAI User for the reader identity on an existing Azure OpenAI account.
 //
 // No credentials are written anywhere: identities are managed, the Application Insights connection string
@@ -107,15 +107,15 @@ param azureOpenAiResourceId string = ''
 
 // ------------------------------------------------------------------------------------------------- network + auth
 
-@description('How the API is exposed. "externalAuthenticated" (default): public endpoint, every request must carry a valid Entra ID token (401 otherwise), optionally limited to allowedIpRanges. "vnet": internal environment with no public IP, reachable from the VNet (requires infrastructureSubnetId). "internal": reachable only from other apps in the Container Apps environment. Authentication is on in every mode.')
+@description('How the API is exposed. "externalAuthenticated" (default when this and externalIngress are both unset): public endpoint, every request must carry a valid Entra ID token (401 otherwise), optionally limited to allowedIpRanges. "vnet": internal environment with no public IP, reachable from the VNet (requires infrastructureSubnetId). "internal": reachable only from other apps in the Container Apps environment. Authentication is on in every mode. Setting this together with the deprecated externalIngress fails the deployment.')
 @allowed([
   'externalAuthenticated'
   'vnet'
   'internal'
 ])
-param ingressMode string = 'externalAuthenticated'
+param ingressMode string?
 
-@description('DEPRECATED, use ingressMode. When set it overrides ingressMode so that existing parameter files keep their exact behaviour: false = "internal", true = "externalAuthenticated" (or "vnet" when infrastructureSubnetId is set). Remove it from your parameter files.')
+@description('DEPRECATED, use ingressMode. When set (and ingressMode is not) it keeps the old behaviour so that existing parameter files do not change: false = "internal", true = "externalAuthenticated" (or "vnet" when infrastructureSubnetId is set). Setting both this and ingressMode fails the deployment, so a stale value cannot silently override an explicit mode. Remove it from your parameter files.')
 param externalIngress bool?
 
 @description('Optional: resource id of a subnet (delegated to Microsoft.App/environments, /27 or larger) for an internal, VNet-integrated environment with no public endpoint. Required for ingressMode "vnet", must be empty for "externalAuthenticated" (a mismatch fails the deployment), optional for "internal".')
@@ -123,6 +123,9 @@ param infrastructureSubnetId string = ''
 
 @description('Optional IPv4 CIDR ranges (e.g. 203.0.113.0/24) allowed to reach the ingress. Empty: no address restriction. When set, every other address is denied before authentication; GitHub-hosted runners and other callers outside the ranges cannot connect.')
 param allowedIpRanges array = []
+
+@description('Optional: application (client) ids that may call the API, checked by Easy Auth against the token\'s azp/appid. Empty (default): any client application can call as long as the token is valid for this API. Recommended in production: list the clients people use (e.g. the UI, Azure CLI) and the automation identities\' client ids, so a third-party application cannot act for a user who consents to it.')
+param allowedClientApplications array = []
 
 @description('Exclude /health and /health/ready from authentication so uptime checks and smoke tests can call them without a token. They return only the version and mode flags and read no identity. false: every path requires a token.')
 param anonymousHealthEndpoints bool = true
@@ -134,10 +137,12 @@ param apiMaxBodyBytes int = 65536
 
 @description('ORQENTIS_API_RATE_LIMIT_MUTATING_PER_MINUTE: per principal and replica, for approve/reject/execute and other mutating calls (429 + Retry-After beyond it).')
 @minValue(1)
+@maxValue(10000)
 param apiRateLimitMutatingPerMinute int = 30
 
 @description('ORQENTIS_API_RATE_LIMIT_EXPENSIVE_PER_MINUTE: per principal and replica, for telemetry collection, investigations and audit verification.')
 @minValue(1)
+@maxValue(10000)
 param apiRateLimitExpensivePerMinute int = 6
 
 @description('Application (client) id of the Microsoft Entra app registration that represents the FabricOps API (defines the FabricOps.Operator, FabricOps.PlatformAdmin, FabricOps.Automation and FabricOps.Reader app roles).')
@@ -201,16 +206,19 @@ var openAiIdSegments = split(
 
 var appInsightsSecretName = 'appinsights-connection-string'
 
-// Ingress mode, after applying the deprecated externalIngress override.
+// Ingress mode: ingressMode, or the deprecated externalIngress mapped to it, or the default.
 var legacyIngressMode = (externalIngress ?? false)
   ? (empty(infrastructureSubnetId) ? 'externalAuthenticated' : 'vnet')
   : 'internal'
-var effectiveIngressMode = externalIngress == null ? ingressMode : legacyIngressMode
-// "vnet" needs a subnet and "externalAuthenticated" must not have one. A mismatch would silently give a different
-// exposure than the one asked for, so it feeds an invalid subnet id into the environment and the deployment fails.
-var ingressMisconfigured = (effectiveIngressMode == 'vnet' && empty(infrastructureSubnetId)) || (effectiveIngressMode == 'externalAuthenticated' && !empty(infrastructureSubnetId))
+var effectiveIngressMode = externalIngress == null ? (ingressMode ?? 'externalAuthenticated') : legacyIngressMode
+// Fail the deployment instead of silently choosing an exposure that differs from what was asked for:
+// * both ingressMode and the deprecated externalIngress are set (a stale externalIngress = true must not
+//   override an explicit ingressMode = 'internal');
+// * "vnet" without a subnet, or "externalAuthenticated" with one.
+// The failure is an invalid subnet id fed into the environment (the Bicep language has no assert).
+var ingressMisconfigured = (externalIngress != null && ingressMode != null) || (effectiveIngressMode == 'vnet' && empty(infrastructureSubnetId)) || (effectiveIngressMode == 'externalAuthenticated' && !empty(infrastructureSubnetId))
 var environmentSubnetId = ingressMisconfigured
-  ? 'INVALID-ingressMode-${effectiveIngressMode}-does-not-match-infrastructureSubnetId'
+  ? 'INVALID-conflicting-ingressMode-externalIngress-infrastructureSubnetId-see-README-Network-exposure'
   : infrastructureSubnetId
 var ipSecurityRestrictions = [
   for (range, index) in allowedIpRanges: {
@@ -577,6 +585,11 @@ resource authConfig 'Microsoft.App/containerApps/authConfigs@2024-03-01' = {
             entraClientId
             'api://${entraClientId}'
           ]
+          defaultAuthorizationPolicy: empty(allowedClientApplications)
+            ? null
+            : {
+                allowedApplications: allowedClientApplications
+              }
         }
       }
     }

@@ -1,46 +1,45 @@
-"""Request guards: body size limit (413) and per-principal rate limiting (429 + Retry-After).
+"""Request guards: body size limit (413), per-principal rate limits (429 + Retry-After) and docs lockdown.
 
-Both are pure ASGI middleware, registered by ``install_api_hardening`` (one line in ``create_app``).
-
-* **Body size.** A declared ``Content-Length`` over the limit is refused before the app runs. Chunked or
-  under-declared bodies are counted as the app reads them, and the read fails with 413 at the limit.
-* **Rate limit.** Token bucket per principal and request class. Mutating calls (any non-safe method) share
-  one budget, and the expensive ones (telemetry collection, investigations, audit verification) have a
-  smaller one. Plain reads are not limited. Callers without an identity share one bucket per client address.
+* **Body size** (pure ASGI middleware, ``BodyLimitMiddleware``). A declared ``Content-Length`` over the limit is
+  refused before the app runs. Chunked or under-declared bodies are counted as the app reads them, and the
+  read fails with 413 at the limit.
+* **Rate limits** (``RateLimits``, consulted by the route guards in ``orqentis.api.authz``). Token bucket per
+  *authenticated* principal and request class. Mutating calls (approve, reject, execute) share one budget and
+  the expensive ones (telemetry collection, investigations, audit verification) have a smaller one. Plain reads
+  are not limited. The limiter runs only after ``current_principal`` has authenticated the caller, so it never
+  keys on an identity that was not validated. In particular, a forged ``X-MS-CLIENT-PRINCIPAL`` on a path Easy
+  Auth does not authenticate (``/health``) or on an unrouted path cannot consume anyone's budget, because no
+  route there reads it. Traffic without a valid identity is Easy Auth's job (401 before the app) and is not
+  limited here.
 * **Per replica.** State is in memory. With N replicas the effective limit is N times the setting. The MVP
   runs a single replica (SQLite stores), so this is exact today.
+* **Docs lockdown.** Under Easy Auth the interactive docs and the OpenAPI document are removed. They would
+  answer any authenticated caller, including one with no FabricOps role.
 
-The principal key is read from the header Easy Auth set (``X-MS-CLIENT-PRINCIPAL``) or, under
-``dev_headers``, from ``X-Orqentis-User``. It is only a bucket key. Authentication still happens in
-``orqentis.api.auth``.
+``install_api_hardening`` wires all of it with one call in ``create_app``.
 """
 
 from __future__ import annotations
 
 import math
-import re
 import time
 from collections.abc import Callable
-from typing import Final
+from typing import Final, Literal
 
 from fastapi import FastAPI
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from orqentis.api.claims import object_id_from_header
 from orqentis.api.errors import ApiError, api_error_handler, error_response
 from orqentis.config.settings import ApiAuthMode, Settings
 from orqentis.observability.logging import get_logger
 
 _log = get_logger(__name__)
 
-_SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
-_EXPENSIVE: Final = (
-    ("POST", re.compile(r"^/telemetry/collect/?$")),
-    ("POST", re.compile(r"^/incidents/[^/]+/investigate/?$")),
-    ("GET", re.compile(r"^/audit/verify/?$")),
-)
+RequestClass = Literal["mutating", "expensive"]
+
+_DOC_PATHS: Final = frozenset({"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"})
 _MAX_KEY_LENGTH = 256
 _MAX_BUCKETS = 10_000
 
@@ -78,43 +77,46 @@ class TokenBucketLimiter:
             del self._buckets[key]
 
 
-def _request_class(method: str, path: str) -> str | None:
-    for expensive_method, pattern in _EXPENSIVE:
-        if method == expensive_method and pattern.match(path):
-            return "expensive"
-    return None if method in _SAFE_METHODS else "mutating"
+class RateLimits:
+    """The per-principal budgets of one app instance. ``check`` raises 429 when a budget is spent."""
 
-
-def _principal_key(headers: Headers, scope: Scope, auth_mode: ApiAuthMode) -> str:
-    identity: str | None
-    if auth_mode is ApiAuthMode.EASY_AUTH:
-        identity = object_id_from_header(headers.get("x-ms-client-principal"))
-    else:
-        identity = (headers.get("x-orqentis-user") or "dev-user@localhost").strip()
-    if identity:
-        return f"principal:{identity[:_MAX_KEY_LENGTH]}"
-    client = scope.get("client")
-    return f"anonymous:{client[0] if client else 'unknown'}"
-
-
-class RequestGuardMiddleware:
-    def __init__(self, app: ASGIApp, *, settings: Settings, clock: Callable[[], float] = time.monotonic) -> None:
-        self._app = app
-        self._max_body = settings.api_max_body_bytes
-        self._auth_mode = settings.api_auth_mode
-        self._limiters: dict[str, TokenBucketLimiter] | None = None
+    def __init__(self, settings: Settings, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._limiters: dict[RequestClass, TokenBucketLimiter] | None = None
         if settings.api_rate_limit_enabled:
             self._limiters = {
                 "mutating": TokenBucketLimiter(settings.api_rate_limit_mutating_per_minute, clock=clock),
                 "expensive": TokenBucketLimiter(settings.api_rate_limit_expensive_per_minute, clock=clock),
             }
 
+    def check(self, request_class: RequestClass, principal_id: str) -> None:
+        if self._limiters is None:
+            return
+        wait = self._limiters[request_class].acquire(principal_id[:_MAX_KEY_LENGTH])
+        if wait <= 0.0:
+            return
+        retry_after = max(1, math.ceil(wait))
+        _log.warning(
+            "rate limit exceeded",
+            extra={"request_class": request_class, "principal_id": principal_id, "retry_after_seconds": retry_after},
+        )
+        raise ApiError(
+            429,
+            "RATE_LIMITED",
+            f"Too many {request_class} requests; retry in {retry_after} s",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+class BodyLimitMiddleware:
+    def __init__(self, app: ASGIApp, *, max_body_bytes: int) -> None:
+        self._app = app
+        self._max_body = max_body_bytes
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
-        headers = Headers(scope=scope)
-        refusal = self._check_declared_size(headers) or self._check_rate(headers, scope)
+        refusal = self._check_declared_size(Headers(scope=scope))
         if refusal is not None:
             await refusal(scope, receive, send)
             return
@@ -134,28 +136,6 @@ class RequestGuardMiddleware:
             return error_response(413, "PAYLOAD_TOO_LARGE", f"Request body exceeds {self._max_body} bytes")
         return None
 
-    def _check_rate(self, headers: Headers, scope: Scope) -> JSONResponse | None:
-        if self._limiters is None:
-            return None
-        request_class = _request_class(scope["method"], scope["path"])
-        if request_class is None:
-            return None
-        key = _principal_key(headers, scope, self._auth_mode)
-        wait = self._limiters[request_class].acquire(key)
-        if wait <= 0.0:
-            return None
-        retry_after = max(1, math.ceil(wait))
-        _log.warning(
-            "rate limit exceeded",
-            extra={"request_class": request_class, "principal_key": key, "retry_after_seconds": retry_after},
-        )
-        return error_response(
-            429,
-            "RATE_LIMITED",
-            f"Too many {request_class} requests; retry in {retry_after} s",
-            headers={"Retry-After": str(retry_after)},
-        )
-
     def _counting(self, receive: Receive) -> Receive:
         received = 0
 
@@ -172,6 +152,9 @@ class RequestGuardMiddleware:
 
 
 def install_api_hardening(app: FastAPI, settings: Settings) -> None:
-    """Register the request guards and the handler for coded API errors."""
+    """Register the body limit, the rate limits and the handler for coded API errors."""
     app.add_exception_handler(ApiError, api_error_handler)
-    app.add_middleware(RequestGuardMiddleware, settings=settings)
+    app.add_middleware(BodyLimitMiddleware, max_body_bytes=settings.api_max_body_bytes)
+    app.state.rate_limits = RateLimits(settings)
+    if settings.api_auth_mode is ApiAuthMode.EASY_AUTH:
+        app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) not in _DOC_PATHS]

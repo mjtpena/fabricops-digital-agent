@@ -27,7 +27,6 @@ from orqentis.observability.logging import get_logger
 
 _log = get_logger(__name__)
 
-OID_CLAIM = "http://schemas.microsoft.com/identity/claims/objectidentifier"
 _RESERVED_PREFIXES = ("agent:", "system:")
 
 

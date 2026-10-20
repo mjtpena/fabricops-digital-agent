@@ -12,7 +12,7 @@ from starlette.types import Message, Receive, Scope, Send
 
 from orqentis.api.app import create_app
 from orqentis.api.errors import ApiError
-from orqentis.api.middleware import RequestGuardMiddleware, TokenBucketLimiter
+from orqentis.api.middleware import BodyLimitMiddleware, RateLimits, TokenBucketLimiter
 from orqentis.config.settings import ApiAuthMode
 from tests.conftest import make_settings
 from tests.support import easy_auth as ea
@@ -66,7 +66,7 @@ def test_limit_applies_to_every_method_and_path(small_body_client: TestClient) -
 
 
 async def run_middleware(
-    middleware: RequestGuardMiddleware,
+    middleware: BodyLimitMiddleware,
     *,
     method: str = "POST",
     path: str = "/x",
@@ -105,14 +105,14 @@ async def drain_app(scope: Scope, receive: Receive, send: Send) -> None:
 
 
 async def test_invalid_content_length_is_400(tmp_path: Path) -> None:
-    middleware = RequestGuardMiddleware(drain_app, settings=make_settings(tmp_path))
+    middleware = BodyLimitMiddleware(drain_app, max_body_bytes=65_536)
     for value in (b"abc", b"-1", b"1.5"):
         status, _ = await run_middleware(middleware, headers=[(b"content-length", value)])
         assert status == 400, value
 
 
 async def test_under_declared_body_is_stopped_while_it_is_read(tmp_path: Path) -> None:
-    middleware = RequestGuardMiddleware(drain_app, settings=make_settings(tmp_path, api_max_body_bytes=1024))
+    middleware = BodyLimitMiddleware(drain_app, max_body_bytes=1024)
     with pytest.raises(ApiError) as refused:
         await run_middleware(middleware, headers=[(b"content-length", b"10")], body=[b"a" * 600, b"b" * 600])
     assert refused.value.status_code == 413
@@ -124,7 +124,7 @@ async def test_non_http_scopes_pass_through(tmp_path: Path) -> None:
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         seen.append(scope["type"])
 
-    middleware = RequestGuardMiddleware(app, settings=make_settings(tmp_path))
+    middleware = BodyLimitMiddleware(app, max_body_bytes=65_536)
     await middleware({"type": "lifespan"}, None, None)  # type: ignore[arg-type]
     assert seen == ["lifespan"]
 
@@ -188,14 +188,41 @@ def test_easy_auth_rate_limit_keys_on_the_validated_principal_not_on_spoofable_h
         assert client.post(APPROVE, headers=other).status_code == 404
 
 
-def test_unauthenticated_callers_share_one_bucket_and_cannot_starve_others(tmp_path: Path) -> None:
+def test_a_forged_principal_header_cannot_drain_anyones_budget(tmp_path: Path) -> None:
+    """Regression: the limiter used to key on the raw header, including on paths Easy Auth does not authenticate."""
+    victim = ea.header(ea.user_access_token("oid-victim", ["FabricOps.Operator"]))
+    forged = ea.header([(ea.OID_URI, "oid-victim")])  # only the victim's object id
+    settings = make_settings(tmp_path, api_auth_mode=ApiAuthMode.EASY_AUTH, api_rate_limit_mutating_per_minute=3)
+    with TestClient(create_app(settings)) as client:
+        for path in ("/health", "/health/ready", "/nope", "/openapi.json", "/incidents"):
+            for method in ("post", "put", "delete"):
+                getattr(client, method)(path, headers=forged)
+        for _ in range(10):
+            assert client.post("/health", headers=forged).status_code == 405
+        # The victim's whole budget is intact.
+        assert [client.post(APPROVE, headers=victim).status_code for _ in range(3)] == [404, 404, 404]
+        assert client.post(APPROVE, headers=victim).status_code == 429
+
+
+def test_unauthenticated_requests_never_consume_a_budget(tmp_path: Path) -> None:
     settings = make_settings(tmp_path, api_auth_mode=ApiAuthMode.EASY_AUTH, api_rate_limit_mutating_per_minute=2)
     operator = ea.header(ea.user_access_token("oid-operator", ["FabricOps.Operator"]))
     with TestClient(create_app(settings)) as client:
-        assert [client.post(APPROVE).status_code for _ in range(2)] == [401, 401]
-        assert client.post(APPROVE).status_code == 429
-        assert client.post(APPROVE, headers={"X-MS-CLIENT-PRINCIPAL": "%%%"}).status_code == 429
-        assert client.post(APPROVE, headers=operator).status_code == 404
+        assert [client.post(APPROVE).status_code for _ in range(10)] == [401] * 10
+        assert [client.post(APPROVE, headers={"X-MS-CLIENT-PRINCIPAL": "%%%"}).status_code for _ in range(5)] == [
+            401
+        ] * 5
+        ambiguous = ea.header(ea.roles_without_scp_only("oid-operator", ["FabricOps.Operator"]))
+        assert [client.post(APPROVE, headers=ambiguous).status_code for _ in range(5)] == [403] * 5
+        assert [client.post(APPROVE, headers=operator).status_code for _ in range(2)] == [404, 404]
+        assert client.post(APPROVE, headers=operator).status_code == 429
+
+
+def test_refused_authenticated_callers_are_limited_too_so_they_cannot_flood_the_audit_log(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, api_auth_mode=ApiAuthMode.EASY_AUTH, api_rate_limit_mutating_per_minute=2)
+    automation = ea.header(ea.app_token("oid-scheduler", ["FabricOps.Automation"]))
+    with TestClient(create_app(settings)) as client:
+        assert [client.post(APPROVE, headers=automation).status_code for _ in range(4)] == [403, 403, 429, 429]
 
 
 def test_limit_settings_are_validated() -> None:
@@ -255,14 +282,22 @@ def test_token_bucket_memory_is_bounded_under_a_flood_of_distinct_keys(monkeypat
         assert len(limiter._buckets) <= 100
 
 
-async def test_retry_after_matches_the_refill_time_and_recovers(tmp_path: Path) -> None:
+def test_rate_limits_report_retry_after_from_the_refill_time_and_recover(tmp_path: Path) -> None:
     clock = FakeClock()
-    settings = make_settings(tmp_path, api_rate_limit_mutating_per_minute=2)
-    middleware = RequestGuardMiddleware(drain_app, settings=settings, clock=clock)
-    headers = [(b"x-orqentis-user", b"olivia@contoso.com")]
-    assert (await run_middleware(middleware, headers=headers))[0] == 200
-    assert (await run_middleware(middleware, headers=headers))[0] == 200
-    status, response_headers = await run_middleware(middleware, headers=headers)
-    assert status == 429 and response_headers["retry-after"] == "30"
+    limits = RateLimits(make_settings(tmp_path, api_rate_limit_mutating_per_minute=2), clock=clock)
+    limits.check("mutating", "oid-1")
+    limits.check("mutating", "oid-1")
+    with pytest.raises(ApiError) as limited:
+        limits.check("mutating", "oid-1")
+    assert limited.value.status_code == 429 and limited.value.code == "RATE_LIMITED"
+    assert limited.value.headers == {"Retry-After": "30"}
+    limits.check("mutating", "oid-2")  # another principal
+    limits.check("expensive", "oid-1")  # another request class
     clock.now += 30
-    assert (await run_middleware(middleware, headers=headers))[0] == 200
+    limits.check("mutating", "oid-1")
+
+
+def test_disabled_rate_limits_never_refuse(tmp_path: Path) -> None:
+    limits = RateLimits(make_settings(tmp_path, api_rate_limit_enabled=False, api_rate_limit_mutating_per_minute=1))
+    for _ in range(50):
+        limits.check("mutating", "oid-1")

@@ -85,11 +85,14 @@ signal, a conflict or a missing pairwise subject is present.
 roles only.
 
 **Do read endpoints need a role?** Yes, by default under Easy Auth (`ORQENTIS_API_REQUIRE_READ_ROLE`, default:
-on for `easy_auth`, off for `dev_headers`). Before, any authenticated caller could read, and the only gate was
+on for `easy_auth`, off for `dev_headers`). The switch governs plain reads only. Collection, investigation and audit
+verification **always** need their roles under Easy Auth, so turning reads open cannot let a role-less caller
+open approval requests or trigger Fabric reads. Before, any authenticated caller could read, and the only gate was
 `appRoleAssignmentRequired=true` on the enterprise application, which the template cannot enforce. A caller
 with no FabricOps role (misconfigured assignment, or a default-access assignment) would have read incidents,
 evidence and the audit trail. Requiring a role makes the deployment safe even if that setting is wrong.
-`/health` stays public. Collection needs Automation, Operator or PlatformAdmin; investigations need Operator
+`/health` stays public. The interactive docs and `/openapi.json` are not served under Easy Auth: FastAPI serves
+them without a dependency, so they would answer any authenticated caller, role or not. Collection needs Automation, Operator or PlatformAdmin; investigations need Operator
 or PlatformAdmin (they run the LLM and open approvals); Reader reads only. With enforcement off, behaviour is
 as before (any authenticated caller), which local development and the demo rely on.
 
@@ -101,21 +104,27 @@ as before (any authenticated caller), which local development and the demo rely 
   comment). A declared `Content-Length` over the limit is refused with 413 before the app runs. Chunked or
   under-declared bodies are counted while read and stop with 413 (an `HTTPException` subclass, because FastAPI
   rewrites any other exception raised while reading the body to 400). An invalid `Content-Length` is 400.
-* **Rate.** Token bucket per principal and request class, in memory. `mutating` (any non-safe method, default
-  30 per minute) and `expensive` (collection, investigation, audit verification, default 6 per minute). Beyond
-  the budget: 429 with `Retry-After` (whole seconds until a token is available). Plain reads are not limited.
-  The key is the object id from the validated principal (or `X-Orqentis-User` under `dev_headers`), not any
-  other header, so a caller cannot dodge its budget by varying headers. Callers without an identity share a
-  bucket per client address, so they cannot starve authenticated ones.
+* **Rate.** Token bucket per *authenticated* principal and request class, in memory. `mutating` (approve, reject,
+  execute; default 30 per minute) and `expensive` (collection, investigation, audit verification; default 6 per
+  minute). Beyond the budget: 429 with `Retry-After` (whole seconds until a token is available). Plain reads
+  are not limited. The budget is charged by the route guards (`orqentis.api.authz`) after `current_principal`
+  and before the role check, keyed on the principal id from the validated claims. It is **not** a middleware
+  keyed on the raw header: a first version did that and a forged `X-MS-CLIENT-PRINCIPAL` sent to `/health`
+  (which Easy Auth does not authenticate) could drain a named approver's budget. Refused attempts are charged
+  too, so a caller without the right role cannot flood the audit log. Requests without a valid identity are
+  rejected by Easy Auth before the app and are not limited by it.
 * **Per replica.** State is in memory, so the effective limit is N times the setting with N replicas. The MVP
   runs one replica (SQLite stores). A global limit belongs at the edge (Front Door, API Management).
 
 ### 4. Ingress modes in Bicep
 
 `ingressMode` replaces the boolean: `externalAuthenticated` (default), `vnet`, `internal`. Authentication is on
-in every mode. `allowedIpRanges` adds an address allow list (`ipSecurityRestrictions`). The deprecated
-`externalIngress` still works and overrides the mode, so existing parameter files behave exactly as before.
-A mode that contradicts `infrastructureSubnetId` fails the deployment instead of silently changing the exposure.
+in every mode. `allowedIpRanges` adds an address allow list (`ipSecurityRestrictions`) and
+`allowedClientApplications` an Easy Auth client-application allow list (`defaultAuthorizationPolicy`; empty =
+unrestricted, recommended in production). The deprecated `externalIngress` still works when `ingressMode` is not
+set, so existing parameter files behave exactly as before. Anything that would silently change the exposure
+fails the deployment instead: setting both parameters, `vnet` without a subnet, `externalAuthenticated` with one.
+The mode matrix was evaluated offline against the compiled template.
 
 **Default: external and authenticated.** The old default made the API unreachable for people. Exposure is
 defence in depth here, while the access control is the validated Entra token plus assignment-required plus the
@@ -127,6 +136,15 @@ deployments that never set `externalIngress`; the README states it and `allowedI
 mode flags and the time. Container Apps does not say whether `excludedPaths` matches exactly or by prefix; the
 app does not depend on it: all other routes need the identity header, and nothing under `/health` reads it.
 Set the parameter to `false` where version disclosure matters more than anonymous probes.
+
+**Residual risk: trust-the-header.** The app trusts `X-MS-CLIENT-PRINCIPAL` and never validates a bearer token.
+With an externally reachable endpoint, any window without active Easy Auth (the first deployment before the
+child `authConfigs` resource applies, authentication disabled by mistake, a platform fault) lets a forged header
+name a `FabricOps.PlatformAdmin`. This PR mitigates it with a documented safe first deployment (internal first,
+verify, then expose), per-deployment checks that tokenless and forged-header requests get 401, and the optional
+IP and client-application allow lists. It does not remove it. **Follow-up:** validate the token in the app
+(signature, issuer, audience, `tid`) or require Easy Auth's `X-MS-TOKEN-AAD-*` token store and verify it, so
+the app no longer depends on the front end alone.
 
 ## Consequences
 
@@ -159,7 +177,7 @@ Set the parameter to `false` where version disclosure matters more than anonymou
 
 ## Follow-ups
 
-* Restrict allowed client applications in Easy Auth (`defaultAuthorizationPolicy.allowedApplications`) for
-  `Automation` callers.
+* In-app bearer-token validation (see the residual risk above).
+* Make `allowedClientApplications` mandatory in production once the client list is known.
 * Two-person approval for HIGH_RISK (WS11) builds on the human-only guard.
 * Move rate limiting to a shared store when the app scales beyond one replica (WS6).
