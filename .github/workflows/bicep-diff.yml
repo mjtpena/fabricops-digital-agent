@@ -1,0 +1,67 @@
+name: Bicep diff
+
+# On pull requests that touch the infrastructure, show what each environment would deploy before and after the change.
+# OFFLINE: it needs no Azure access and no credentials. `bicep snapshot` evaluates the template and each
+# infra/bicep/env/*.bicepparam locally (fixed placeholders for the image, registry and ids), and the two snapshots, the
+# base branch and the pull request merged into it, are diffed. There is no azure/login and no id-token here, by design:
+# ARM what-if performs the same authorization checks as a deployment, so a pull-request identity able to run it would
+# need write rights. The real what-if runs in the deploy job, with that environment's own deploy identity, right before
+# the deployment (deploy-environment.yml).
+
+on:
+  pull_request:
+    paths:
+      - infra/**
+      - scripts/bicep-snapshot.sh
+      - scripts/bicep_snapshot_diff.py
+      - .github/workflows/bicep-diff.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bicep-diff-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diff:
+    name: Bicep diff (offline)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # `snapshot` is a command of the Bicep CLI binary (not of `az bicep`); the version is pinned so that the output is stable.
+      BICEP_VERSION: v0.45.15
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      # The default checkout of a pull request is the result of merging it into its base branch, so the head of this
+      # checkout against BASE_SHA is exactly what the pull request changes, also for pull requests from forks.
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Bicep
+        run: az bicep install --version "$BICEP_VERSION"
+
+      - name: Snapshot the base branch
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          bash scripts/bicep-snapshot.sh "$RUNNER_TEMP/snapshots/base" "$RUNNER_TEMP/base"
+
+      - name: Snapshot the pull request merged into the base branch
+        run: bash scripts/bicep-snapshot.sh "$RUNNER_TEMP/snapshots/head" "$GITHUB_WORKSPACE"
+
+      - name: Diff
+        run: |
+          mkdir -p bicep-diff
+          python3 -I scripts/bicep_snapshot_diff.py "$RUNNER_TEMP/snapshots/base" "$RUNNER_TEMP/snapshots/head" > bicep-diff/bicep-diff.md
+          cat bicep-diff/bicep-diff.md >> "$GITHUB_STEP_SUMMARY"
+          cp -r "$RUNNER_TEMP/snapshots" bicep-diff/snapshots
+
+      - name: Upload the diff and both sets of snapshots
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bicep-diff
+          path: bicep-diff
+          retention-days: 14

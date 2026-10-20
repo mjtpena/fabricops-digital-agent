@@ -1,5 +1,5 @@
 // Parameters for the DEV environment (resource group rg-fabricops-dev). Used by .github/workflows/cd.yml and
-// whatif.yml; see docs/delivery.md. Contains no secrets and must never contain any.
+// bicep-diff.yml; see docs/delivery.md. Contains no secrets and must never contain any.
 //
 //   Values supplied by the pipeline (GitHub environment/repository variables, all identifiers, none secret):
 //     CONTAINER_IMAGE      <registry>/orqentis-fabricops@sha256:<digest>   the image promoted by digest

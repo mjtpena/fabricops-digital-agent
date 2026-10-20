@@ -14,7 +14,8 @@ so they live in GitHub *variables*, not secrets.
 ```text
 pull request ──► ci.yml        ruff, mypy --strict, pytest, runbooks, demo, actionlint, pip-audit, Bicep build,
                                docker build + /health + Trivy scan        (required checks on main, see section 8)
-             └─► whatif.yml    az deployment group what-if against dev (read-only), summary as an artifact
+             └─► bicep-diff.yml  OFFLINE diff of what each environment would deploy (bicep snapshot of the base vs the
+                                 merged pull request); no Azure access, no credentials, no id-token
 
 push to main ──► cd.yml
                    ci ─────────► the whole CI workflow again, as a reusable workflow; build needs it
@@ -22,7 +23,7 @@ push to main ──► cd.yml
                                  Trivy gate (any HIGH/CRITICAL), then tag :<git sha>   artifacts: image-digest, sbom,
                                  trivy-report
                    deploy-dev ─► promote-test ─► promote-prod        the SAME digest each time
-                                 bicep env/<env>.bicepparam, then the smoke test; test and prod wait for reviewers
+                                 what-if (recorded) -> bicep env/<env>.bicepparam -> smoke test; test and prod wait for reviewers
 
 push to cd-dryrun/** ──► cd.yml  ci, build, scan, push as :dryrun-<git sha>; no deployment
 
@@ -30,8 +31,9 @@ tag vX.Y.Z ──► release.yml     verify tag = pyproject version = CHANGELOG 
                                CD run of that commit on main, add :X.Y.Z (release environment), create the release
 ```
 
-Three kinds of Entra identity, never shared: **build** (can push images, nothing else), **deploy** (one per
-environment, can deploy that environment only) and **what-if** (can simulate a deployment of dev, nothing else).
+Two kinds of Entra identity, never shared: **build** (can push images, nothing else) and **deploy** (one per
+environment, can deploy that environment only). Pull requests use no Azure identity at all (see *Reviewing an
+infrastructure change*).
 
 | Workflow job | Trigger | OIDC subject it presents | Azure identity |
 |---|---|---|---|
@@ -39,7 +41,6 @@ environment, can deploy that environment only) and **what-if** (can simulate a d
 | `deploy-environment.yml` (dev) | after `build` on `main` | `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:environment:dev` | `fabricops-deploy-dev` |
 | same (test) | after dev, approval | `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:environment:test` | `fabricops-deploy-test` |
 | same (prod) | after test, approval | `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:environment:prod` | `fabricops-deploy-prod` |
-| `whatif.yml` | pull request touching `infra/**` | `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:pull_request` | `fabricops-whatif` |
 | `release.yml` `publish` | tag `v*.*.*`, after approval | `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:environment:release` | build: `fabricops-cicd-dev` |
 
 ## One-time setup (owner and tenant admin)
@@ -91,8 +92,8 @@ for ENV in dev test prod; do
 done
 ```
 
-A deployment to an environment whose resource group is missing stops with a clear error (and the what-if reports
-"skipped"). A dry run never needs them.
+A deployment to an environment whose resource group is missing stops with a clear error (the what-if step runs after
+that check). A dry run never needs them.
 
 ### 2. API app registration per environment
 
@@ -190,7 +191,7 @@ az ad app federated-credential create --id "$BUILD_APP_ID" --parameters \
   "{\"name\":\"gh-env-release\",\"issuer\":\"$ISSUER\",\"subject\":\"$SUBJECT_PREFIX:environment:release\",\"audiences\":[\"$AUDIENCE\"]}"
 ```
 
-**The deploy identities** (one per environment) and **the what-if identity** are new:
+**The deploy identities** (one per environment) are new:
 
 ```bash
 new_identity() {   # new_identity <display name> <credential name> <subject>
@@ -205,7 +206,6 @@ new_identity() {   # new_identity <display name> <credential name> <subject>
 new_identity fabricops-deploy-dev  gh-env-dev  "$SUBJECT_PREFIX:environment:dev"
 new_identity fabricops-deploy-test gh-env-test "$SUBJECT_PREFIX:environment:test"
 new_identity fabricops-deploy-prod gh-env-prod "$SUBJECT_PREFIX:environment:prod"
-new_identity fabricops-whatif      gh-pull-request "$SUBJECT_PREFIX:pull_request"
 ```
 
 Record the printed ids:
@@ -214,7 +214,6 @@ Record the printed ids:
 export DEPLOY_DEV_APP_ID=<printed above>
 export DEPLOY_TEST_APP_ID=<printed above>
 export DEPLOY_PROD_APP_ID=<printed above>
-export WHATIF_APP_ID=<printed above>
 ```
 
 Check the subject format before relying on these credentials: `gh api repos/$REPO/actions/oidc/customization/sub` must
@@ -231,7 +230,6 @@ accept wildcards, so each subject is registered exactly. Add one more only while
 | each `fabricops-deploy-<env>` | `Contributor` | `rg-fabricops-<env>` | Create the template's resources |
 | each `fabricops-deploy-<env>` | `Role Based Access Control Administrator`, **constrained** | `rg-fabricops-<env>`, the registry, and the Azure OpenAI account when one is used | The template grants the reader identity `AcrPull` on the registry (`modules/acr-pull.bicep`) and, optionally, `Cognitive Services OpenAI User` on the account (`modules/openai-role.bicep`) |
 | each `fabricops-deploy-<env>` | custom `FabricOps Nested Deployment` | `rg-fabricops-shared` (and the resource group of an Azure OpenAI account elsewhere) | Those two modules deploy into the registry's / account's resource group, which creates a nested ARM deployment there |
-| `fabricops-whatif` | `Reader` + custom `FabricOps Deployment What-If` | `rg-fabricops-dev` only | Simulate the dev deployment; cannot change anything and has no access to the shared resource group |
 
 **The constrained RBAC Administrator** is the built-in role plus an ABAC condition. With it an identity can create role
 assignments only for the two role definitions below and only for service principals (a managed identity is one), and
@@ -288,42 +286,16 @@ When an Azure OpenAI account is added (ADR-0012), repeat for each deploy identit
 for the constrained role (the same `$CONDITION`), and the `FabricOps Nested Deployment` role on its resource group if
 that is not `rg-fabricops-shared`.
 
-**The what-if identity** needs `Microsoft.Resources/deployments/whatif/action`, which no built-in read-only role
-includes, so define a custom role and give it `Reader` as well, on the dev resource group only:
-
-```bash
-cat > whatif-role.json <<EOF
-{
-  "Name": "FabricOps Deployment What-If",
-  "IsCustom": true,
-  "Description": "Run ARM deployment what-if (a read-only simulation). Cannot create or change resources.",
-  "Actions": [
-    "Microsoft.Resources/deployments/whatif/action",
-    "Microsoft.Resources/deployments/read",
-    "Microsoft.Resources/deployments/operations/read"
-  ],
-  "NotActions": [],
-  "AssignableScopes": ["/subscriptions/$SUBSCRIPTION_ID"]
-}
-EOF
-az role definition create --role-definition @whatif-role.json
-rm whatif-role.json
-
-WHATIF_SP=$(az ad sp show --id "$WHATIF_APP_ID" --query id -o tsv)
-for role in Reader "FabricOps Deployment What-If"; do
-  az role assignment create --assignee-object-id "$WHATIF_SP" --assignee-principal-type ServicePrincipal \
-    --role "$role" --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/rg-fabricops-dev"
-done
-```
-
-The what-if deliberately leaves out the `AcrPull` module that deploys into the shared resource group
-(`containerRegistryResourceId` is empty in that run), so the pull-request identity needs nothing there. Review changes
-to `modules/acr-pull.bicep` by reading the diff.
-
-> **To verify on the first pull request.** The template reads keys with `listKeys()` (storage, Log Analytics), and a
-> what-if has to evaluate them. If the what-if job reports `AuthorizationFailed` for `listKeys`, the simulation is
-> being blocked by the missing read of keys. Do **not** grant the what-if identity key access. Treat it as a known
-> limit, report it in the pull request, and keep the what-if advisory (it is not a required check).
+**There is no pull-request identity and no what-if role.** An earlier design gave pull requests a read-only identity
+(`Reader` plus a custom role with `Microsoft.Resources/deployments/whatif/action`) to run `az deployment group what-if`.
+It cannot work: ARM what-if performs the same authorization checks as the deployment, so previewing a change to a
+resource needs the permission to write it (`InvalidTemplateDeployment ... does not have permission to perform action
+'Microsoft.OperationalInsights/workspaces/write'`, and likewise for every resource and every nested deployment). An
+identity that could preview would effectively be able to deploy, and a pull request, which runs code from a branch,
+must not get that. So pull requests get an offline diff with no credentials (*Reviewing an infrastructure change*), and the
+real what-if runs in the deploy job, with that environment's deploy identity, right before the deployment. If you created
+the old `fabricops-whatif` app, its custom role (`FabricOps Deployment What-If`), their role assignments or the old
+what-if repository variables (`gh variable list --repo $REPO` shows them), delete them; nothing reads them any more.
 
 ### 6. Smoke-test identity
 
@@ -369,9 +341,6 @@ gh variable set ACR_NAME              --repo $REPO --body "$ACR_NAME"
 gh variable set ACR_LOGIN_SERVER      --repo $REPO --body "$ACR_NAME.azurecr.io"
 gh variable set ACR_RESOURCE_ID       --repo $REPO --body "$ACR_ID"
 gh variable set ACR_PUSH_CLIENT_ID    --repo $REPO --body "$BUILD_APP_ID"          # build job: AcrPush only
-gh variable set WHATIF_CLIENT_ID             --repo $REPO --body "$WHATIF_APP_ID"
-gh variable set WHATIF_RESOURCE_GROUP        --repo $REPO --body rg-fabricops-dev
-gh variable set WHATIF_ENTRA_API_CLIENT_ID   --repo $REPO --body "$DEV_API_APP_ID"
 ```
 
 Environment variables:
@@ -395,7 +364,6 @@ gh variable set AZURE_CLIENT_ID --repo $REPO --env release --body "$BUILD_APP_ID
 | `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | repository | tenant and subscription ids | every `azure/login` |
 | `ACR_NAME`, `ACR_LOGIN_SERVER`, `ACR_RESOURCE_ID` | repository | the shared registry | build, deploy (`ACR_LOGIN_SERVER`, `ACR_RESOURCE_ID` reach the `.bicepparam` files), release |
 | `ACR_PUSH_CLIENT_ID` | repository | client id of the build identity `fabricops-cicd-dev` | `cd.yml` build job |
-| `WHATIF_CLIENT_ID`, `WHATIF_RESOURCE_GROUP`, `WHATIF_ENTRA_API_CLIENT_ID` | repository | what-if identity, `rg-fabricops-dev`, dev API app id | `whatif.yml` (skipped while `WHATIF_CLIENT_ID` is unset) |
 | `AZURE_CLIENT_ID` | environment | `dev`/`test`/`prod`: that environment's `fabricops-deploy-<env>`. `release`: the build identity | deploy and release |
 | `AZURE_RESOURCE_GROUP` | environment (`dev`, `test`, `prod`) | `rg-fabricops-<env>` | deploy |
 | `ENTRA_API_CLIENT_ID` | environment (`dev`, `test`, `prod`) | that environment's API app registration client id | `.bicepparam`, smoke test token audience |
@@ -473,8 +441,8 @@ EOF
 ```
 
 The six required checks are the job names in `ci.yml`, pinned to the GitHub Actions app (`integration_id` 15368) so that
-no other app can report a check with the same name and satisfy the rule; if you add or rename a CI job, change the list. The what-if is
-not required (it is skipped for forks and before the resource group exists). Verify with
+no other app can report a check with the same name and satisfy the rule; if you add or rename a CI job, change the list. The Bicep
+diff is informational and not required. Verify with
 `gh api repos/$REPO/rulesets --jq '.[] | [.name, .enforcement] | @tsv'`; all three must be `active`.
 
 ### 9. First deployment of each environment
@@ -499,6 +467,29 @@ not required (it is skipped for forks and before the resource group exists). Ver
    (or reject it). Check that the run's commit is the one you mean to promote: a run for an older commit can still be
    waiting when a newer one is merged, and approving the old one would deploy the older digest. Reject superseded runs.
 4. After `test` passes its smoke test, the `prod` job waits for approval in the same way.
+
+### Reviewing an infrastructure change
+
+Two different previews, because they answer different questions and need different rights.
+
+* **On the pull request: an offline diff (`bicep-diff.yml`, no credentials).** `bicep snapshot` evaluates `main.bicep` with
+  each `infra/bicep/env/*.bicepparam` on the runner, with fixed placeholders for the image, registry and ids, for the base
+  branch and for the pull request merged into it, and posts the difference per environment (resources added or removed,
+  property paths with their before and after values) in the job summary and as the `bicep-diff` artifact. It sees only
+  the repository, never Azure, so it cannot show drift or what exists in a resource group. The workflow has no
+  `azure/login` and no `id-token` permission, and CI fails if that changes. Run the same thing locally with
+  `bash scripts/bicep-snapshot.sh <dir>` (needs the Bicep CLI v0.45.15 or newer: `az bicep install --version v0.45.15`;
+  `snapshot` is a command of that binary, not of `az bicep`).
+* **At deployment: the real what-if (`deploy-environment.yml`).** Right before `az deployment group create` the deploy job
+  runs `az deployment group what-if` against the live resource group with that environment's deploy identity, and records
+  the result (resources and property paths, no values) in the job summary and as the `bicep-whatif-<env>` artifact. It
+  runs after the environment's approval, so it is a record of what changed, not a gate; the review of an infrastructure
+  change is the pull request and its offline diff. If the preview fails it is reported and the deployment continues,
+  because the deployment validates the template itself.
+
+Why not the what-if on the pull request: ARM what-if performs the same authorization checks as a deployment, so it
+needs write permission on every resource (see section 5). An identity for pull requests with those rights would be a
+deploy identity for anyone who can open a pull request.
 
 ### Dry run on a branch
 
@@ -598,4 +589,6 @@ bump it, change `ACTIONLINT_VERSION` and `ACTIONLINT_SHA256` together (the check
 | First revision `ImagePullBackOff` | `AcrPull` propagation delay: restart the revision |
 | Release: `No successful CD run on main` | CD has not finished for the tagged commit, or `prod` is still waiting for approval, or a stage failed. Wait for or fix CD, then re-push the tag |
 | CD: `already points at … Tags are not moved` | An earlier build of this commit already tagged an image. Re-running every job rebuilds a different digest; push a new commit instead, or re-run only the failed jobs |
+| What-if (in the deploy job) fails with `InvalidTemplateDeployment ... does not have permission to perform action 'Microsoft.OperationalInsights/workspaces/write'` (or another `.../write`) | The identity running `az deployment group what-if` lacks the rights to deploy. What-if is authorized like the deployment itself. In the deploy job that means the environment's `fabricops-deploy-<env>` is missing `Contributor` on its resource group (section 5). If it comes from a pull request, that is the retired PR what-if workflow: no pull-request workflow runs what-if any more (it would need write rights); use the offline Bicep diff |
+| Bicep diff job: `bicep snapshot` is not a command / unknown command | The Bicep CLI is older than v0.45.15. `az bicep install --version v0.45.15` (the workflows pin it) |
 | Workflow does not start at all | Check the repository's Actions billing and policy settings; jobs cannot start while the account has a billing problem |
