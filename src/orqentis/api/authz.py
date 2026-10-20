@@ -37,7 +37,8 @@ async def _refuse(request: Request, principal: Principal, code: str, message: st
         "api request refused",
         extra={"code": code, "principal_id": principal.id, "method": request.method, "path": request.url.path},
     )
-    container = getattr(request.app.state, "container", None)
+    runtime = getattr(request.app.state, "runtime", None)  # the container exists only once the build finished
+    container = runtime.container if runtime is not None else None
     refusals: RefusalAudit | None = getattr(request.app.state, "refusal_audit", None)
     if audit and container is not None:
         record, suppressed = refusals.should_record(principal.id, code) if refusals else (True, 0)

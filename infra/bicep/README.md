@@ -39,12 +39,47 @@ The app runs with these settings (see `src/orqentis/config/settings.py`):
 | `ORQENTIS_AZURE_OPENAI_ENDPOINT` / `_DEPLOYMENT` | `azureOpenAiEndpoint` / `azureOpenAiDeployment` (only set when non-empty) |
 | `ORQENTIS_DATA_DIR` | `/var/lib/orqentis` (Azure Files mount) |
 | `ORQENTIS_LOG_FORMAT` | `json` |
+| `ORQENTIS_SCHEDULER_ENABLED` | `schedulerEnabled` (default `true`) |
+| `ORQENTIS_SCHEDULER_STARTUP_DELAY_SECONDS` | `schedulerStartupDelaySeconds` (default `120`) |
+| `ORQENTIS_SCHEDULER_TICK_SECONDS` / `_LEASE_TTL_SECONDS` / `_JOB_TIMEOUT_MINUTES` | `schedulerTickSeconds` / `schedulerLeaseTtlSeconds` / `schedulerJobTimeoutMinutes` (default `5` / `60` / `30`; the TTL must be at least three times the tick) |
+| `ORQENTIS_SCHEDULER_COLLECT_ENABLED` / `_INTERVAL_MINUTES` | `collectEnabled` / `collectIntervalMinutes` (default `true` / `5`) |
+| `ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_ENABLED` / `_INTERVAL_MINUTES` | `autoInvestigateEnabled` / `autoInvestigateIntervalMinutes` (default `true` / `1`) |
+| `ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_BATCH_SIZE` / `_MAX_ATTEMPTS` | `autoInvestigateBatchSize` / `autoInvestigateMaxAttempts` (default `5` / `3`) |
+| `ORQENTIS_SCHEDULER_SLA_SWEEP_ENABLED` / `_INTERVAL_MINUTES` | `slaSweepEnabled` / `slaSweepIntervalMinutes` (default `true` / `15`) |
+| `ORQENTIS_SCHEDULER_CATALOG_REFRESH_ENABLED` / `_INTERVAL_MINUTES` | `catalogRefreshEnabled` / `catalogRefreshIntervalMinutes` (default `true` / `60`) |
+| `ORQENTIS_INVESTIGATION_MAX_CONCURRENCY` / `_TIMEOUT_SECONDS` | `investigationMaxConcurrency` / `investigationTimeoutSeconds` (default `2` / `600`) |
+| `ORQENTIS_FABRIC_MAX_CONCURRENCY` / `_RATE_PER_SECOND` / `_RATE_BURST` | `fabricMaxConcurrency` / `fabricRatePerSecond` / `fabricRateBurst` (default `4` / `5` / `10`) |
+| `ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES` | `fabricJobInstancesMaxPages` (default `10`) |
+| `ORQENTIS_STARTUP_GRACE_SECONDS` / `ORQENTIS_BUILD_RETRY_INITIAL_SECONDS` / `_MAX_SECONDS` | `startupGraceSeconds` / `buildRetryInitialSeconds` / `buildRetryMaxSeconds` (default `10` / `2` / `60`) |
+| `ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS` / `_OVERLAP_MINUTES` | `collectionMaxLookbackHours` / `collectionOverlapMinutes` (default `168` / `15`) |
 | `ORQENTIS_API_MAX_BODY_BYTES` | `apiMaxBodyBytes` (default `65536`): larger request bodies get 413 |
 | `ORQENTIS_API_RATE_LIMIT_MUTATING_PER_MINUTE` | `apiRateLimitMutatingPerMinute` (default `30`), per principal and replica |
 | `ORQENTIS_API_RATE_LIMIT_EXPENSIVE_PER_MINUTE` | `apiRateLimitExpensivePerMinute` (default `6`): collection, investigations, audit verification |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | Container App **secret** reference |
 
 Not set by the template, because the safe default already applies under `easy_auth`: `ORQENTIS_API_REQUIRE_READ_ROLE` (every call needs a FabricOps role; see section 1) and `ORQENTIS_API_RATE_LIMIT_ENABLED` (`true`).
+
+### Health probes and autonomous operation
+
+The Container App has three probes (see the `probes` block of `main.bicep`):
+
+| Probe | Path | Meaning |
+|---|---|---|
+| Startup | `/health` | The process is listening. It does not wait for the estate to be read: that happens in the background after the port opens, so a large tenant cannot fail the startup probe. |
+| Liveness | `/health` | The process is alive. It is dependency-free and answers `200` while the container is still being built and while a failed build is being retried, so a bad contracts file or a Fabric outage never causes a restart loop. |
+| Readiness | `/health/ready` | `503` (a fixed reason code and the exception type, never its message) until the container is built and the first catalog load finished, `200` afterwards. A failing build is retried with exponential backoff (`ORQENTIS_BUILD_RETRY_*`). |
+
+With `schedulerEnabled = true` (the default) the app runs a small in-process scheduler: collect + detect every `collectIntervalMinutes`, automatic investigation of new incidents (as background jobs, at most `investigationMaxConcurrency` at a time), an SLA sweep, and a catalog refresh that applies workspace / item / dependency changes without a restart. Only the holder of an in-process leader lease runs the jobs. That is correct for the single replica this template deploys; the lease moves to the database with the PostgreSQL system of record, which is what allows more than one replica. All Fabric and Power BI calls share one concurrency and rate budget (`fabricMaxConcurrency`, `fabricRatePerSecond`, `fabricRateBurst`), and a `429` / `Retry-After` pauses every caller. Defaults are deliberately conservative; the real Fabric throttling quotas are not published per endpoint, so tune them from the `fabric http request` log lines (`status_code: 429`).
+
+### Deploying an update: two revisions share the volume
+
+Container Apps in `Single` revision mode runs the **old and the new revision side by side** while an update rolls out. They mount the same Azure Files share, each with its own in-process scheduler lease, and the local stores (SQLite, the hash-chained audit file) are single-writer. The template and the app reduce the risk, they cannot remove it:
+
+* `schedulerStartupDelaySeconds` (default `120`) makes a new process wait before it takes the lease or runs any job, so the old revision drains first. The revision being replaced stops its scheduler and releases the lease when it receives the shutdown signal.
+* The audit log re-reads its chain head before appending whenever the file grew since it last wrote, so appends from both revisions chain instead of forking. This is best effort (SMB has no byte-range locks).
+* **Real multi-writer safety needs the PostgreSQL system of record** (database-backed lease, database-serialised audit chain). Until it exists, deploy with `schedulerEnabled = false`, or accept the risk and verify the chain afterwards with `GET /audit/verify` / `orqentis audit`. Nothing is deployed before that work.
+
+Settings that fail validation (for example a missing `ORQENTIS_TENANT_ID` in rest mode, or a lease TTL shorter than three scheduler ticks) stop the app at start by design: that is deploy-time misconfiguration, and the first failed startup probe is the signal, not something to retry.
 
 ## Deploy
 
@@ -325,7 +360,7 @@ Residual risk, recorded in ADR-0015 and the threat model: the app does not valid
 
 **Restricting client applications.** `allowedClientApplications` is a list of client application ids that Easy Auth lets through (it checks the token's `azp`/`appid`). Empty (default) means any application can call with a valid token for this API, for example a third-party app that a user consented to. **Recommended in production:** list the clients people use (the UI, Azure CLI `04b07795-8ddb-461a-bbee-02f9e1bf7b46` for operator testing) and the client ids of the automation identities (a managed identity's client id is its application id). A caller whose application is not listed gets 403 from Easy Auth before the app sees the request.
 
-**Health endpoints.** By default (`anonymousHealthEndpoints = true`) `/health` and `/health/ready` are excluded from authentication, so uptime checks and smoke tests can call them without a token. `/health` returns the version, `fabric_mode`, `reasoner` and the time, and reads no caller identity. It does not reveal whether writes are enabled: that flag is on `GET /system/info`, which needs a FabricOps role. Container Apps documents `excludedPaths` as "the paths for which unauthenticated flow would not be redirected to the login page" and does not say whether the match is exact or by prefix, so the app does not rely on it: every other route requires the identity header and returns 401 without it, and no route under `/health` reads it. Set `anonymousHealthEndpoints = false` if version and mode disclosure to the internet matters more than anonymous probes (container health probes are unaffected, they bypass authentication). Smoke tests can then authenticate with an identity holding `FabricOps.Automation`.
+**Health endpoints.** By default (`anonymousHealthEndpoints = true`) `/health` and `/health/ready` are excluded from authentication, so uptime checks and smoke tests can call them without a token. `/health` returns the version, `fabric_mode`, `reasoner` and the time, and reads no caller identity. It does not reveal whether writes are enabled: that flag is on `GET /system/info`, which needs a FabricOps role. Container Apps documents `excludedPaths` as "the paths for which unauthenticated flow would not be redirected to the login page" and does not say whether the match is exact or by prefix, so the app does not rely on it: every other route requires the identity header and returns 401 without it, and no route under `/health` reads it. Set `anonymousHealthEndpoints = false` if version and mode disclosure to the internet matters more than anonymous probes (container health probes are unaffected, they bypass authentication). Smoke tests can then authenticate with an identity holding `FabricOps.Automation`. `/health/ready` answers `200`, or `503` with a fixed reason code (`starting` or `build_failed`) and the exception *type* of the last build failure, never its message (paths and other detail stay in the logs), so anonymous callers learn nothing about the deployment from it.
 
 **Trust boundary.** With `ORQENTIS_API_AUTH_MODE=easy_auth` the app trusts the `X-MS-CLIENT-PRINCIPAL` header. Container Apps authentication sets that header and strips any client-supplied copy, so the app must only be reached through Container Apps ingress. Do not expose additional ports. Keep the environment dedicated to FabricOps, without other or untrusted workloads. Health probes target the container port directly and are not subject to authentication.
 
@@ -344,7 +379,7 @@ The MVP keeps its stores on the Azure Files share mounted at `/var/lib/orqentis`
 
 Constraints that follow from this:
 
-* **Single writer.** SQLite and the hash-chained audit log allow exactly one writing process. The app is therefore pinned to `minReplicas = maxReplicas = 1`, and uvicorn runs a single worker. Do not scale it out. In single-revision mode, Container Apps briefly runs the old and new revision side by side during an update. Deploy changes in a quiet period, and run `orqentis audit` / `GET /audit/verify` afterwards.
+* **Single writer.** SQLite and the hash-chained audit log allow exactly one writing process, and the scheduler's leader lease is in-process. The app is therefore pinned to `minReplicas = maxReplicas = 1`, and uvicorn runs a single worker. Do not scale it out. In single-revision mode, Container Apps briefly runs the old and new revision side by side during an update. Deploy changes in a quiet period, and run `orqentis audit` / `GET /audit/verify` afterwards.
 * **SMB and SQLite.** The share is mounted with `nobrl`, so byte-range locks are not forwarded to the server. SQLite's locking cannot work over SMB, and without `nobrl` it typically fails with "database is locked". This is safe only because there is a single writer. The app uses SQLite WAL mode, which SQLite does not support across hosts on network file systems; with one host it works, but it is not a durable production design.
 * **Shared key.** Container Apps mounts Azure Files over SMB with the storage account key, so `allowSharedKeyAccess` must stay `true` on this account. Mitigations: the account is dedicated to this share, TLS 1.2+ and HTTPS-only are enforced, public blob access and cross-tenant replication are disabled, the portal defaults to Entra auth, and soft delete for shares is on. Rotate the key with `az storage account keys renew`, then redeploy the template so the environment picks up the new key. For a private setup, add a private endpoint and a VNet-integrated environment.
 * **Mount ownership.** The mount maps all files to UID/GID `10001` with owner-only modes, matching the non-root user in the Dockerfile. Change both together.

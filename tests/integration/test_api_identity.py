@@ -32,6 +32,7 @@ from orqentis.domain.actions import Action
 from orqentis.domain.approvals import ApprovalRequest
 from tests.conftest import make_settings
 from tests.support import easy_auth as ea
+from tests.support.jobs import investigate_to_completion
 
 pytestmark = pytest.mark.security
 
@@ -80,9 +81,9 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spy: SpyWriteClient)
 
 def investigate(client: TestClient) -> list[str]:
     incident_id = client.get("/incidents", headers=OPERATOR).json()[0]["incident_id"]
-    response = client.post(f"/incidents/{incident_id}/investigate", headers=OPERATOR)
-    assert response.status_code == 200, response.text
-    approvals: list[str] = response.json()["approval_ids"]
+    # POST returns 202 and a job; the investigation runs in the background and the outcome is read from the job.
+    job = investigate_to_completion(client, incident_id, OPERATOR)
+    approvals: list[str] = job["result"]["approval_ids"]
     assert len(approvals) >= 2
     return approvals
 
@@ -412,7 +413,7 @@ def test_health_is_anonymous_and_does_not_disclose_the_write_flag_but_system_inf
 
 # ---- structural guard: a new route cannot silently skip authentication, a role check or the human-only check ---
 
-PUBLIC_PATHS = {"/health"}
+PUBLIC_PATHS = {"/health", "/health/ready"}
 DOC_PATHS = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
 MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
 # A kind-only guard (require_human) is deliberately not a role guard.
@@ -452,10 +453,13 @@ def route_violations(app: FastAPI) -> list[str]:
     reviewed = router_module_routes()
     direct = [r for r in app.routes if isinstance(r, APIRoute)]  # an @app.post() placed on the app itself
     for route in [*reviewed, *direct]:
-        if route.path in PUBLIC_PATHS:
-            continue
         calls = dependency_calls(route)
         label = f"{sorted(route.methods)} {route.path}"
+        if route.path in PUBLIC_PATHS:
+            # Anonymous by design, so nothing under it may read the caller's identity or depend on a role.
+            if current_principal in calls or calls & set(authz.ROLE_GUARDS):
+                violations.append(f"{label} is public but reads the caller's identity")
+            continue
         if current_principal not in calls:
             violations.append(f"{label} does not authenticate")
         if not calls & set(authz.ROLE_GUARDS):

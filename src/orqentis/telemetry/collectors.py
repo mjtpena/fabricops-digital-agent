@@ -6,7 +6,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from orqentis.config.clock import Clock
 from orqentis.domain.common import ItemType
@@ -15,7 +15,7 @@ from orqentis.domain.runs import RunStatus
 from orqentis.fabric.errors import FabricError
 from orqentis.fabric.ports import FabricClient
 from orqentis.observability.logging import get_logger
-from orqentis.storage.event_store import EventStore
+from orqentis.storage.event_store import COLLECTOR_SCOPE, EventStore
 from orqentis.telemetry.normalization import (
     activity_failure_event,
     capacity_events,
@@ -27,11 +27,32 @@ from orqentis.topology.catalog import EstateCatalog
 
 _log = get_logger(__name__)
 
+# Fabric keeps about the 100 most recent completed job instances per item (plus every active one).
+_JOB_INSTANCE_LIMIT = 100
+
 
 class Collector(Protocol):
     name: str
 
     async def collect(self, *, since: datetime, until: datetime) -> list[OperationalEvent]: ...
+
+
+@runtime_checkable
+class ScopedCollector(Protocol):
+    """A collector that observes many independent things (pipelines, semantic models, capacities).
+
+    The ingestor keeps one watermark **per scope** and gives each scope its own window. A scope that appears later
+    (a pipeline created after the last catalog refresh) has no watermark, so it is read from the maximum lookback
+    instead of inheriting the collector's progress; one failing scope does not hold back the others.
+    """
+
+    name: str
+
+    def scopes(self) -> list[str]:
+        """Ids to collect right now (read from the live catalog)."""
+        ...
+
+    async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]: ...
 
 
 class PipelineRunCollector:
@@ -41,24 +62,35 @@ class PipelineRunCollector:
         self._fabric = fabric
         self._catalog = catalog
 
+    def scopes(self) -> list[str]:
+        return [i.id for i in self._catalog.items.values() if i.item_type is ItemType.DATA_PIPELINE]
+
+    async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]:
+        item = self._catalog.items.get(scope)
+        if item is None or item.item_type is not ItemType.DATA_PIPELINE:
+            return []  # removed from the estate since the scopes were listed
+        events: list[OperationalEvent] = []
+        runs = await self._fabric.jobs.list_job_instances(
+            item.workspace_id, item.id, limit=_JOB_INSTANCE_LIMIT, since=since
+        )
+        for run in runs:
+            when = run.end_time or run.start_time
+            if not is_reportable(run.status) or when is None or not since <= when <= until:
+                continue
+            events.append(pipeline_run_event(run, display_name=item.display_name, environment=item.environment))
+            if run.status is RunStatus.FAILED:
+                activities = await self._fabric.pipelines.query_activity_runs(item.workspace_id, item.id, run.id)
+                events.extend(
+                    activity_failure_event(a, pipeline_name=item.display_name, environment=item.environment)
+                    for a in activities
+                    if a.status.is_failure
+                )
+        return events
+
     async def collect(self, *, since: datetime, until: datetime) -> list[OperationalEvent]:
         events: list[OperationalEvent] = []
-        for item in self._catalog.items.values():
-            if item.item_type is not ItemType.DATA_PIPELINE:
-                continue
-            runs = await self._fabric.jobs.list_job_instances(item.workspace_id, item.id)
-            for run in runs:
-                when = run.end_time or run.start_time
-                if not is_reportable(run.status) or when is None or not since <= when <= until:
-                    continue
-                events.append(pipeline_run_event(run, display_name=item.display_name, environment=item.environment))
-                if run.status is RunStatus.FAILED:
-                    activities = await self._fabric.pipelines.query_activity_runs(item.workspace_id, item.id, run.id)
-                    events.extend(
-                        activity_failure_event(a, pipeline_name=item.display_name, environment=item.environment)
-                        for a in activities
-                        if a.status.is_failure
-                    )
+        for scope in self.scopes():
+            events.extend(await self.collect_scope(scope, since=since, until=until))
         return events
 
 
@@ -69,15 +101,24 @@ class RefreshCollector:
         self._fabric = fabric
         self._catalog = catalog
 
+    def scopes(self) -> list[str]:
+        return [i.id for i in self._catalog.items.values() if i.item_type is ItemType.SEMANTIC_MODEL]
+
+    async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]:
+        item = self._catalog.items.get(scope)
+        if item is None or item.item_type is not ItemType.SEMANTIC_MODEL:
+            return []
+        events: list[OperationalEvent] = []
+        for refresh in await self._fabric.semantic_models.get_refresh_history(item.workspace_id, item.id, top=20):
+            when = refresh.end_time or refresh.start_time
+            if is_reportable(refresh.status) and when is not None and since <= when <= until:
+                events.append(refresh_event(refresh, display_name=item.display_name, environment=item.environment))
+        return events
+
     async def collect(self, *, since: datetime, until: datetime) -> list[OperationalEvent]:
         events: list[OperationalEvent] = []
-        for item in self._catalog.items.values():
-            if item.item_type is not ItemType.SEMANTIC_MODEL:
-                continue
-            for refresh in await self._fabric.semantic_models.get_refresh_history(item.workspace_id, item.id, top=20):
-                when = refresh.end_time or refresh.start_time
-                if is_reportable(refresh.status) and when is not None and since <= when <= until:
-                    events.append(refresh_event(refresh, display_name=item.display_name, environment=item.environment))
+        for scope in self.scopes():
+            events.extend(await self.collect_scope(scope, since=since, until=until))
         return events
 
 
@@ -88,11 +129,22 @@ class CapacityCollector:
         self._fabric = fabric
         self._catalog = catalog
 
+    def scopes(self) -> list[str]:
+        return list(self._catalog.capacities)
+
+    async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]:
+        capacity = self._catalog.capacities.get(scope)
+        if capacity is None:
+            return []
+        events: list[OperationalEvent] = []
+        for snapshot in await self._fabric.capacities.get_capacity_metrics(capacity.id, start=since, end=until):
+            events.extend(capacity_events(snapshot, capacity))
+        return events
+
     async def collect(self, *, since: datetime, until: datetime) -> list[OperationalEvent]:
         events: list[OperationalEvent] = []
-        for capacity in self._catalog.capacities.values():
-            for snapshot in await self._fabric.capacities.get_capacity_metrics(capacity.id, start=since, end=until):
-                events.extend(capacity_events(snapshot, capacity))
+        for scope in self.scopes():
+            events.extend(await self.collect_scope(scope, since=since, until=until))
         return events
 
 
@@ -113,13 +165,29 @@ class IngestionResult:
     new_events: list[OperationalEvent] = field(default_factory=list)
     collected: int = 0
     errors: dict[str, str] = field(default_factory=dict)
+    # The (since, until) window each collector (or, for scoped collectors, each ``collector:scope``) was asked for;
+    # ones that failed are listed too.
+    windows: dict[str, tuple[datetime, datetime]] = field(default_factory=dict)
 
     def counts(self) -> dict[str, int]:
         return dict(Counter(e.event_type.value for e in self.new_events))
 
 
 class TelemetryIngestor:
-    """Runs collectors over a lookback window and appends normalised events to the event store."""
+    """Runs each collector over its own window and appends normalised events to the event store.
+
+    The window of a collector (or of one scope of a scoped collector) is ``[watermark - overlap, now]``: the
+    watermark is the instant up to which a previous run completed, and the overlap re-reads a little history so
+    late-arriving data is not missed (the event store de-duplicates by ``dedupe_key``, so re-reading is harmless).
+    The window never reaches further back than ``lookback``, which is also the window of anything that has never
+    been collected. A watermark advances only after its events were stored, so a failure is retried over the same
+    window. A watermark that is *ahead* of the clock (the clock was set back) is not trusted: the maximum lookback
+    is re-read once and the watermark is corrected.
+
+    Storing events is not the end of the pipeline: detection consumes them from the event store through a durable
+    cursor (see :class:`~orqentis.incidents.detection_runner.DetectionRunner`), so what this class appended before
+    being interrupted is never lost to detection.
+    """
 
     def __init__(
         self,
@@ -128,30 +196,83 @@ class TelemetryIngestor:
         clock: Clock,
         *,
         lookback: timedelta = timedelta(days=7),
+        overlap: timedelta = timedelta(minutes=15),
     ) -> None:
+        if lookback <= timedelta(0):
+            raise ValueError("lookback must be positive")
+        if overlap < timedelta(0):
+            raise ValueError("overlap must not be negative")
         self._collectors = list(collectors)
         self._event_store = event_store
         self._clock = clock
         self._lookback = lookback
+        self._overlap = overlap
+
+    def _window_start(self, watermark: datetime | None, until: datetime, label: str) -> tuple[datetime, bool]:
+        """``(since, clock_repair_needed)`` for one watermark."""
+        floor = until - self._lookback
+        if watermark is None:
+            return floor, False
+        if watermark > until:
+            _log.warning(
+                "collector watermark is ahead of the clock; re-reading the maximum lookback and correcting it",
+                extra={"collector": label, "watermark": watermark.isoformat(), "now": until.isoformat()},
+            )
+            return floor, True
+        return max(watermark - self._overlap, floor), False
 
     async def run(self) -> IngestionResult:
         until = self._clock.now()
-        since = until - self._lookback
         result = IngestionResult()
         for collector in self._collectors:
-            try:
-                events = await collector.collect(since=since, until=until)
-            except FabricError as exc:
-                # One failing collector must not blind the others.
-                result.errors[collector.name] = exc.message
-                _log.warning("collector failed", extra={"collector": collector.name, "error": exc.to_dict()})
-                continue
-            result.collected += len(events)
-            events.sort(key=lambda e: e.timestamp)
-            result.new_events.extend(await self._event_store.append(events))
+            if isinstance(collector, ScopedCollector):
+                await self._run_scoped(collector, until, result)
+            else:
+                await self._run_whole(collector, until, result)
         result.new_events.sort(key=lambda e: e.timestamp)
         _log.info(
             "telemetry ingested",
             extra={"collected": result.collected, "new": len(result.new_events), "by_type": result.counts()},
         )
         return result
+
+    async def _store(self, events: list[OperationalEvent], result: IngestionResult) -> None:
+        result.collected += len(events)
+        events.sort(key=lambda e: e.timestamp)
+        result.new_events.extend(await self._event_store.append(events))
+
+    async def _run_whole(self, collector: Collector, until: datetime, result: IngestionResult) -> None:
+        watermarks = await self._event_store.get_watermarks(collector.name)
+        since, repair = self._window_start(watermarks.get(COLLECTOR_SCOPE), until, collector.name)
+        result.windows[collector.name] = (since, until)
+        try:
+            events = await collector.collect(since=since, until=until)
+        except FabricError as exc:
+            # One failing collector must not blind the others, and its watermark stays where it was.
+            result.errors[collector.name] = exc.message
+            _log.warning("collector failed", extra={"collector": collector.name, "error": exc.to_dict()})
+            return
+        await self._store(events, result)
+        await self._event_store.advance_watermarks(collector.name, {COLLECTOR_SCOPE: until}, force=repair)
+
+    async def _run_scoped(self, collector: ScopedCollector, until: datetime, result: IngestionResult) -> None:
+        watermarks = await self._event_store.get_watermarks(collector.name)
+        done: dict[str, datetime] = {}
+        repaired: dict[str, datetime] = {}
+        try:
+            for scope in collector.scopes():
+                label = f"{collector.name}:{scope}"
+                since, repair = self._window_start(watermarks.get(scope), until, label)
+                result.windows[label] = (since, until)
+                try:
+                    events = await collector.collect_scope(scope, since=since, until=until)
+                except FabricError as exc:
+                    result.errors[label] = exc.message
+                    _log.warning("collector failed", extra={"collector": label, "error": exc.to_dict()})
+                    continue
+                await self._store(events, result)
+                (repaired if repair else done)[scope] = until
+        finally:
+            # Also when this run is cut short: what was stored is recorded, so the next run does not redo it.
+            await self._event_store.advance_watermarks(collector.name, done)
+            await self._event_store.advance_watermarks(collector.name, repaired, force=True)

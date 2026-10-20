@@ -50,6 +50,7 @@ from orqentis.fabric.errors import (
 )
 from orqentis.fabric.ports import FabricClient
 from orqentis.fabric.rest.auth import FABRIC_SCOPE, POWERBI_SCOPE, TokenProvider
+from orqentis.fabric.rest.budget import FabricCallBudget
 from orqentis.fabric.rest.http import FabricHttp, JsonObject
 from orqentis.observability.logging import get_logger
 from orqentis.topology.environment import (
@@ -390,9 +391,10 @@ class RestItemService:
 
 
 class RestJobService:
-    def __init__(self, ctx: _Context, workspaces: RestWorkspaceService) -> None:
+    def __init__(self, ctx: _Context, workspaces: RestWorkspaceService, *, max_pages: int = 10) -> None:
         self._ctx = ctx
         self._workspaces = workspaces
+        self._max_pages = max_pages
 
     def _map(self, raw: JsonObject, workspace_id: str, item_id: str) -> PipelineRun:
         job_type, fabric_status = _clean(raw.get("jobType")), _clean(raw.get("status"))
@@ -417,11 +419,24 @@ class RestJobService:
     def _instances_url(self, workspace_id: str, item_id: str, *extra: str) -> str:
         return self._ctx.fabric("workspaces", workspace_id, "items", item_id, "jobs", "instances", *extra)
 
-    async def list_job_instances(self, workspace_id: str, item_id: str, *, limit: int = 50) -> list[PipelineRun]:
+    async def list_job_instances(
+        self, workspace_id: str, item_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[PipelineRun]:
+        """Recent runs of an item, newest start first.
+
+        Fabric documents no ordering for "List Item Job Instances" (only a ``continuationToken``; it keeps about
+        the 100 most recent completed runs plus every active one), so this never stops reading pages early: an
+        early stop would be wrong even for a start-time ordering, because a long-running job that started before
+        the watermark can still finish after it. ``since`` therefore filters after reading, and ``max_pages``
+        bounds the cost of one listing.
+        """
         if limit <= 0:
             return []
         url = self._instances_url(workspace_id, item_id)
-        runs = [self._map(raw, workspace_id, item_id) for raw in await self._ctx.http.paginate(url, scope=FABRIC_SCOPE)]
+        raw_runs = await self._ctx.http.paginate(url, scope=FABRIC_SCOPE, max_pages=self._max_pages)
+        runs = [self._map(raw, workspace_id, item_id) for raw in raw_runs]
+        if since is not None:
+            runs = [r for r in runs if r.observed_at is None or r.observed_at >= since]
         runs.sort(key=lambda r: r.start_time.timestamp() if r.start_time else 0.0, reverse=True)
         return runs[:limit]
 
@@ -757,10 +772,12 @@ class RestFabricClient:
         transport: httpx.AsyncBaseTransport | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Clock | None = None,
+        budget: FabricCallBudget | None = None,
+        job_instances_max_pages: int = 10,
     ) -> None:
         self._token_provider = token_provider
         self._http = FabricHttp(
-            token_provider, timeout=timeout, max_retries=max_retries, transport=transport, sleep=sleep
+            token_provider, timeout=timeout, max_retries=max_retries, transport=transport, sleep=sleep, budget=budget
         )
         ctx = _Context(
             self._http, fabric_base_url, powerbi_base_url, tenant_id, EnvironmentResolver(contracts.environments)
@@ -768,7 +785,7 @@ class RestFabricClient:
         self._environment_feed = ctx.feed
         self._workspaces = RestWorkspaceService(ctx)
         self._items = RestItemService(ctx, self._workspaces)
-        self._jobs = RestJobService(ctx, self._workspaces)
+        self._jobs = RestJobService(ctx, self._workspaces, max_pages=job_instances_max_pages)
         self._pipelines = RestPipelineService(ctx, self._jobs, clock or SystemClock())
         self._semantic_models = RestSemanticModelService(ctx)
         self._capacities = RestCapacityService(ctx)
@@ -787,6 +804,12 @@ class RestFabricClient:
             tenant_id=settings.tenant_id,
             timeout=settings.http_timeout_seconds,
             max_retries=settings.http_max_retries,
+            budget=FabricCallBudget(
+                max_concurrency=settings.fabric_max_concurrency,
+                rate_per_second=settings.fabric_rate_per_second,
+                burst=settings.fabric_rate_burst,
+            ),
+            job_instances_max_pages=settings.fabric_job_instances_max_pages,
         )
 
     @property

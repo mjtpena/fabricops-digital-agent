@@ -91,6 +91,16 @@ class Settings(BaseSettings):
     llm_auth_mode: AuthMode | None = None
     http_timeout_seconds: float = 30.0
     http_max_retries: int = Field(default=4, ge=0, le=10)
+    # Global budget for Fabric and Power BI calls, shared by every collector, tool and refresh (rest mode).
+    fabric_max_concurrency: int = Field(default=4, ge=1, le=64)
+    fabric_rate_per_second: float = Field(default=5.0, gt=0, le=1000)
+    fabric_rate_burst: int = Field(default=10, ge=1, le=1000)
+    # Safety cap on pages read per job-instance listing (Fabric does not document the result order).
+    fabric_job_instances_max_pages: int = Field(default=10, ge=1, le=1000)
+
+    # Incremental collection: since (watermark - overlap), never further back than the maximum lookback.
+    collection_max_lookback_hours: int = Field(default=168, ge=1, le=24 * 90)
+    collection_overlap_minutes: int = Field(default=15, ge=0, le=24 * 60)
 
     # Agent / reasoning
     reasoner: ReasonerKind = ReasonerKind.RULE_BASED
@@ -106,6 +116,32 @@ class Settings(BaseSettings):
     enable_write_actions: bool = False
     auto_request_approval: bool = True
     approval_ttl_minutes: int = Field(default=240, ge=5)
+
+    # Autonomous runtime. The scheduler defaults to on outside ``local`` and off in ``local`` (see _guard_rails).
+    scheduler_enabled: bool = False
+    scheduler_tick_seconds: float = Field(default=5.0, gt=0, le=60)
+    scheduler_lease_ttl_seconds: float = Field(default=60.0, ge=5, le=3600)
+    # Wait this long after start before taking the lease or running a job, so the previous revision can drain during a
+    # deploy (Container Apps runs both on the same volume). Unset: 120 outside ``local``, 0 in ``local`` (see below).
+    scheduler_startup_delay_seconds: float = Field(default=0.0, ge=0, le=900)
+    scheduler_job_timeout_minutes: int = Field(default=30, ge=1, le=24 * 60)
+    scheduler_collect_enabled: bool = True
+    scheduler_collect_interval_minutes: int = Field(default=5, ge=1, le=24 * 60)
+    scheduler_auto_investigate_enabled: bool = True
+    scheduler_auto_investigate_interval_minutes: int = Field(default=1, ge=1, le=24 * 60)
+    scheduler_auto_investigate_batch_size: int = Field(default=5, ge=1, le=50)
+    scheduler_auto_investigate_max_attempts: int = Field(default=3, ge=1, le=20)
+    scheduler_sla_sweep_enabled: bool = True
+    scheduler_sla_sweep_interval_minutes: int = Field(default=15, ge=1, le=24 * 60)
+    scheduler_catalog_refresh_enabled: bool = True
+    scheduler_catalog_refresh_interval_minutes: int = Field(default=60, ge=1, le=7 * 24 * 60)
+    investigation_max_concurrency: int = Field(default=2, ge=1, le=16)
+    investigation_timeout_seconds: int = Field(default=600, ge=30, le=6 * 3600)
+
+    # Startup and readiness. The container is built in the background; /health is liveness only.
+    startup_grace_seconds: float = Field(default=10.0, ge=0, le=60)
+    build_retry_initial_seconds: float = Field(default=2.0, gt=0, le=600)
+    build_retry_max_seconds: float = Field(default=60.0, gt=0, le=3600)
 
     # API
     api_auth_mode: ApiAuthMode = ApiAuthMode.DEV_HEADERS
@@ -175,6 +211,19 @@ class Settings(BaseSettings):
         if self.fabric_mode is FabricMode.REST and self.clock is ClockMode.SCENARIO:
             # A frozen clock only makes sense against synthetic telemetry.
             self.clock = ClockMode.SYSTEM
+        if "scheduler_enabled" not in self.model_fields_set:
+            # Deployed environments run autonomously; a developer laptop only does so when asked.
+            self.scheduler_enabled = self.deployment_environment != "local"
+        if "scheduler_startup_delay_seconds" not in self.model_fields_set and self.deployment_environment != "local":
+            self.scheduler_startup_delay_seconds = 120.0
+        if self.build_retry_max_seconds < self.build_retry_initial_seconds:
+            raise ValueError("ORQENTIS_BUILD_RETRY_MAX_SECONDS must be >= ORQENTIS_BUILD_RETRY_INITIAL_SECONDS")
+        if self.scheduler_tick_seconds * 3 > self.scheduler_lease_ttl_seconds:
+            # Renewal is attempted once a third of the TTL is left, so with TTL >= 3 ticks there is always at least
+            # one whole tick between a renewal attempt and expiry. A tick delayed by more than that can lose the lease.
+            raise ValueError(
+                "ORQENTIS_SCHEDULER_LEASE_TTL_SECONDS must be at least three times ORQENTIS_SCHEDULER_TICK_SECONDS"
+            )
         if self.reasoner is ReasonerKind.AGENT_FRAMEWORK:
             if self.llm_provider is LlmProvider.AZURE_OPENAI and not (
                 self.azure_openai_endpoint and self.azure_openai_deployment

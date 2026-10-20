@@ -105,6 +105,128 @@ param azureOpenAiDeployment string = ''
 @description('Optional: full resource id of the Azure OpenAI account (/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<name>). When set, the reader identity gets "Cognitive Services OpenAI User" on it; it may be in another resource group or subscription.')
 param azureOpenAiResourceId string = ''
 
+// ------------------------------------------------------------------------------------------------- autonomous runtime
+
+@description('ORQENTIS_SCHEDULER_ENABLED. true: the app collects, detects, investigates, sweeps SLAs and refreshes its catalog on a schedule. false: it only acts when called through the API.')
+param schedulerEnabled bool = true
+
+@description('Seconds the scheduler waits after the app starts before it takes the leader lease or runs a job (ORQENTIS_SCHEDULER_STARTUP_DELAY_SECONDS). Container Apps runs the old and the new revision side by side during a deploy on the same Azure Files volume; the delay lets the old one drain first. Not a substitute for the database-backed lease: until then deploy with schedulerEnabled = false or accept the risk.')
+@minValue(0)
+@maxValue(900)
+param schedulerStartupDelaySeconds int = 120
+
+@description('Seconds between scheduler ticks, i.e. how often due jobs are started and the lease is renewed (ORQENTIS_SCHEDULER_TICK_SECONDS).')
+@minValue(1)
+@maxValue(60)
+param schedulerTickSeconds int = 5
+
+@description('Leader lease TTL in seconds (ORQENTIS_SCHEDULER_LEASE_TTL_SECONDS). Must be at least three times schedulerTickSeconds, or the app refuses to start.')
+@minValue(5)
+@maxValue(3600)
+param schedulerLeaseTtlSeconds int = 60
+
+@description('Minutes after which a running scheduled job is cancelled (ORQENTIS_SCHEDULER_JOB_TIMEOUT_MINUTES).')
+@minValue(1)
+@maxValue(1440)
+param schedulerJobTimeoutMinutes int = 30
+
+@description('Run the collect + detect job (ORQENTIS_SCHEDULER_COLLECT_ENABLED).')
+param collectEnabled bool = true
+
+@description('Minutes between collect + detect runs (ORQENTIS_SCHEDULER_COLLECT_INTERVAL_MINUTES).')
+@minValue(1)
+@maxValue(1440)
+param collectIntervalMinutes int = 5
+
+@description('Investigate new (DETECTED) incidents automatically as background jobs (ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_ENABLED).')
+param autoInvestigateEnabled bool = true
+
+@description('Minutes between auto-investigation runs (ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_INTERVAL_MINUTES).')
+@minValue(1)
+@maxValue(1440)
+param autoInvestigateIntervalMinutes int = 1
+
+@description('New investigations queued per auto-investigation run (ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_BATCH_SIZE).')
+@minValue(1)
+@maxValue(50)
+param autoInvestigateBatchSize int = 5
+
+@description('Failed investigation attempts after which an incident is left to a human (ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_MAX_ATTEMPTS).')
+@minValue(1)
+@maxValue(20)
+param autoInvestigateMaxAttempts int = 3
+
+@description('Run the SLA sweep that records SLA state changes as events (ORQENTIS_SCHEDULER_SLA_SWEEP_ENABLED).')
+param slaSweepEnabled bool = true
+
+@description('Minutes between SLA sweeps (ORQENTIS_SCHEDULER_SLA_SWEEP_INTERVAL_MINUTES).')
+@minValue(1)
+@maxValue(1440)
+param slaSweepIntervalMinutes int = 15
+
+@description('Reload workspaces, items and dependencies and apply the difference (ORQENTIS_SCHEDULER_CATALOG_REFRESH_ENABLED).')
+param catalogRefreshEnabled bool = true
+
+@description('Minutes between catalog refreshes (ORQENTIS_SCHEDULER_CATALOG_REFRESH_INTERVAL_MINUTES).')
+@minValue(1)
+@maxValue(10080)
+param catalogRefreshIntervalMinutes int = 60
+
+@description('Investigations running at once; further ones queue (ORQENTIS_INVESTIGATION_MAX_CONCURRENCY).')
+@minValue(1)
+@maxValue(16)
+param investigationMaxConcurrency int = 2
+
+@description('Seconds after which a running investigation is abandoned and can be retried (ORQENTIS_INVESTIGATION_TIMEOUT_SECONDS).')
+@minValue(30)
+@maxValue(21600)
+param investigationTimeoutSeconds int = 600
+
+@description('Fabric / Power BI calls in flight at once, across all jobs (ORQENTIS_FABRIC_MAX_CONCURRENCY).')
+@minValue(1)
+@maxValue(64)
+param fabricMaxConcurrency int = 4
+
+@description('Steady Fabric / Power BI request rate per second, across all jobs (ORQENTIS_FABRIC_RATE_PER_SECOND). A 429 pauses every caller.')
+@minValue(1)
+@maxValue(1000)
+param fabricRatePerSecond int = 5
+
+@description('Burst allowance on top of the steady request rate (ORQENTIS_FABRIC_RATE_BURST).')
+@minValue(1)
+@maxValue(1000)
+param fabricRateBurst int = 10
+
+@description('Most pages read per job-instance listing; Fabric documents no result order, so listings are filtered, not stopped early (ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES).')
+@minValue(1)
+@maxValue(1000)
+param fabricJobInstancesMaxPages int = 10
+
+@description('Hours of history read the first time a collector runs, and the most a collector ever re-reads after downtime (ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS).')
+@minValue(1)
+@maxValue(2160)
+param collectionMaxLookbackHours int = 168
+
+@description('Minutes of already-collected history re-read on every run so late-arriving data is not missed; events are de-duplicated (ORQENTIS_COLLECTION_OVERLAP_MINUTES).')
+@minValue(0)
+@maxValue(1440)
+param collectionOverlapMinutes int = 15
+
+@description('Longest the lifespan waits for the first container build attempt before the port opens (ORQENTIS_STARTUP_GRACE_SECONDS). A slow build continues in the background; /health/ready is 503 until it is done.')
+@minValue(0)
+@maxValue(60)
+param startupGraceSeconds int = 10
+
+@description('Seconds before the first retry of a failed container build (ORQENTIS_BUILD_RETRY_INITIAL_SECONDS); the delay doubles up to buildRetryMaxSeconds.')
+@minValue(1)
+@maxValue(600)
+param buildRetryInitialSeconds int = 2
+
+@description('Longest delay between container build retries (ORQENTIS_BUILD_RETRY_MAX_SECONDS); must be at least buildRetryInitialSeconds.')
+@minValue(1)
+@maxValue(3600)
+param buildRetryMaxSeconds int = 60
+
 // ------------------------------------------------------------------------------------------------- network + auth
 
 @description('How the API is exposed. "externalAuthenticated" (default when this and externalIngress are both unset): public endpoint, every request must carry a valid Entra ID token (401 otherwise), optionally limited to allowedIpRanges. "vnet": internal environment with no public IP, reachable from the VNet (requires infrastructureSubnetId). "internal": reachable only from other apps in the Container Apps environment. Authentication is on in every mode. Setting this together with the deprecated externalIngress fails the deployment.')
@@ -373,6 +495,32 @@ var appEnv = concat(
     { name: 'ORQENTIS_REASONER', value: reasoner }
     { name: 'ORQENTIS_DATA_DIR', value: dataMountPath }
     { name: 'ORQENTIS_LOG_FORMAT', value: 'json' }
+    { name: 'ORQENTIS_SCHEDULER_ENABLED', value: schedulerEnabled ? 'true' : 'false' }
+    { name: 'ORQENTIS_SCHEDULER_STARTUP_DELAY_SECONDS', value: string(schedulerStartupDelaySeconds) }
+    { name: 'ORQENTIS_SCHEDULER_TICK_SECONDS', value: string(schedulerTickSeconds) }
+    { name: 'ORQENTIS_SCHEDULER_LEASE_TTL_SECONDS', value: string(schedulerLeaseTtlSeconds) }
+    { name: 'ORQENTIS_SCHEDULER_JOB_TIMEOUT_MINUTES', value: string(schedulerJobTimeoutMinutes) }
+    { name: 'ORQENTIS_SCHEDULER_COLLECT_ENABLED', value: collectEnabled ? 'true' : 'false' }
+    { name: 'ORQENTIS_SCHEDULER_COLLECT_INTERVAL_MINUTES', value: string(collectIntervalMinutes) }
+    { name: 'ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_ENABLED', value: autoInvestigateEnabled ? 'true' : 'false' }
+    { name: 'ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_INTERVAL_MINUTES', value: string(autoInvestigateIntervalMinutes) }
+    { name: 'ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_BATCH_SIZE', value: string(autoInvestigateBatchSize) }
+    { name: 'ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_MAX_ATTEMPTS', value: string(autoInvestigateMaxAttempts) }
+    { name: 'ORQENTIS_SCHEDULER_SLA_SWEEP_ENABLED', value: slaSweepEnabled ? 'true' : 'false' }
+    { name: 'ORQENTIS_SCHEDULER_SLA_SWEEP_INTERVAL_MINUTES', value: string(slaSweepIntervalMinutes) }
+    { name: 'ORQENTIS_SCHEDULER_CATALOG_REFRESH_ENABLED', value: catalogRefreshEnabled ? 'true' : 'false' }
+    { name: 'ORQENTIS_SCHEDULER_CATALOG_REFRESH_INTERVAL_MINUTES', value: string(catalogRefreshIntervalMinutes) }
+    { name: 'ORQENTIS_INVESTIGATION_MAX_CONCURRENCY', value: string(investigationMaxConcurrency) }
+    { name: 'ORQENTIS_INVESTIGATION_TIMEOUT_SECONDS', value: string(investigationTimeoutSeconds) }
+    { name: 'ORQENTIS_FABRIC_MAX_CONCURRENCY', value: string(fabricMaxConcurrency) }
+    { name: 'ORQENTIS_FABRIC_RATE_PER_SECOND', value: string(fabricRatePerSecond) }
+    { name: 'ORQENTIS_FABRIC_RATE_BURST', value: string(fabricRateBurst) }
+    { name: 'ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES', value: string(fabricJobInstancesMaxPages) }
+    { name: 'ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS', value: string(collectionMaxLookbackHours) }
+    { name: 'ORQENTIS_COLLECTION_OVERLAP_MINUTES', value: string(collectionOverlapMinutes) }
+    { name: 'ORQENTIS_STARTUP_GRACE_SECONDS', value: string(startupGraceSeconds) }
+    { name: 'ORQENTIS_BUILD_RETRY_INITIAL_SECONDS', value: string(buildRetryInitialSeconds) }
+    { name: 'ORQENTIS_BUILD_RETRY_MAX_SECONDS', value: string(buildRetryMaxSeconds) }
     { name: 'ORQENTIS_API_MAX_BODY_BYTES', value: string(apiMaxBodyBytes) }
     { name: 'ORQENTIS_API_RATE_LIMIT_MUTATING_PER_MINUTE', value: string(apiRateLimitMutatingPerMinute) }
     { name: 'ORQENTIS_API_RATE_LIMIT_EXPENSIVE_PER_MINUTE', value: string(apiRateLimitExpensivePerMinute) }
@@ -650,9 +798,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             memory: containerMemory
           }
           env: appEnv
+          // /health is liveness: cheap, no dependencies, 200 as soon as the process listens (even while the container
+          // is still being built, or after a build failure that is being retried). /health/ready is readiness: 503
+          // until the container is built and the estate catalog is loaded. Reading the estate (rest mode) happens in
+          // the background after the port opens, so it never counts against the startup probe.
           probes: [
             {
-              // Startup can include a full read of the Fabric estate (rest mode); give it time before liveness.
               type: 'Startup'
               httpGet: {
                 path: '/health'
@@ -660,8 +811,8 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
                 scheme: 'HTTP'
               }
               initialDelaySeconds: 5
-              periodSeconds: 15
-              timeoutSeconds: 5
+              periodSeconds: 5
+              timeoutSeconds: 3
               failureThreshold: 10
             }
             {
@@ -678,7 +829,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               type: 'Readiness'
               httpGet: {
-                path: '/health'
+                path: '/health/ready'
                 port: appPort
                 scheme: 'HTTP'
               }
@@ -705,8 +856,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           )
         }
       ]
-      // SQLite (event store, state DB) and the hash-chained audit log allow a single writer only. Do not raise
-      // maxReplicas until these stores move to Eventhouse / OneLake.
+      // SQLite (event store, state DB) and the hash-chained audit log allow a single writer only, and the leader
+      // lease that gates the scheduler is in-process. Do not raise maxReplicas until the stores and the lease move
+      // to the PostgreSQL system of record.
       scale: {
         minReplicas: 1
         maxReplicas: 1

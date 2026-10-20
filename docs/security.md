@@ -250,3 +250,39 @@ to keep these defences under test.
   and synthetic principals. They have not been checked against a live tenant (ADR-0015).
 * No REST write adapter is shipped. Enabling writes against a real tenant first requires
   implementing and reviewing one.
+
+## 10. Autonomous operation
+
+The scheduler adds an actor, `system:orqentis` (`PrincipalKind.SERVICE`), that runs collection,
+detection, auto-investigation, the SLA sweep and the catalog refresh. It changes nothing about the
+boundaries above:
+
+* Detection is still only deterministic `DetectionRule`s over events. The SLA sweep records
+  assessments as events; opening an incident from one is a rule's job.
+* An automatic investigation is the same workflow with the same allowlisted read-only tools,
+  grounding validation, computed confidence and policy evaluation. It can *request* approvals (as the
+  agent principal), never approve or execute: those paths still require a human principal with the
+  role, and `system:` ids cannot be impersonated over the API.
+* Autonomous loops are bounded: a global Fabric concurrency and rate budget, investigation
+  concurrency and timeouts, a per-incident retry limit, a batch size per run, and non-overlapping
+  jobs. A throttling response from Fabric pauses every caller.
+* Job failures are logged with redacted messages and audited when health changes. The readiness
+  probe is unauthenticated, so it shows only a fixed reason code and the exception type; messages
+  (which can contain file paths) stay in the redacted logs.
+* Catalog refreshes are audited with the ids that changed, and an empty estate is refused so a
+  permission glitch cannot silently blind monitoring.
+
+**Deploys and two writers.** Container Apps (single-revision mode) runs the old and the new revision
+side by side during an update, on the same Azure Files volume, each with its own in-process lease.
+The SQLite stores and the hash-chained audit file are single-writer, so interleaved writes could
+fork the audit chain or contend on the databases. WS1 reduces this (a start delay so the new
+revision does not take the lease while the old one drains, a shutdown that stops the scheduler and
+releases the lease, and an audit log that re-reads its chain head before appending when the file
+grew) but cannot remove it: SMB has no locks, and real multi-writer safety needs the PostgreSQL lease
+and a database-serialised audit chain. **Until then, deploy with the scheduler off
+(`schedulerEnabled = false`) or accept this risk; nothing is deployed before the PostgreSQL work.**
+
+Limits: the scheduler's leader lease and the investigation jobs are in-process, which is correct for
+the single replica this deployment runs and not for several. Jobs are lost on restart (their
+incidents are recovered and re-investigated). Durable jobs and a database-backed lease arrive with
+the PostgreSQL system of record.

@@ -6,7 +6,10 @@ rule-based vs Agent Framework reasoner, local stores vs cloud stores).
 
 from __future__ import annotations
 
+import contextlib
+import inspect
 import shutil
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -28,10 +31,12 @@ from orqentis.fabric.write import DisabledFabricWriteClient, MockFabricWriteClie
 from orqentis.incidents.classification import ErrorClassifier
 from orqentis.incidents.confidence import ConfidenceCalculator
 from orqentis.incidents.detection import DetectionEngine
+from orqentis.incidents.detection_runner import DetectionRunner
 from orqentis.incidents.history import IncidentHistory
 from orqentis.incidents.investigation import InvestigationService
 from orqentis.incidents.service import IncidentService
 from orqentis.incidents.sla import SLAEvaluator
+from orqentis.incidents.sla_sweep import SLASweeper
 from orqentis.incidents.workflows.pipeline_failure import PipelineFailureWorkflow, WorkflowDependencies
 from orqentis.observability.audit import LocalAuditLog
 from orqentis.observability.logging import get_logger
@@ -39,6 +44,10 @@ from orqentis.policies.engine import PolicyEngine
 from orqentis.reports.builder import ReportBuilder
 from orqentis.reports.publisher import ReportPublisher
 from orqentis.runbooks.catalog import RunbookCatalog
+from orqentis.runtime.collection import CollectionService
+from orqentis.runtime.investigations import AutoInvestigationTask, InvestigationJobRunner
+from orqentis.runtime.lease import InProcessLeaderLease, LeaderLease
+from orqentis.runtime.scheduler import JobContext, JobSpec, Scheduler
 from orqentis.storage.dependency_store import SqliteDependencyStore
 from orqentis.storage.event_store import LocalEventStore
 from orqentis.storage.evidence_store import LocalEvidenceStore
@@ -59,6 +68,7 @@ from orqentis.tools.registry import ToolRegistry
 from orqentis.topology.catalog import EstateCatalog
 from orqentis.topology.environment_audit import EnvironmentChangeRecorder
 from orqentis.topology.graph import DependencyGraph
+from orqentis.topology.refresh import CatalogRefresher
 
 _log = get_logger(__name__)
 
@@ -89,12 +99,17 @@ class Container:
     ingestor: TelemetryIngestor
     reports: ReportPublisher
     scenario: ScenarioFixture | None
+    collection: CollectionService
+    catalog_refresher: CatalogRefresher
+    sla_sweeper: SLASweeper
+    investigation_jobs: InvestigationJobRunner
+    lease: LeaderLease
+    scheduler: Scheduler
     _databases: tuple[SqliteDatabase, ...]
 
     async def collect_and_detect(self) -> tuple[IngestionResult, list[Incident]]:
-        ingestion = await self.ingestor.run()
-        created = await self.detection.process(ingestion.new_events)
-        return ingestion, created
+        """Collect, then run detection. Serialised with the scheduled collection (see ``CollectionService``)."""
+        return await self.collection.run()
 
     async def aclose(self) -> None:
         await self.fabric.aclose()
@@ -185,11 +200,40 @@ async def build_container(
     write_client: FabricWriteClient | None = None,
     clock: Clock | None = None,
 ) -> Container:
+    """Wire the application. If anything fails part-way, what was already opened is closed again.
+
+    The API retries a failed build in the background, so leaving SQLite connections or HTTP clients behind would
+    leak a set of them (and keep the data files locked) on every attempt.
+    """
+    cleanup: list[Callable[[], Awaitable[None] | None]] = []
+    try:
+        return await _build_container(
+            settings, reset=reset, reasoner=reasoner, write_client=write_client, clock=clock, cleanup=cleanup
+        )
+    except BaseException:
+        for close in reversed(cleanup):
+            with contextlib.suppress(Exception):
+                outcome = close()
+                if inspect.isawaitable(outcome):
+                    await outcome
+        raise
+
+
+async def _build_container(
+    settings: Settings,
+    *,
+    reset: bool,
+    reasoner: Reasoner | None,
+    write_client: FabricWriteClient | None,
+    clock: Clock | None,
+    cleanup: list[Callable[[], Awaitable[None] | None]],
+) -> Container:
     if reset:
         reset_local_state(settings)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
     fabric, contracts, scenario = await _build_fabric(settings)
+    cleanup.append(fabric.aclose)
     if clock is None:
         clock = (
             FixedClock(scenario.scenario.now)
@@ -198,7 +242,9 @@ async def build_container(
         )
 
     state_db = SqliteDatabase(settings.state_db_path)
+    cleanup.append(state_db.close)
     events_db = SqliteDatabase(settings.event_store_path)
+    cleanup.append(events_db.close)
     event_store = LocalEventStore(events_db)
     repository = SqliteIncidentRepository(state_db)
     evidence_store = LocalEvidenceStore(settings.evidence_dir)
@@ -306,8 +352,95 @@ async def build_container(
     if scenario is not None:
         # Capacity metrics and Delta schema events have no public REST API; in mock mode they are replayed.
         collectors += [CapacityCollector(fabric, catalog), StaticEventCollector(scenario.events)]
-    ingestor = TelemetryIngestor(collectors, event_store, clock)
-    detection = DetectionEngine(incidents, clock)
+    ingestor = TelemetryIngestor(
+        collectors,
+        event_store,
+        clock,
+        lookback=timedelta(hours=settings.collection_max_lookback_hours),
+        overlap=timedelta(minutes=settings.collection_overlap_minutes),
+    )
+    detection = DetectionEngine(incidents, clock, events=event_store)
+
+    # Autonomous runtime: the scheduler is built here but started by the API lifespan (see runtime/service.py).
+    detection_runner = DetectionRunner(event_store, detection)
+    collection = CollectionService(ingestor, detection_runner)
+    catalog_refresher = CatalogRefresher(fabric, contracts, catalog, graph, dependency_store, incidents, audit, clock)
+    sla_sweeper = SLASweeper(
+        catalog, SLAEvaluator(event_store, clock), graph, repository, event_store, detection_runner, clock
+    )
+    investigation_timeout = timedelta(seconds=settings.investigation_timeout_seconds)
+    investigation_jobs = InvestigationJobRunner(
+        investigations,
+        incidents,
+        audit,
+        clock,
+        max_concurrency=settings.investigation_max_concurrency,
+        timeout=investigation_timeout,
+    )
+    auto_investigation = AutoInvestigationTask(
+        incidents,
+        investigation_jobs,
+        clock,
+        catalog=catalog,
+        batch_size=settings.scheduler_auto_investigate_batch_size,
+        max_attempts=settings.scheduler_auto_investigate_max_attempts,
+        orphan_after=investigation_timeout + timedelta(minutes=5),
+    )
+
+    # Jobs receive a JobContext (lease holder + fencing token). Nothing here writes through a fenced store yet; the
+    # PostgreSQL work will pass it down so a deposed leader's late write is rejected.
+    async def collect_job(ctx: JobContext) -> None:
+        await collection.run()
+
+    async def auto_investigate_job(ctx: JobContext) -> None:
+        await auto_investigation.run()
+
+    async def sla_sweep_job(ctx: JobContext) -> None:
+        await sla_sweeper.sweep()
+
+    async def catalog_refresh_job(ctx: JobContext) -> None:
+        await catalog_refresher.refresh()
+
+    lease = InProcessLeaderLease(clock)
+    scheduler = Scheduler(
+        [
+            JobSpec(
+                "collect-detect",
+                timedelta(minutes=settings.scheduler_collect_interval_minutes),
+                collect_job,
+                enabled=settings.scheduler_collect_enabled,
+            ),
+            JobSpec(
+                "auto-investigate",
+                timedelta(minutes=settings.scheduler_auto_investigate_interval_minutes),
+                auto_investigate_job,
+                enabled=settings.scheduler_auto_investigate_enabled,
+            ),
+            # The next two start one interval after the scheduler: the first collection must have run before SLAs
+            # are judged, and the catalog was loaded a moment ago.
+            JobSpec(
+                "sla-sweep",
+                timedelta(minutes=settings.scheduler_sla_sweep_interval_minutes),
+                sla_sweep_job,
+                enabled=settings.scheduler_sla_sweep_enabled,
+                run_immediately=False,
+            ),
+            JobSpec(
+                "catalog-refresh",
+                timedelta(minutes=settings.scheduler_catalog_refresh_interval_minutes),
+                catalog_refresh_job,
+                enabled=settings.scheduler_catalog_refresh_enabled,
+                run_immediately=False,
+            ),
+        ],
+        lease,
+        clock,
+        lease_ttl=timedelta(seconds=settings.scheduler_lease_ttl_seconds),
+        tick_interval=timedelta(seconds=settings.scheduler_tick_seconds),
+        start_delay=timedelta(seconds=settings.scheduler_startup_delay_seconds),
+        default_job_timeout=timedelta(minutes=settings.scheduler_job_timeout_minutes),
+        audit=audit,
+    )
 
     _log.info(
         "container ready",
@@ -339,5 +472,11 @@ async def build_container(
         ingestor=ingestor,
         reports=reports,
         scenario=scenario,
+        collection=collection,
+        catalog_refresher=catalog_refresher,
+        sla_sweeper=sla_sweeper,
+        investigation_jobs=investigation_jobs,
+        lease=lease,
+        scheduler=scheduler,
         _databases=(state_db, events_db),
     )

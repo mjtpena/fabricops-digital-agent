@@ -47,7 +47,8 @@ Demo artefacts are written to `var/demo/`:
 ```bash
 make serve
 curl -s localhost:8000/incidents -H 'X-Orqentis-User: me@contoso.com' | jq '.[0]'
-curl -s -X POST localhost:8000/incidents/INC-2026-0042/investigate -H 'X-Orqentis-User: me@contoso.com' | jq
+curl -s -X POST localhost:8000/incidents/INC-2026-0042/investigate -H 'X-Orqentis-User: me@contoso.com' | jq   # 202 + job
+curl -s localhost:8000/incidents/INC-2026-0042/investigation -H 'X-Orqentis-User: me@contoso.com' | jq          # poll the job
 curl -s localhost:8000/incidents/INC-2026-0042/report?format=markdown -H 'X-Orqentis-User: me@contoso.com'
 curl -s -X POST localhost:8000/approvals/<APR-id>/approve \
      -H 'X-Orqentis-User: olivia@contoso.com' -H 'X-Orqentis-Roles: FabricOps.Operator' \
@@ -80,6 +81,22 @@ explanations in [`.env.example`](../.env.example) and defined in `src/orqentis/c
 Settings are validated at start-up. For example, `dev_headers` authentication is refused outside
 `local`, `agent_framework` needs a model endpoint, and `rest` mode needs `ORQENTIS_TENANT_ID` and
 a contracts file.
+
+### Running the scheduler locally
+
+The scheduler (collect + detect, auto-investigation, SLA sweep, catalog refresh) is off in `local`.
+Turn it on to watch the app work on its own:
+
+```bash
+ORQENTIS_SCHEDULER_ENABLED=true ORQENTIS_SCHEDULER_TICK_SECONDS=2 make serve
+# the seeded incident is investigated without any API call:
+curl -s localhost:8000/incidents/INC-2026-0042/investigation -H 'X-Orqentis-User: me@contoso.com' | jq .trigger   # "SCHEDULER"
+curl -s localhost:8000/health/ready                                                                              # {"status":"ready","scheduler":"leader"}
+```
+
+In mock mode the clock is frozen at the scenario's "now" (`ORQENTIS_CLOCK=scenario`), so each job runs
+once; use `ORQENTIS_CLOCK=system` to see jobs recur. Tests never wait for real time: they advance a
+`FixedClock` and call `Scheduler.tick()` (see `tests/unit/test_scheduler.py`).
 
 ### Running the investigator on an LLM
 

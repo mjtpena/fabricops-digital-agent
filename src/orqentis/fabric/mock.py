@@ -51,8 +51,12 @@ class _MockJobs:
     def __init__(self, scenario: ScenarioFixture) -> None:
         self._runs = scenario.pipeline_runs
 
-    async def list_job_instances(self, workspace_id: str, item_id: str, *, limit: int = 50) -> list[PipelineRun]:
+    async def list_job_instances(
+        self, workspace_id: str, item_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[PipelineRun]:
         runs = [r for r in self._runs if r.workspace_id == workspace_id and r.item_id == item_id]
+        if since is not None:
+            runs = [r for r in runs if r.observed_at is None or r.observed_at >= since]
         runs.sort(key=lambda r: r.start_time.timestamp() if r.start_time else 0.0, reverse=True)
         return runs[:limit]
 
