@@ -38,6 +38,9 @@ from orqentis.incidents.service import IncidentService
 from orqentis.incidents.sla import SLAEvaluator
 from orqentis.incidents.sla_sweep import SLASweeper
 from orqentis.incidents.workflows.pipeline_failure import PipelineFailureWorkflow, WorkflowDependencies
+from orqentis.notifications.factory import build_notification_service
+from orqentis.notifications.port import Notifier
+from orqentis.notifications.sink import NOOP_SINK, NotificationService
 from orqentis.observability.audit import LocalAuditLog
 from orqentis.observability.logging import get_logger
 from orqentis.policies.engine import PolicyEngine
@@ -106,6 +109,9 @@ class Container:
     lease: LeaderLease
     scheduler: Scheduler
     _databases: tuple[SqliteDatabase, ...]
+    # Notifications (ADR-0018): started and stopped with the scheduler by the API runtime. Without a notifier it
+    # discards events.
+    notifications: NotificationService = NOOP_SINK
 
     async def collect_and_detect(self) -> tuple[IngestionResult, list[Incident]]:
         """Collect, then run detection. Serialised with the scheduled collection (see ``CollectionService``)."""
@@ -199,6 +205,7 @@ async def build_container(
     reasoner: Reasoner | None = None,
     write_client: FabricWriteClient | None = None,
     clock: Clock | None = None,
+    notifier: Notifier | None = None,
 ) -> Container:
     """Wire the application. If anything fails part-way, what was already opened is closed again.
 
@@ -208,7 +215,13 @@ async def build_container(
     cleanup: list[Callable[[], Awaitable[None] | None]] = []
     try:
         return await _build_container(
-            settings, reset=reset, reasoner=reasoner, write_client=write_client, clock=clock, cleanup=cleanup
+            settings,
+            reset=reset,
+            reasoner=reasoner,
+            write_client=write_client,
+            clock=clock,
+            notifier=notifier,
+            cleanup=cleanup,
         )
     except BaseException:
         for close in reversed(cleanup):
@@ -226,6 +239,7 @@ async def _build_container(
     reasoner: Reasoner | None,
     write_client: FabricWriteClient | None,
     clock: Clock | None,
+    notifier: Notifier | None,
     cleanup: list[Callable[[], Awaitable[None] | None]],
 ) -> Container:
     if reset:
@@ -277,9 +291,15 @@ async def _build_container(
             if await repository.get(past.incident_id) is None:
                 await repository.save(past)
 
-    incidents = IncidentService(repository, event_store, audit, clock)
+    notifications = build_notification_service(settings, audit, notifier=notifier)
+    incidents = IncidentService(repository, event_store, audit, clock, notifications)
     approvals = ApprovalService(
-        LocalApprovalProvider(state_db), incidents, audit, clock, ttl=timedelta(minutes=settings.approval_ttl_minutes)
+        LocalApprovalProvider(state_db),
+        incidents,
+        audit,
+        clock,
+        ttl=timedelta(minutes=settings.approval_ttl_minutes),
+        notifications=notifications,
     )
     if write_client is None:
         write_client = (
@@ -288,7 +308,14 @@ async def _build_container(
             else DisabledFabricWriteClient()
         )
     gateway = ActionGateway(
-        policy, approvals, write_client, incidents, audit, clock, write_enabled=settings.enable_write_actions
+        policy,
+        approvals,
+        write_client,
+        incidents,
+        audit,
+        clock,
+        write_enabled=settings.enable_write_actions,
+        notifications=notifications,
     )
 
     history = IncidentHistory(repository, classifier, timezone=settings.default_timezone)
@@ -479,4 +506,5 @@ async def _build_container(
         lease=lease,
         scheduler=scheduler,
         _databases=(state_db, events_db),
+        notifications=notifications,
     )

@@ -240,6 +240,43 @@ async def run_demo(scenario: str, data_dir: Path, *, show_report: bool, console:
         await c.aclose()
 
 
+async def _cmd_notify_test(settings: Settings, console: Console) -> int:
+    """Send one test notification through the configured notifier, with the checks a real notification gets."""
+    from datetime import UTC, datetime
+
+    from orqentis.domain.common import new_id
+    from orqentis.notifications.content import DeepLinks, compose
+    from orqentis.notifications.factory import build_notifier
+    from orqentis.notifications.model import NotificationEvent, NotificationKind
+    from orqentis.notifications.port import DeliveryError
+
+    notifier = build_notifier(settings)
+    if notifier is None:
+        console.print("ORQENTIS_NOTIFIER is null: no notifier is configured, so there is nothing to test.")
+        return 2
+    event = NotificationEvent(
+        event_id=new_id("test"),
+        kind=NotificationKind.TEST,
+        occurred_at=datetime.now(UTC),
+        incident_id="test",
+        headline="FabricOps test notification",
+        facts=(("Notifier", notifier.name), ("Destination", notifier.destination), ("Sent by", "orqentis notify-test")),
+    )
+    message = compose(event, DeepLinks(settings.public_base_url, sign_in_path=settings.ui_sign_in_path))
+    try:
+        receipt = await notifier.send(message)
+    except DeliveryError as exc:
+        console.print(
+            f"[red]not delivered[/] to {escape(notifier.destination)}: {escape(exc.code)}: {escape(exc.message)}"
+        )
+        return 1
+    console.print(
+        f"delivered to {escape(notifier.destination)} (HTTP {receipt.status_code}); "
+        f"the card links to {escape(message.link_url)}"
+    )
+    return 0
+
+
 def _cmd_scenarios(settings: Settings, console: Console) -> int:
     table = Table("scenario", "expected category", "runbook", "title")
     for info in list_scenarios(settings.fixtures_dir):
@@ -284,6 +321,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     serve = sub.add_parser("serve", help="Run the REST API (OpenAPI docs at /docs)")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    sub.add_parser("notify-test", help="Send one test notification through the configured notifier")
     sub.add_parser("scenarios", help="List synthetic scenarios")
     sub.add_parser("runbooks", help="Validate and list runbooks")
     audit = sub.add_parser("audit", help="Verify the audit trail hash chain")
@@ -309,6 +347,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         _observability(settings, stream_logs=True)
         uvicorn.run(create_app(settings), host=args.host, port=args.port, log_config=None)
         return 0
+    if args.command == "notify-test":
+        return asyncio.run(_cmd_notify_test(_settings(), console))
     if args.command == "scenarios":
         return _cmd_scenarios(_settings(), console)
     if args.command == "runbooks":
