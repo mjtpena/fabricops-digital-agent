@@ -1,0 +1,95 @@
+"""Storage settings: what a deployed environment must configure, and what only a local test container may."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from orqentis.bootstrap import build_container
+from orqentis.config.settings import ApiAuthMode, PostgresAuth, PostgresSslMode, Settings, StorageBackend
+from tests.conftest import make_settings
+
+POSTGRES = {
+    "storage_backend": StorageBackend.POSTGRES,
+    "postgres_host": "psql-x.postgres.database.azure.com",
+    "postgres_user": "id-fabricops-dev-reader",
+    "evidence_blob_url": "https://stfabricops.blob.core.windows.net",
+}
+
+
+def deployed(tmp_path: Path, **overrides: object) -> Settings:
+    values: dict[str, object] = {"deployment_environment": "dev", "api_auth_mode": ApiAuthMode.EASY_AUTH, **POSTGRES}
+    values.update(overrides)
+    return make_settings(tmp_path, **values)
+
+
+def test_local_storage_is_the_default_and_needs_nothing(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    assert settings.storage_backend is StorageBackend.LOCAL
+    settings.check_storage_for_environment()
+
+
+def test_the_postgres_backend_needs_a_host_a_role_and_a_blob_endpoint(tmp_path: Path) -> None:
+    for missing in ("postgres_host", "postgres_user", "evidence_blob_url"):
+        values = {k: v for k, v in POSTGRES.items() if k != missing}
+        with pytest.raises(ValueError, match=f"ORQENTIS_{missing.upper()}"):
+            make_settings(tmp_path, **values)
+    make_settings(tmp_path, **POSTGRES)
+
+
+@pytest.mark.parametrize("environment", ["dev", "test", "prod"])
+def test_deployed_environments_refuse_local_storage(tmp_path: Path, environment: str) -> None:
+    settings = make_settings(tmp_path, deployment_environment=environment, api_auth_mode=ApiAuthMode.EASY_AUTH)
+    with pytest.raises(ValueError, match="requires ORQENTIS_STORAGE_BACKEND=postgres"):
+        settings.check_storage_for_environment()
+    deployed(tmp_path, deployment_environment=environment).check_storage_for_environment()
+
+
+@pytest.mark.security
+def test_passwordless_and_unencrypted_database_access_is_for_a_local_test_container_only(tmp_path: Path) -> None:
+    make_settings(tmp_path, **POSTGRES, postgres_auth=PostgresAuth.NONE, postgres_ssl_mode=PostgresSslMode.DISABLE)
+    for overrides in ({"postgres_auth": PostgresAuth.NONE}, {"postgres_ssl_mode": PostgresSslMode.DISABLE}):
+        with pytest.raises(ValueError, match="only permitted when deployment_environment=local"):
+            deployed(tmp_path, **overrides)
+    with pytest.raises(ValueError, match="postgres_ssl_mode"):
+        deployed(tmp_path, postgres_ssl_mode="prefer")
+
+
+@pytest.mark.security
+def test_there_is_no_way_to_configure_a_database_password() -> None:
+    names = {name for name in Settings.model_fields if "postgres" in name or "evidence" in name or "anchor" in name}
+    assert names
+    assert not [n for n in names if any(word in n for word in ("password", "secret", "key", "token", "sas"))]
+
+
+def test_the_blob_endpoint_must_be_https_except_for_a_loopback_emulator(tmp_path: Path) -> None:
+    make_settings(tmp_path, **{**POSTGRES, "evidence_blob_url": "http://127.0.0.1:10000/devstoreaccount1"})
+    for bad in ("http://stfabricops.blob.core.windows.net", "ftp://x", "stfabricops.blob.core.windows.net"):
+        with pytest.raises(ValueError, match="must be an https URL"):
+            make_settings(tmp_path, **{**POSTGRES, "evidence_blob_url": bad})
+
+
+def test_pool_and_job_timing_guard_rails(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="POOL_MIN"):
+        make_settings(tmp_path, postgres_pool_min=9, postgres_pool_max=3)
+    with pytest.raises(ValueError, match="postgres_pool_max"):
+        make_settings(tmp_path, postgres_pool_max=1)  # migrations hold a lock on one connection and need a second
+    with pytest.raises(ValueError, match="CLAIM_TTL"):
+        make_settings(tmp_path, investigation_poll_interval_seconds=10, investigation_claim_ttl_seconds=20)
+    with pytest.raises(ValueError, match="postgres_schema"):
+        make_settings(tmp_path, postgres_schema="Robert'); DROP TABLE x;--")
+
+
+async def test_the_container_refuses_a_deployed_environment_on_local_storage_before_touching_anything(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path, deployment_environment="prod", api_auth_mode=ApiAuthMode.EASY_AUTH)
+    with pytest.raises(ValueError, match="requires ORQENTIS_STORAGE_BACKEND=postgres"):
+        await build_container(settings)
+    assert not settings.data_dir.exists()
+
+
+async def test_resetting_local_files_is_refused_for_the_postgres_backend(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="reset deletes local files only"):
+        await build_container(make_settings(tmp_path, **POSTGRES), reset=True)

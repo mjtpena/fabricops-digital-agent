@@ -72,3 +72,16 @@ async def detect_and_investigate(c: Container) -> Incident:
     incident = await detect(c)
     investigated, _ = await c.investigations.investigate(incident.incident_id, actor=OPERATOR)
     return investigated
+
+
+# Service fixtures (PostgreSQL, Azurite, the application on them). Imported last: they use ``make_settings`` above.
+from tests.support.app_fixtures import app_storage  # noqa: E402, F401
+from tests.support.service_fixtures import (  # noqa: E402, F401
+    azurite_server,
+    blob_anchors,
+    blob_evidence,
+    blob_service,
+    pg,
+    pg_config,
+    postgres_server,
+)
