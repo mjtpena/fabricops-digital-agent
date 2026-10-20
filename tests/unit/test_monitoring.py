@@ -83,7 +83,7 @@ def test_every_alert_has_a_severity_a_window_a_threshold_the_action_group_and_a_
     threshold = re.search(r"^\s+threshold: (\S+)$", body, re.M)
     assert threshold is not None, f"{name}: no threshold"
     assert threshold.group(1) in module_params() or threshold.group(1).isdigit()
-    assert "actionGroup.id" in body, f"{name}: does not use the action group"
+    assert "alertActionGroupId" in body, f"{name}: does not use the action group"
     runbook_var = f"runbook{name[0].upper()}{name[1:]}"
     assert f"Runbook: ${{{runbook_var}}}" in body, f"{name}: the description must carry the runbook link"
     assert f"runbook: {runbook_var}" in body, f"{name}: the notification must carry the runbook link"
@@ -136,7 +136,14 @@ def test_every_threshold_and_window_parameter_has_a_documented_default_and_reach
 
 
 def test_nothing_is_hard_coded_so_what_if_works_in_any_subscription() -> None:
-    assert "/subscriptions/" not in MODULE and "subscription()" not in MODULE
+    assert "subscription()" not in MODULE
+    assert not re.search(r"/subscriptions/[0-9a-fA-F]{8}-", MODULE), "a concrete subscription id"
+    # The words "/subscriptions/" may only describe the shape of an id (parameter descriptions, the validation of
+    # existingActionGroupId and its messages), never be one.
+    for line in MODULE.splitlines():
+        if "/subscriptions/" in line:
+            ours = "existingGroup" in line or "existingActionGroupId" in line
+            assert line.startswith("@description(") or ours or line.lstrip().startswith("//"), line
     assert "resourceId(" not in MODULE
     for scope in re.findall(r"scopes: \[(\w+)\]", MODULE):
         assert scope in {"logAnalyticsWorkspaceId", "containerAppId"}
@@ -172,7 +179,12 @@ def test_monitoring_is_added_to_main_additively_behind_a_switch() -> None:
 def test_the_webhook_is_secure_and_receivers_are_never_in_a_parameter_file() -> None:
     assert re.search(r"@secure\(\)\s+param teamsWebhookUri string = ''", MODULE)
     assert re.search(r"@secure\(\)\s+param alertTeamsWebhookUri string = ''", MAIN)
-    allowed = (r"param teamsWebhookUri string = ''", r"empty\(teamsWebhookUri\)", r"serviceUri: teamsWebhookUri")
+    allowed = (
+        r"param teamsWebhookUri string = ''",
+        r"empty\(teamsWebhookUri\)",
+        r"serviceUri: teamsWebhookUri",
+        r"^@description\(",  # a description names the parameter, it never holds a value
+    )
     for line in (line for line in MODULE.splitlines() if "teamsWebhookUri" in line):
         assert any(re.search(pattern, line) for pattern in allowed), (
             f"the secure value is used unexpectedly: {line.strip()}"
@@ -553,8 +565,9 @@ def test_the_defaults_are_consistent_with_each_other() -> None:
 
 
 def test_a_window_shorter_than_the_evaluation_frequency_stops_the_deployment_with_a_readable_reason() -> None:
-    assert "module alertWindowCheck 'input-check.bicep' = {" in MODULE
-    assert "result: any(alertWindowProblem)" in MODULE
+    assert "module alertInputCheck 'input-check.bicep' = {" in MODULE
+    assert "result: any(alertInputProblem)" in MODULE
+    assert "var alertInputProblem = alertWindowProblem != 'ok' ? alertWindowProblem : existingGroupProblem" in MODULE
     assert (
         "windowsTooShort = filter(items(alertWindows), window => window.value < evaluationFrequencyMinutes)" in MODULE
     )
@@ -564,7 +577,7 @@ def test_a_window_shorter_than_the_evaluation_frequency_stops_the_deployment_wit
     assert checked == {main_name(p) for p in WINDOW_PARAMS} | {"alertAuditFailureWindowMinutes"}
     for name, body in alert_rules().items():
         if "scheduledQueryRules" in resource_blocks(MODULE)[name][0]:
-            assert "dependsOn: [alertWindowCheck]" in body, f"{name} must wait for the check"
+            assert "dependsOn: [alertInputCheck]" in body, f"{name} must wait for the check"
 
 
 def test_the_cost_advice_for_a_slower_evaluation_also_raises_the_windows_that_would_be_too_short() -> None:

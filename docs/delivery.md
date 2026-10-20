@@ -463,7 +463,7 @@ gh variable set ACR_RESOURCE_ID       --repo $REPO --body "$ACR_ID"
 gh variable set ACR_PUSH_CLIENT_ID    --repo $REPO --body "$BUILD_APP_ID"          # build job: AcrPush only
 ```
 
-Environment variables:
+Environment variables (`ALERT_ACTION_GROUP_ID` is optional and has its own paragraph below the table):
 
 ```bash
 set_env_vars() {   # set_env_vars <env> <deploy app id> <API app id> <PostgreSQL admin group object id> <its name>
@@ -504,7 +504,24 @@ gh variable set AZURE_CLIENT_ID --repo $REPO --env release --body "$BUILD_APP_ID
 | `CONTAINER_APPS_SUBNET_ID`, `POSTGRES_DELEGATED_SUBNET_ID`, `POSTGRES_PRIVATE_DNS_ZONE_ID` | environment, **required for `test` and `prod`** (unused by `dev`) | resource ids of the subnet that VNet-integrates the Container Apps environment, of the subnet delegated to PostgreSQL, and of the PostgreSQL private DNS zone (section 5b). Identifiers | `.bicepparam` (`infrastructureSubnetId`, `postgresDelegatedSubnetId`, `postgresPrivateDnsZoneId`); the deploy job stops without them, and so does the template |
 | `EVIDENCE_IMMUTABILITY_LOCKED` | environment: **required on `prod`, no default**; optional on `dev` and `test` (default `false`) | `true` or `false` (anything else fails the build): whether the evidence storage account's version-level immutability policy is **Locked**. **Locked is irreversible for the retention period** and needs the owner's sign-off; the first `prod` deployment must say `false` (a policy cannot be created Locked). While it is Unlocked, a holder of `Owner` or `Storage Account Contributor` can delete anchors, audit epoch markers and evidence, so keep those roles minimal until it is locked | `.bicepparam` (`evidenceImmutabilityState`): `true` -> `Locked`, `false` -> `Unlocked` |
 | `AUDIT_OPERATORS_OBJECT_ID` | environment, optional | object id of the Entra group of operators who may open an audit epoch after a restore. Empty: the template assigns nobody and the owner grants it | `.bicepparam` (`auditOperatorsPrincipalId`); the group gets `Storage Blob Data Contributor` on the `audit-epochs` container only |
+| `ALERT_ACTION_GROUP_ID` | environment, optional | resource id of the action group the alerts notify, created and managed **outside** the pipeline (an identifier only; see *Alert receivers* below) | `.bicepparam` (`alertExistingActionGroupId`) |
 | `SMOKE_HEALTH_AUTHENTICATED` | repository or environment, optional | `true` only if `/health` is **not** excluded from Container Apps authentication (`anonymousHealthEndpoints = false`) | smoke test |
+
+**Alert receivers never go through CI.** GitHub Actions prints each step's environment in the job log, and this repository
+is public, so an email address or a webhook URL held in a variable would be published (variables are not masked in the log). The alerts therefore notify an **action group that is created and managed outside the pipeline**
+(`az monitor action-group create`), and the pipeline carries only its resource id in `ALERT_ACTION_GROUP_ID`
+(an identifier, like the other ids above):
+
+```bash
+GROUP_ID=$(az monitor action-group show -g rg-fabricops-dev -n ag-fabricops-dev-oncall --query id -o tsv)
+gh variable set ALERT_ACTION_GROUP_ID --repo $REPO --env dev --body "$GROUP_ID"
+```
+
+When it is set, the template creates and changes no action group and every alert uses that one; add people with
+`az monitor action-group update` or the portal. Unset, the template creates its own group, which then has no receivers unless
+`ALERT_EMAIL_RECEIVERS` / `ALERT_TEAMS_WEBHOOK_URI` are exported in the shell that deploys: that path is for private
+repositories and local deployments only, and the workflows never read those two (a test keeps it so). Details and the
+permissions the deploy identity needs: [operations.md](operations.md), section 4.
 
 Per-environment settings that are not variables (image reference, tags, CPU, retention, replicas, the PostgreSQL SKU
 and backup window, private networking versus dev's public access, the evidence retention and immutability state, `enableWriteActions`) live in

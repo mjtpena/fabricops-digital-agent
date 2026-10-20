@@ -570,10 +570,13 @@ param logDailyQuotaGb int = -1
 @description('Deploy the action group, the six alert rules and the workbook (modules/monitoring.bicep). Alert rules cost a little (docs/cost.md); turn off only for throwaway environments.')
 param monitoringEnabled bool = true
 
-@description('Email addresses that receive every alert. Parameter files must not hold real people: the env/*.bicepparam files read them from the ALERT_EMAIL_RECEIVERS environment variable (comma separated) at deployment time. Empty: the action group exists but notifies nobody by email.')
+@description('Resource id of an action group managed OUTSIDE this template (/subscriptions/<id>/resourceGroups/<name>/providers/Microsoft.Insights/actionGroups/<name>), for example one created with `az monitor action-group create`. When set, every alert uses it and the template neither creates nor modifies an action group, so the people it notifies never pass through the deployment: a public repository prints a workflow job\'s environment in its log, which is why the env/*.bicepparam files read this identifier from ALERT_ACTION_GROUP_ID (a GitHub variable) and not the addresses. The deploying identity needs read access to it. Leave alertEmailReceivers and alertTeamsWebhookUri empty then: setting both fails the deployment. Empty (default): the template creates ag-<prefix> from the two receiver parameters.')
+param alertExistingActionGroupId string = ''
+
+@description('Email addresses that receive every alert, on the action group this template creates. Parameter files must not hold real people: the env/*.bicepparam files read them from the ALERT_EMAIL_RECEIVERS environment variable (comma separated) at deployment time, and only where that value cannot be read by others (a private repository or a local shell). A public repository should use alertExistingActionGroupId. Empty: the action group exists but notifies nobody by email. Refused when alertExistingActionGroupId is set.')
 param alertEmailReceivers array = []
 
-@description('Optional Microsoft Teams Workflows webhook URL for the action group. It is a secret (it carries its own signature): pass it at deployment time (the env/*.bicepparam files read ALERT_TEAMS_WEBHOOK_URI), never commit it. Empty: no webhook receiver. Note that a deployment without it removes a receiver added earlier, because the template owns the action group.')
+@description('Optional Microsoft Teams Workflows webhook URL for the action group. It is a secret (it carries its own signature): pass it at deployment time (the env/*.bicepparam files read ALERT_TEAMS_WEBHOOK_URI), never commit it. Empty: no webhook receiver. Note that a deployment without it removes a receiver added earlier, because the template owns the action group (unless alertExistingActionGroupId is used). Refused when alertExistingActionGroupId is set.')
 @secure()
 param alertTeamsWebhookUri string = ''
 
@@ -1513,6 +1516,7 @@ module monitoring 'modules/monitoring.bicep' = if (monitoringEnabled) {
     logAnalyticsWorkspaceId: logAnalytics.id
     containerAppId: containerApp.id
     containerAppName: containerApp.name
+    existingActionGroupId: alertExistingActionGroupId
     emailReceivers: alertEmailReceivers
     teamsWebhookUri: alertTeamsWebhookUri
     runbookBaseUrl: alertRunbookBaseUrl
@@ -1607,7 +1611,7 @@ output auditEpochContainerName string = evidenceStorage.outputs.auditEpochContai
 @description('Estate contracts container name (ORQENTIS_CONTRACTS_CONTAINER): upload the contracts file here (infra/bicep/README.md, Estate contracts).')
 output contractsContainerName string = evidenceStorage.outputs.contractsContainerName
 
-@description('Resource id of the alert action group (empty when monitoringEnabled is false).')
+@description('Resource id of the action group every alert uses: alertExistingActionGroupId, or the one the template created (empty when monitoringEnabled is false).')
 output alertActionGroupId string = monitoring.?outputs.actionGroupId ?? ''
 
 @description('Names of the alert rules (empty when monitoringEnabled is false).')

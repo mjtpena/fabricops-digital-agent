@@ -46,6 +46,11 @@ section does not match.
   (1 in dev, 2 in test and prod). `docs/operations/restore.md`, `scripts/postgres-bootstrap.sql`.
 - Contract tests for every storage port against the local and the PostgreSQL/Blob adapters, and concurrency tests with
   two instances, two OS processes, a killed process and a graceful stop; CI runs them with PostgreSQL and Azurite.
+- Alerts can notify a separately managed action group (WS9b): `existingActionGroupId` / `alertExistingActionGroupId` (Bicep) and
+  `ALERT_ACTION_GROUP_ID` (read by `env/*.bicepparam`, passed by the deploy job from a GitHub variable). The pipeline then carries only an
+  identifier, so addresses never reach the job log of a public repository; the template creates and changes no action group and a
+  malformed id or an id together with receivers stops the deployment with a readable reason. `scripts/check-alert-action-group.sh`
+  evaluates both modes and the refusals offline in CI. Documented in `docs/operations.md` and `docs/delivery.md`.
 - Observability and operations (ADR-0019): OpenTelemetry metrics behind `observability/metrics.py` (collection duration and
   errors per collector, events ingested, incidents opened and detection latency, investigation duration and outcome, tool errors,
   model tokens and estimated cost, pending approvals, scheduler job runs/failures/overruns, lease changes, and a collection

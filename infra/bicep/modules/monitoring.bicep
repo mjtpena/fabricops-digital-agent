@@ -3,7 +3,8 @@
 // Deployed by main.bicep next to the Container App. Everything is resource-group scoped and derived from the ids that
 // main.bicep passes in: there is no hard-coded resource id, so `what-if` works in any subscription and cloud.
 //
-//   action group  ag-<prefix>   email receivers + an optional Microsoft Teams Workflows webhook (both parameters)
+//   action group  ag-<prefix>   email receivers + an optional Microsoft Teams Workflows webhook (both parameters), OR
+//                               an action group you manage yourself (existingActionGroupId): then none is created
 //   alert rules   <prefix>-...  six alerts, each with a severity, a window, a threshold parameter, the action group
 //                               and a runbook link (docs/operations.md, one section per alert)
 //   workbook      Orqentis FabricOps (<prefix>): collections, errors, detection latency, incidents, investigations,
@@ -41,10 +42,13 @@ param containerAppId string
 @description('Name of the FabricOps Container App (filters the console and system logs to this app).')
 param containerAppName string
 
-@description('Email addresses that receive every alert. Parameter files must not contain real people: pass them at deployment time (the env/*.bicepparam files read ALERT_EMAIL_RECEIVERS).')
+@description('Resource id of an action group that is managed OUTSIDE this template (/subscriptions/<id>/resourceGroups/<name>/providers/Microsoft.Insights/actionGroups/<name>), for example one created with `az monitor action-group create`. When set, every alert uses it and this template neither creates nor modifies an action group, so the people it notifies never pass through the deployment (a public repository prints a workflow job\'s environment in its log). The deploying identity needs read access to it. Leave emailReceivers and teamsWebhookUri empty then: setting both fails the deployment. Empty (default): the template creates ag-<prefix> from emailReceivers and teamsWebhookUri.')
+param existingActionGroupId string = ''
+
+@description('Email addresses that receive every alert, on the action group this template creates. Parameter files must not contain real people: pass them at deployment time (the env/*.bicepparam files read ALERT_EMAIL_RECEIVERS), and only where that value cannot be read by others (a private repository or a local shell). A public repository should use existingActionGroupId instead. Ignored, and refused, when existingActionGroupId is set.')
 param emailReceivers array = []
 
-@description('Optional Microsoft Teams Workflows ("When a Teams webhook request is received") URL. It carries its own signature, so it is a secret: never put it in a parameter file or the repository; pass it at deployment time (the env/*.bicepparam files read ALERT_TEAMS_WEBHOOK_URI) or leave it empty. Empty: no webhook receiver.')
+@description('Optional Microsoft Teams Workflows ("When a Teams webhook request is received") URL. It carries its own signature, so it is a secret: never put it in a parameter file or the repository; pass it at deployment time (the env/*.bicepparam files read ALERT_TEAMS_WEBHOOK_URI) or leave it empty. Empty: no webhook receiver. Refused when existingActionGroupId is set (add the receiver to that action group instead).')
 @secure()
 param teamsWebhookUri string = ''
 
@@ -226,8 +230,23 @@ var auditWindowMinutes = empty(auditWindowCandidates) ? 2880 : auditWindowCandid
 
 var evaluationFrequency = isoDuration['${evaluationFrequencyMinutes}']
 
-// Bicep has no assert: a window shorter than the evaluation frequency makes Azure refuse the rule, so say which window
-// it is before anything is deployed (the same module main.bicep uses for the service-principal inputs).
+// An action group managed outside this template, or the one this template creates.
+var useExistingActionGroup = !empty(existingActionGroupId)
+var existingGroupLowercase = toLower(existingActionGroupId)
+// /subscriptions/<id>/resourceGroups/<name>/providers/Microsoft.Insights/actionGroups/<name>: nine segments, so no
+// index is ever read out of range (Bicep conditions are not short-circuited, nested ternaries are).
+var existingGroupShapeOk = startsWith(existingGroupLowercase, '/subscriptions/') && contains(existingGroupLowercase, '/resourcegroups/') && contains(existingGroupLowercase, '/providers/microsoft.insights/actiongroups/') && length(split(existingGroupLowercase, '/')) == 9
+var existingGroupProblem = !useExistingActionGroup
+  ? 'ok'
+  : !existingGroupShapeOk
+      ? 'existingActionGroupId (alertExistingActionGroupId) must be the resource id of an action group: /subscriptions/<id>/resourceGroups/<name>/providers/Microsoft.Insights/actionGroups/<name>'
+      : (!empty(emailReceivers) || !empty(teamsWebhookUri))
+          ? 'existingActionGroupId is set, so the receivers belong to that action group: leave alertEmailReceivers and alertTeamsWebhookUri empty (unset ALERT_EMAIL_RECEIVERS and ALERT_TEAMS_WEBHOOK_URI), or leave alertExistingActionGroupId empty to let the template manage the receivers'
+          : 'ok'
+
+// Bicep has no assert: a window shorter than the evaluation frequency makes Azure refuse the rule, and an action group id
+// that is malformed or combined with receivers would be silently ignored, so say what is wrong before anything is
+// deployed (the same module main.bicep uses for the service-principal inputs).
 var alertWindows = {
   alertRestartWindowMinutes: restartWindowMinutes
   alertHttp5xxWindowMinutes: http5xxWindowMinutes
@@ -239,6 +258,7 @@ var windowsTooShort = filter(items(alertWindows), window => window.value < evalu
 var alertWindowProblem = empty(windowsTooShort)
   ? 'ok'
   : 'these alert windows (minutes) are shorter than alertEvaluationFrequencyMinutes (${evaluationFrequencyMinutes}): ${join(map(windowsTooShort, window => '${window.key}=${window.value}'), ', ')}. Raise them or lower the frequency'
+var alertInputProblem = alertWindowProblem != 'ok' ? alertWindowProblem : existingGroupProblem
 
 var runbookAppDown = '${runbookBaseUrl}#alert-app-down'
 var runbookRestartLoop = '${runbookBaseUrl}#alert-restart-loop'
@@ -329,7 +349,8 @@ print failures = coalesce(fromMetric, 0.0) + todouble(coalesce(fromLog, 0))
 
 // ================================================================================================= action group
 
-resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
+// Not created when existingActionGroupId names a group that is managed outside this template.
+resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (!useExistingActionGroup) {
   name: actionGroupName
   location: 'global'
   tags: tags
@@ -357,11 +378,15 @@ resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
 
 // ================================================================================================= alert rules
 
-// Fails the deployment, naming the windows, when one is shorter than the evaluation frequency.
-module alertWindowCheck 'input-check.bicep' = {
-  name: 'orqentis-check-alert-windows'
+// What every alert notifies. Referencing the created group keeps the dependency on it.
+var alertActionGroupId = useExistingActionGroup ? existingActionGroupId : actionGroup.id
+
+// Fails the deployment with a readable reason when a window is shorter than the evaluation frequency or the action group
+// inputs contradict each other.
+module alertInputCheck 'input-check.bicep' = {
+  name: 'orqentis-check-alert-inputs'
   params: {
-    result: any(alertWindowProblem)
+    result: any(alertInputProblem)
   }
 }
 
@@ -394,7 +419,7 @@ resource appDown 'Microsoft.Insights/metricAlerts@2018-03-01' = {
     }
     actions: [
       {
-        actionGroupId: actionGroup.id
+        actionGroupId: alertActionGroupId
         webHookProperties: {
           alert: 'app-down'
           runbook: runbookAppDown
@@ -407,7 +432,7 @@ resource appDown 'Microsoft.Insights/metricAlerts@2018-03-01' = {
 @description('Restart loop: the app process (container) started or was terminated restartThreshold times within the window. Sev 1.')
 resource restartLoop 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
   name: '${prefix}-restart-loop'
-  dependsOn: [alertWindowCheck]
+  dependsOn: [alertInputCheck]
   location: location
   tags: tags
   kind: 'LogAlert'
@@ -437,7 +462,7 @@ resource restartLoop 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview'
       ]
     }
     actions: {
-      actionGroups: [actionGroup.id]
+      actionGroups: [alertActionGroupId]
       customProperties: {
         alert: 'restart-loop'
         runbook: runbookRestartLoop
@@ -449,7 +474,7 @@ resource restartLoop 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview'
 @description('5xx rate: at least http5xxRatePercent percent of the requests in the window answered 5xx. Sev 2.')
 resource http5xx 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
   name: '${prefix}-5xx-rate'
-  dependsOn: [alertWindowCheck]
+  dependsOn: [alertInputCheck]
   location: location
   tags: tags
   kind: 'LogAlert'
@@ -479,7 +504,7 @@ resource http5xx 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
       ]
     }
     actions: {
-      actionGroups: [actionGroup.id]
+      actionGroups: [alertActionGroupId]
       customProperties: {
         alert: '5xx-rate'
         runbook: runbookHttp5xx
@@ -491,7 +516,7 @@ resource http5xx 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
 @description('Collector errors: a collector had collectorErrorRuns or more failing runs within the window (one alert per collector). Sev 2.')
 resource collectorErrors 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
   name: '${prefix}-collector-errors'
-  dependsOn: [alertWindowCheck]
+  dependsOn: [alertInputCheck]
   location: location
   tags: tags
   kind: 'LogAlert'
@@ -528,7 +553,7 @@ resource collectorErrors 'Microsoft.Insights/scheduledQueryRules@2023-03-15-prev
       ]
     }
     actions: {
-      actionGroups: [actionGroup.id]
+      actionGroups: [alertActionGroupId]
       customProperties: {
         alert: 'collector-errors'
         runbook: runbookCollectorErrors
@@ -540,7 +565,7 @@ resource collectorErrors 'Microsoft.Insights/scheduledQueryRules@2023-03-15-prev
 @description('Heartbeat: no successful collection for heartbeatMinutes minutes. Sev 1.')
 resource heartbeat 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
   name: '${prefix}-collection-heartbeat'
-  dependsOn: [alertWindowCheck]
+  dependsOn: [alertInputCheck]
   location: location
   tags: tags
   kind: 'LogAlert'
@@ -570,7 +595,7 @@ resource heartbeat 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' =
       ]
     }
     actions: {
-      actionGroups: [actionGroup.id]
+      actionGroups: [alertActionGroupId]
       customProperties: {
         alert: 'collection-heartbeat'
         runbook: runbookHeartbeat
@@ -582,7 +607,7 @@ resource heartbeat 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' =
 @description('Audit verification failure: the hash chain (or its immutable anchor) did not verify, or could not be read. Sev 0.')
 resource auditVerification 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
   name: '${prefix}-audit-verification-failure'
-  dependsOn: [alertWindowCheck]
+  dependsOn: [alertInputCheck]
   location: location
   tags: tags
   kind: 'LogAlert'
@@ -616,7 +641,7 @@ resource auditVerification 'Microsoft.Insights/scheduledQueryRules@2023-03-15-pr
       ]
     }
     actions: {
-      actionGroups: [actionGroup.id]
+      actionGroups: [alertActionGroupId]
       customProperties: {
         alert: 'audit-verification-failure'
         runbook: runbookAuditVerification
@@ -1116,8 +1141,11 @@ resource workbook 'Microsoft.Insights/workbooks@2022-04-01' = {
 
 // ================================================================================================= outputs
 
-@description('Resource id of the action group every alert uses.')
-output actionGroupId string = actionGroup.id
+@description('Resource id of the action group every alert uses (the one from existingActionGroupId, or the one this template created).')
+output actionGroupId string = alertActionGroupId
+
+@description('True when this template created the action group; false when existingActionGroupId names one managed elsewhere.')
+output actionGroupCreatedByTemplate bool = !useExistingActionGroup
 
 @description('Names of the alert rules.')
 output alertRuleNames array = [
@@ -1129,7 +1157,7 @@ output alertRuleNames array = [
   auditVerification.name
 ]
 
-@description('Number of email receivers on the action group (0 means alerts notify nobody).')
+@description('Number of email receivers this template set on its own action group (0 means alerts notify nobody, or that existingActionGroupId is used and its receivers are not known here).')
 output emailReceiverCount int = length(emailReceivers)
 
 @description('Resource id of the workbook.')

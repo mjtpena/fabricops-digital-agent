@@ -191,6 +191,11 @@ jobs:
       - name: Snapshot every environment (offline)
         run: bash scripts/bicep-snapshot.sh "$RUNNER_TEMP/snapshots"
 
+      # The alerts notify an action group the template creates, or one managed outside it (ALERT_ACTION_GROUP_ID, which keeps
+      # addresses out of the job logs of a public repository). Both shapes, and the refusals, are evaluated offline.
+      - name: Check how the alerts reach an action group (offline)
+        run: bash scripts/check-alert-action-group.sh
+
   docker:
     name: Docker image build
     runs-on: ubuntu-24.04

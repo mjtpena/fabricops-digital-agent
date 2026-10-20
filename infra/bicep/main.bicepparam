@@ -150,6 +150,9 @@ param fabricAuthMode = 'managed_identity'
 
 // Monitoring (WS9): action group, six alert rules and a workbook. See infra/bicep/README.md and docs/operations.md.
 // Who is told comes from the deployer's environment, never from this file (see infra/bicep/env/dev.bicepparam).
+// Preferred for a pipeline: an action group you manage yourself (az monitor action-group create); the alerts use it
+// and the template creates none. Then leave alertEmailReceivers and alertTeamsWebhookUri empty.
+// param alertExistingActionGroupId = '/subscriptions/<id>/resourceGroups/<rg>/providers/Microsoft.Insights/actionGroups/<name>'
 param monitoringEnabled = true
 param alertEmailReceivers = []                  // for example ['oncall@example.com']; real addresses stay out of the repository
 // param alertTeamsWebhookUri = readEnvironmentVariable('ALERT_TEAMS_WEBHOOK_URI', '')   // a secret: never write the URL here

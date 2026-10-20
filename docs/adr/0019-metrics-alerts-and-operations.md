@@ -142,11 +142,14 @@ conditions, and they have a guide for running it.
   then reads the database-serialised chain and should pass the immutable anchor to the task.
 * `CollectionService` and the ingestor gained optional `metrics`/`clock` arguments, `IngestionResult` gained `units_ok` and
   `units_failed`. Existing callers are unchanged.
-* The CD pipeline does not yet supply `ALERT_EMAIL_RECEIVERS` / `ALERT_TEAMS_WEBHOOK_URI`. A deployment without them leaves the
-  action group without receivers, and removes receivers added by hand, because the template owns the action group. Wiring them
-  from GitHub *environment secrets* is a decision for the owner (invariant 9 forbids credentials in CI variables; a
-  webhook URL carries its signature); the alternative that keeps CI free of them is a Key Vault `getSecret` reference in the
-  parameter file once WS6 provides the vault.
+* **Receivers stay out of CI (addendum, WS9b).** The repository is public and GitHub Actions prints each step's environment in the
+  job log, and variables are not masked, so addresses or a webhook URL passed through a variable would be published. The pipeline
+  therefore carries only the *identifier* of an action group created and managed outside it: `existingActionGroupId` (Bicep),
+  `ALERT_ACTION_GROUP_ID` (the environment variable and the GitHub variable). When it is set the template creates and changes no
+  action group and every alert uses that one. A malformed id, or an id together with receiver parameters (which would be ignored
+  silently), stops the deployment with a readable reason. Unset, the template creates `ag-<prefix>` from `ALERT_EMAIL_RECEIVERS` /
+  `ALERT_TEAMS_WEBHOOK_URI` as before, which is for private repositories and local shells only; the workflows never read those two.
+  A Key Vault `getSecret` reference in the parameter file remains an alternative for the template-managed group.
 * **Open questions for the orchestrator:** (1) the exact `Reason`/`Log` text of Container Apps platform termination events is
   not documented; the restart-loop alert also counts the application's own start line, which does not depend on it, but check
   the platform leg with `ContainerAppSystemLogs_CL | summarize count() by Reason_s` during the dev test fire. (2) Whether the

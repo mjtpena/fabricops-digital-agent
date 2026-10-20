@@ -104,12 +104,50 @@ like this); the heartbeat does **not** advance. `cancelled`: a deploy, a lost le
 
 ## 4. Alert receivers
 
-The action group `ag-$PREFIX` notifies the people in two **deployment-time** inputs. They are never stored in the
-repository or in a parameter file:
+Who the alerts notify is an **action group**. There are two ways to give the alerts one, and the difference matters in a
+public repository: GitHub Actions prints each step's environment in the job log, so a value that reaches the pipeline as
+a variable, such as an email address, is published to the world.
+
+### Preferred: an action group you manage yourself (`ALERT_ACTION_GROUP_ID`)
+
+The pipeline carries only the group's *identifier*; the people in it never pass through CI. Create the group once, outside
+the pipeline, and tell the environment which one it is:
+
+```bash
+# 1. Create it in the environment's resource group (a different name than the template's own ag-$PREFIX).
+az monitor action-group create -g "$RG" -n "ag-$PREFIX-oncall" --short-name fabricops \
+  --action email oncall oncall@example.com usecommonalertschema        # your team's address; repeat --action for more
+# 2. Give the pipeline its resource id: an identifier, not a receiver. This is the only thing that goes through CI.
+GROUP_ID=$(az monitor action-group show -g "$RG" -n "ag-$PREFIX-oncall" --query id -o tsv)
+gh variable set ALERT_ACTION_GROUP_ID --repo "$REPO" --env dev --body "$GROUP_ID"      # one per environment
+```
+
+From the next deployment every alert uses that group and the template **creates and changes no action group**; add or
+remove people with `az monitor action-group update` or the portal, never through the pipeline. A Teams Workflows webhook
+is added the same way (`--add-action webhook teams <url> usecommonalertschema`, or the portal): the URL is a secret, so
+type it where it is not recorded (not into a shared shell history), and remember that the action group stores it in clear
+and shows it to anyone who can read the group, so keep Reader on the resource group to the operators.
+
+* The deployment stops, with a message, if the value is not an action group's resource id, or if it is combined with
+  `ALERT_EMAIL_RECEIVERS` or `ALERT_TEAMS_WEBHOOK_URI` (receivers next to a managed group would otherwise be ignored
+  without a word).
+* The deploying identity needs **read** access to the group (Contributor on the environment's resource group covers a group
+  in it; give Reader on the group when it lives in another resource group or subscription).
+* An `ag-$PREFIX` created by earlier deployments stays where it is (a deployment never deletes). Either make it the managed
+  group (set `ALERT_ACTION_GROUP_ID` to its id and keep its receivers by hand from then on: the template no longer touches
+  it, so they survive) or delete it.
+* The pipeline cannot see whether the group has a receiver. Look after the first deployment:
+  `az monitor action-group show -g $RG -n <name> --query "{email:emailReceivers[].emailAddress, webhook:webhookReceivers[].name}"`,
+  and press **Test action group** in the portal. The deployment output `alertActionGroupId` names the group the alerts use.
+
+### Only for a private repository or a local shell: receivers as deployment inputs
+
+The template can create the group itself from two inputs. They are never stored in the repository or in a parameter file,
+and they must **never be GitHub variables of a public repository**:
 
 | Input | Where it is read | Form |
 |---|---|---|
-| `ALERT_EMAIL_RECEIVERS` | environment of whoever runs the deployment, read by `infra/bicep/env/*.bicepparam` | comma separated addresses |
+| `ALERT_EMAIL_RECEIVERS` | environment of whoever runs the deployment, read by `infra/bicep/env/*.bicepparam` | comma separated addresses (spaces are trimmed) |
 | `ALERT_TEAMS_WEBHOOK_URI` | same | a Microsoft Teams **Workflows** webhook URL ("When a Teams webhook request is received") |
 
 ```bash
@@ -118,20 +156,18 @@ export ALERT_TEAMS_WEBHOOK_URI=...                                         # fro
 az deployment group create -g "$RG" -p infra/bicep/env/dev.bicepparam      # with the CD variables of delivery.md exported
 ```
 
-* The webhook URL carries its own signature, so treat it as a secret: keep it in the deploying person's secret store,
-  rotate it by recreating the Workflow and redeploying, and do not put it in a repository, a parameter file or a CI
-  variable. The action group stores it in clear and shows it to anyone who can read the action group, so keep Reader on
-  the resource group to the operators.
-* The action group sends the common alert schema. A Teams Workflow shows a chat message from it only if its flow reads
+* The webhook URL carries its own signature: keep it in the deploying person's secret store, rotate it by recreating the
+  Workflow and redeploying.
+* The template owns this group, so a deployment without the inputs leaves it without receivers and removes any added by
+  hand. That is another reason to prefer the managed group above for anything the pipeline deploys.
+* The deployment output `alertEmailReceiverCount` says how many email receivers the last deployment set (0 means alerts
+  notify nobody by email).
+
+### Either way
+
+* The group sends the common alert schema. A Teams Workflow shows a chat message from it only if its flow reads
   `data.essentials.alertRule`, `data.essentials.severity` and the `runbook` custom property and posts them; build the
   flow once and test it with **Test action group** in the portal.
-* **The CD pipeline does not set these variables yet.** The template owns the action group, so a CD run of `main.bicep` with
-  both empty leaves it without receivers and removes any added by hand. Until the pipeline supplies them (a decision for the
-  owner: the webhook is a secret, and invariant 9 keeps credentials out of CI variables), set them in the shell that runs
-  deployments, or accept that CD runs reset the receivers.
-* Check what is configured: `az monitor action-group show -g $RG -n ag-$PREFIX --query "{email:emailReceivers[].emailAddress, webhook:webhookReceivers[].name}"`;
-  the deployment output `alertEmailReceiverCount` says how many email receivers the last deployment set (0 means alerts
-  notify nobody by email).
 
 ## 5. The alerts
 
@@ -352,7 +388,7 @@ FabricOps keeps no credential of its own in the repository, in parameters or in 
 | Entra app registration of the API | Entra ID, no client secret (the API validates bearer tokens only) | Nothing to rotate; review the app role assignments quarterly |
 | CI/CD identities (`fabricops-cicd-*`) | Entra ID federated credentials (OIDC), no secret | Nothing to rotate; keep the subjects as `docs/delivery.md` shows |
 | Live-test service principal (`fabricops-live-reader`) | One client secret outside the repository, on the orchestrator's machine only; its expiry is recorded in `docs/live-environment.md` | `az ad app credential reset --id <appId>` before the date there, update the local copy, delete the old one. Never store it in CI |
-| Teams Workflows webhook | The deployer's secret store (section 4) | Recreate the Workflow, redeploy with the new URL |
+| Teams Workflows webhook | The managed action group (section 4), or the deployer's secret store for a template-managed group | Recreate the Workflow; update the managed group (`az monitor action-group update`) or redeploy with the new URL |
 
 Rotate on a calendar the expiry dates make for you, not after an outage: a secret that expires makes every collector
 fail, and the first symptom is the *collector errors* alert followed by the *heartbeat*.
@@ -430,5 +466,6 @@ Do not stop FabricOps by deleting the Container App or its volume; stop the sche
   (a read-only `GET /scheduler` is a candidate follow-up).
 * The app-down alert depends on the `Replicas` platform metric; an availability test for publicly reachable deployments is a
   follow-up.
-* CD does not supply the alert receivers (section 4).
+* Nothing checks that the action group named by `ALERT_ACTION_GROUP_ID` has a receiver, or that it exists before the first
+  deployment (the deployment of the alert rules fails if it does not): look at it once (section 4).
 * The KQL of the alerts is exercised by the dev test fire, not by an offline test (ADR-0019, *Consequences*).

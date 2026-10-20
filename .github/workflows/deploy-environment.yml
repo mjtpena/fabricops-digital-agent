@@ -24,6 +24,8 @@ name: Deploy environment
 #   CONTAINER_APPS_SUBNET_ID, POSTGRES_DELEGATED_SUBNET_ID, POSTGRES_PRIVATE_DNS_ZONE_ID   test and prod only (required there):
 #                        resource ids of the subnet that VNet-integrates the Container Apps environment, of the subnet delegated
 #                        to PostgreSQL, and of the PostgreSQL private DNS zone (docs/delivery.md, "Private networking")
+#   ALERT_ACTION_GROUP_ID optional: resource id of the action group the alerts notify, managed outside the pipeline
+#                        (an identifier only; addresses and webhooks never go through a variable, see docs/operations.md)
 #   SMOKE_HEALTH_AUTHENTICATED  optional: 'true' only if /health is NOT excluded from Container Apps authentication
 #                        (anonymousHealthEndpoints = false); the default deployment excludes it
 # Repository variables: AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_LOGIN_SERVER, ACR_RESOURCE_ID.
@@ -72,6 +74,8 @@ jobs:
       CONTAINER_APPS_SUBNET_ID: ${{ vars.CONTAINER_APPS_SUBNET_ID }}
       POSTGRES_DELEGATED_SUBNET_ID: ${{ vars.POSTGRES_DELEGATED_SUBNET_ID }}
       POSTGRES_PRIVATE_DNS_ZONE_ID: ${{ vars.POSTGRES_PRIVATE_DNS_ZONE_ID }}
+      # Read by infra/bicep/env/*.bicepparam. An identifier, not a receiver: empty means the template manages its own group.
+      ALERT_ACTION_GROUP_ID: ${{ vars.ALERT_ACTION_GROUP_ID }}
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
