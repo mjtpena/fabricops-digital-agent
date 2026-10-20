@@ -1,7 +1,14 @@
 # Orqentis FabricOps developer commands. Requires Python 3.12+ (override with PYTHON=python3.12).
+# On Windows (GNU make + Git Bash) the venv layout is Scripts/ and `python3` is usually the Microsoft Store stub.
+ifeq ($(OS),Windows_NT)
+PYTHON   ?= python
+VENV_BIN := Scripts
+else
 PYTHON   ?= python3
+VENV_BIN := bin
+endif
 VENV     ?= .venv
-BIN      := $(VENV)/bin
+BIN      := $(VENV)/$(VENV_BIN)
 SCENARIO ?= schema_drift
 SCENARIOS := schema_drift auth_failure capacity_pressure unknown_failure
 

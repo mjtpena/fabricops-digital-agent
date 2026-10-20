@@ -3,7 +3,8 @@
 ## Setup
 
 Requirements: Python 3.12 or newer and `make`. Nothing else: the demo and the tests need no Azure,
-Fabric or LLM access.
+Fabric or LLM access. On Windows, use GNU make from Git Bash; the Makefile detects the `Scripts/`
+venv layout and defaults to `python` (override with `PYTHON=...`).
 
 ```bash
 make install            # .venv + pip install -e ".[dev,llm]"
