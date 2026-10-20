@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from orqentis import __version__
 from orqentis.actions.gateway import ActionBlockedError
+from orqentis.api.middleware import install_api_hardening
 from orqentis.api.routers import approvals, estate, incidents, runbooks, system
 from orqentis.approvals.service import (
     ApprovalError,
@@ -87,4 +88,5 @@ def create_app(settings: Settings | None = None, *, container: Container | None 
 
     for router in (system.router, incidents.router, estate.router, runbooks.router, approvals.router):
         app.include_router(router)
+    install_api_hardening(app, settings)
     return app

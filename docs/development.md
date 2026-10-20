@@ -53,6 +53,13 @@ curl -s -X POST localhost:8000/approvals/<APR-id>/approve \
 
 Interactive OpenAPI documentation is served at `http://127.0.0.1:8000/docs`.
 
+Locally the API only checks the roles that approvals need. To try the production role model (every call
+needs `FabricOps.Reader`, `FabricOps.Automation`, `FabricOps.Operator` or `FabricOps.PlatformAdmin`), start the
+server with `ORQENTIS_API_REQUIRE_READ_ROLE=true` and add `-H 'X-Orqentis-Roles: FabricOps.Reader'`. The
+`dev_headers` mode always produces a person; service principals only exist behind Easy Auth (see
+`tests/support/easy_auth.py` for principals shaped like the ones Container Apps forwards). Request bodies over
+`ORQENTIS_API_MAX_BODY_BYTES` get 413, and mutating or expensive calls are rate limited (429 + `Retry-After`).
+
 ## Configuration
 
 All settings are environment variables with the prefix `ORQENTIS_`. They are listed with

@@ -144,6 +144,15 @@ Locally, identify yourself with headers: `X-Orqentis-User: you@contoso.com` and
 `X-Orqentis-Roles: FabricOps.Operator`. In deployed environments the API uses Microsoft Entra ID
 through Container Apps built-in authentication (`ORQENTIS_API_AUTH_MODE=easy_auth`).
 
+Callers are classified from their token claims: **app-only tokens (service principals, managed
+identities) are services and can never approve, reject or execute**, whatever roles they carry.
+Four app roles control access: `FabricOps.Operator` and `FabricOps.PlatformAdmin` (people; approve),
+`FabricOps.Automation` (applications only: read endpoints and `POST /telemetry/collect`) and
+`FabricOps.Reader` (read-only). Under Easy Auth a caller needs one of them. Request bodies over
+`ORQENTIS_API_MAX_BODY_BYTES` get 413, and mutating or expensive calls are rate limited per principal
+(429 with `Retry-After`). See [docs/security.md](docs/security.md) and
+[ADR-0015](docs/adr/0015-principal-classification-and-api-hardening.md).
+
 ### Using the LLM investigator
 
 The deterministic reasoner is the default, so the demo and the tests run offline. To reason with

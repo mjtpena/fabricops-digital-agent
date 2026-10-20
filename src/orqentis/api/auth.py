@@ -2,47 +2,70 @@
 
 * ``easy_auth``: Azure Container Apps / App Service built-in authentication validates the Entra ID
   token and forwards ``X-MS-CLIENT-PRINCIPAL`` (base64 JSON claims). The app must only be reachable
-  through that front end.
+  through that front end. The claims decide whether the caller is a HUMAN or a SERVICE
+  (``orqentis.api.claims``): app-only tokens are never HUMAN, so they can never approve or execute.
 * ``dev_headers``: local development only (rejected by Settings outside ``local``).
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
-import json
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
+from orqentis.api.claims import (
+    Classification,
+    MalformedClientPrincipalError,
+    Rule,
+    classify,
+    parse_client_principal,
+)
+from orqentis.api.errors import ApiError
 from orqentis.config.settings import ApiAuthMode, Settings
 from orqentis.domain.principals import Principal, PrincipalKind
+from orqentis.observability.logging import get_logger
+
+_log = get_logger(__name__)
 
 OID_CLAIM = "http://schemas.microsoft.com/identity/claims/objectidentifier"
 _RESERVED_PREFIXES = ("agent:", "system:")
 
 
-def _from_easy_auth(header: str | None) -> Principal:
+def classify_client_principal(header: str | None) -> tuple[Principal, Classification]:
+    """Turn an ``X-MS-CLIENT-PRINCIPAL`` header into a principal and the decision that classified it.
+
+    Raises 401 for a missing, malformed or object-id-less principal. An ambiguous or contradictory claim
+    set is not served: it is refused with 403 ``PRINCIPAL_AMBIGUOUS`` and is never HUMAN.
+    """
     if not header:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing X-MS-CLIENT-PRINCIPAL (Entra ID authentication)")
     try:
-        payload = json.loads(base64.b64decode(header))
-    except (binascii.Error, ValueError) as exc:
+        client = parse_client_principal(header)
+    except MalformedClientPrincipalError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Malformed client principal") from exc
-    claims = payload.get("claims") or []
-    role_type = payload.get("role_typ", "roles")
-    name_type = payload.get("name_typ", "name")
-    values = {c.get("typ"): c.get("val") for c in claims if isinstance(c, dict)}
-    principal_id = values.get(OID_CLAIM) or values.get("oid") or values.get(name_type)
-    if not principal_id:
+    decision = classify(client)
+    if decision.rule is Rule.NO_OBJECT_ID:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Client principal has no object id")
-    roles = frozenset(c.get("val") for c in claims if isinstance(c, dict) and c.get("typ") in {role_type, "roles"})
-    return Principal(
-        id=str(principal_id),
-        display_name=str(values.get(name_type) or principal_id),
-        kind=PrincipalKind.HUMAN,
-        roles=frozenset(r for r in roles if r),
-    )
+    principal_id = client.object_id
+    assert principal_id is not None  # NO_OBJECT_ID handled above
+    if decision.ambiguous:
+        _log.warning(
+            "ambiguous client principal refused",
+            extra={"rule": decision.rule.value, "principal_id": principal_id, "detail": decision.detail},
+        )
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "PRINCIPAL_AMBIGUOUS",
+            f"The caller's token claims cannot be classified as a user or an application ({decision.rule.value})",
+        )
+    if principal_id.startswith(_RESERVED_PREFIXES):
+        raise ApiError(status.HTTP_403_FORBIDDEN, "RESERVED_PRINCIPAL", "Reserved principal id")
+    principal = Principal(id=principal_id, display_name=client.display_name, kind=decision.kind, roles=client.roles)
+    return principal, decision
+
+
+def _from_easy_auth(header: str | None) -> Principal:
+    return classify_client_principal(header)[0]
 
 
 def _from_dev_headers(user: str | None, roles: str | None) -> Principal:

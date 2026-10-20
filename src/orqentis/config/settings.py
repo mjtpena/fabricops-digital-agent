@@ -85,6 +85,15 @@ class Settings(BaseSettings):
 
     # API
     api_auth_mode: ApiAuthMode = ApiAuthMode.DEV_HEADERS
+    # Roles for reads. None (default): required under easy_auth, not enforced under dev_headers (local only).
+    # With enforcement every API call needs a FabricOps role (Reader, Automation, Operator or PlatformAdmin).
+    api_require_read_role: bool | None = None
+    # Request limits (per replica, in memory). Bodies over the limit get 413. Mutating calls and the expensive
+    # ones (telemetry collection, investigations, audit verification) are limited per principal and get 429.
+    api_max_body_bytes: int = Field(default=65_536, ge=1_024, le=16_777_216)
+    api_rate_limit_enabled: bool = True
+    api_rate_limit_mutating_per_minute: int = Field(default=30, ge=1, le=10_000)
+    api_rate_limit_expensive_per_minute: int = Field(default=6, ge=1, le=10_000)
 
     # Observability
     log_level: str = "INFO"
@@ -120,6 +129,12 @@ class Settings(BaseSettings):
                     "ORQENTIS_FOUNDRY_PROJECT_ENDPOINT and ORQENTIS_FOUNDRY_MODEL"
                 )
         return self
+
+    @property
+    def read_role_required(self) -> bool:
+        if self.api_require_read_role is not None:
+            return self.api_require_read_role
+        return self.api_auth_mode is ApiAuthMode.EASY_AUTH
 
     @property
     def event_store_path(self) -> Path:
