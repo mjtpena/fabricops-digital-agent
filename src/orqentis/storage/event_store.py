@@ -1,7 +1,7 @@
 """Operational event store.
 
-Target architecture: Microsoft Fabric Eventhouse (KQL database). ``LocalEventStore`` is the
-SQLite development adapter; both satisfy :class:`EventStore`.
+Target architecture: the PostgreSQL system of record (ADR-0008). ``LocalEventStore`` is the SQLite development
+adapter; both satisfy :class:`EventStore`.
 """
 
 from __future__ import annotations
@@ -65,9 +65,19 @@ class EventStore(Protocol):
 
     # ---- durable consumption ----------------------------------------------------------------------------
     async def read_after(self, position: int, *, limit: int = 500) -> list[SequencedEvent]:
-        """Events inserted after ``position`` (0 = from the start), in insertion order, at most ``limit``.
+        """Events after ``position`` (0 = from the start), in sequence order, at most ``limit``.
 
-        ``sequence`` increases with every inserted event and is never reused (a PostgreSQL ``bigserial`` fits).
+        **Contract: only a gap-free, committed prefix may be returned.** A consumer advances its cursor to the highest
+        sequence it was given and never looks back, so if an event with a lower sequence could still become visible
+        later, that event would be skipped forever. ``sequence`` must therefore increase with every inserted event and
+        never be reused, *and* an implementation must not return an event while a lower-numbered one may still commit.
+
+        * SQLite (``LocalEventStore``): one connection and a lock serialise writes, so ``rowid`` order is commit order
+          and the contract holds.
+        * PostgreSQL: a ``bigserial`` alone does **not** satisfy it. Values are assigned at insert time, not commit
+          time, so concurrent transactions (one process with a connection pool is enough) can commit out of order.
+          Serialise appends (``pg_advisory_xact_lock`` around the insert) or read only below the oldest in-flight
+          transaction (``pg_snapshot_xmin(pg_current_snapshot())`` against the transaction id stored with each row).
         """
         ...
 

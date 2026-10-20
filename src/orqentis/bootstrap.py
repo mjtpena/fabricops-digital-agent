@@ -326,7 +326,7 @@ async def _build_container(
         lookback=timedelta(hours=settings.collection_max_lookback_hours),
         overlap=timedelta(minutes=settings.collection_overlap_minutes),
     )
-    detection = DetectionEngine(incidents, clock)
+    detection = DetectionEngine(incidents, clock, events=event_store)
 
     # Autonomous runtime: the scheduler is built here but started by the API lifespan (see runtime/service.py).
     detection_runner = DetectionRunner(event_store, detection)

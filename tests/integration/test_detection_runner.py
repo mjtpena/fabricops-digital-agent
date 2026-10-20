@@ -11,6 +11,7 @@ from orqentis.config.clock import FixedClock
 from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.events import EventType, OperationalEvent
 from orqentis.incidents.detection_runner import DetectionRunner
+from orqentis.storage.event_store import EventQuery
 
 
 async def stored_but_undetected(container: Container) -> None:
@@ -94,3 +95,44 @@ async def test_large_backlogs_are_read_in_batches(container: Container) -> None:
     assert await container.event_store.get_cursor("small-batches") == await newest_sequence(container)
     with pytest.raises(ValueError, match="batch_size"):
         DetectionRunner(container.event_store, container.detection, batch_size=0)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 3, 500])
+async def test_activity_failures_reach_the_incident_whatever_the_batch_boundaries(
+    container: Container, batch_size: int
+) -> None:
+    """The activity failure is stored *before* the pipeline failure that opens the incident (review round 2)."""
+    await stored_but_undetected(container)
+    runner = DetectionRunner(
+        container.event_store, container.detection, consumer=f"batch-{batch_size}", batch_size=batch_size
+    )
+    await runner.run()
+
+    incident = await container.incidents.get("INC-2026-0042")
+    kinds = []
+    for symptom in incident.symptoms:
+        stored = await container.event_store.get(symptom.event_id or "")
+        assert stored is not None
+        kinds.append(stored.event_type)
+    assert sorted(kinds) == [EventType.ACTIVITY_RUN_FAILED, EventType.PIPELINE_RUN_FAILED]
+    assert len(incident.symptoms) == 2, f"batch_size={batch_size}: {[s.description for s in incident.symptoms]}"
+
+
+async def test_an_activity_failure_that_arrives_after_the_incident_exists_is_attached(container: Container) -> None:
+    await stored_but_undetected(container)
+    runner = DetectionRunner(container.event_store, container.detection, consumer="late", batch_size=500)
+    await runner.run()
+    incident = await container.incidents.get("INC-2026-0042")
+    activity = next(
+        e
+        for e in await container.event_store.query(EventQuery(event_types=[EventType.ACTIVITY_RUN_FAILED]))
+        if e.correlation_id == incident.correlation_id
+    )
+    late = activity.model_copy(update={"event_id": "evt-late-activity", "dedupe_key": "late-activity"})
+    assert await container.event_store.append([late])
+
+    await runner.run()
+    symptoms = (await container.incidents.get("INC-2026-0042")).symptoms
+    assert len(symptoms) == 3 and "evt-late-activity" in {s.event_id for s in symptoms}
+    await runner.run()  # nothing new: it is not attached twice
+    assert len((await container.incidents.get("INC-2026-0042")).symptoms) == 3

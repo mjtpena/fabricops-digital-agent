@@ -142,7 +142,8 @@ class Scheduler:
         if len(set(names)) != len(names):
             raise ValueError("job names must be unique")
         if lease_ttl < tick_interval * 3:
-            # The lease is renewed once a third of it is left; it must survive two missed ticks.
+            # Renewal is attempted once a third of the TTL is left, so with TTL >= 3 ticks there is always at least
+            # one whole tick between a renewal attempt and expiry. A tick delayed by more than that can lose the lease.
             raise ValueError("lease_ttl must be at least three times tick_interval")
         self._states = {j.name: _JobState(j) for j in jobs}
         self._lease_port = lease

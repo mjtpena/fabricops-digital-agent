@@ -28,7 +28,7 @@ rewrite when that happens.
    seconds, so tests advance a fake clock and never wait.
 2. **A `LeaderLease` port** (`acquire(name, ttl)`, `renew`, `release`; a holder id and a
    monotonic **fencing token**). Only the holder runs jobs; the scheduler renews when a third of the
-   TTL is left (settings require TTL >= 3 x tick) and cancels running jobs when it loses the lease or
+   TTL is left (settings require TTL >= 3 x tick, so a renewal attempt leaves at least one whole tick before expiry) and cancels running jobs when it loses the lease or
    cannot reach the lease backend. Every job receives a `JobContext` (job name, holder id, fencing
    token, start time) so that a store that supports fenced writes can reject a deposed leader's late
    write; nothing fences yet. We ship `InProcessLeaderLease` now (correct for one process) and a
@@ -82,13 +82,26 @@ rewrite when that happens.
    de-duplicated by `dedupe_key`.
 7. **Durable detection.** Storing events is not detecting them, and a run can be cut short between the
    two (a deploy, a lost lease, the 30-minute job timeout, a later collector failing). The event store
-   therefore numbers every inserted event (`read_after(position)`, a monotonically increasing sequence;
-   a PostgreSQL `bigserial` fits) and keeps a named **cursor** per consumer (`get_cursor` /
-   `advance_cursor`). `DetectionRunner` reads the events after its cursor, runs the detection engine,
-   and moves the cursor only after the engine returned. `CollectionService` runs it after the ingestor
-   *and* when the ingestor is interrupted or raises; the SLA sweep uses the same runner. Re-reading is
-   harmless because the engine de-duplicates by item and correlation, and (for candidates without a
-   correlation id) by the triggering event.
+   therefore numbers every inserted event (`read_after(position)`) and keeps a named **cursor** per
+   consumer (`get_cursor` / `advance_cursor`). `DetectionRunner` reads the events after its cursor, runs
+   the detection engine, and moves the cursor only after the engine returned. `CollectionService` runs it
+   after the ingestor *and* when the ingestor is interrupted or raises; the SLA sweep uses the same
+   runner. Re-reading is harmless because the engine de-duplicates by item and correlation, and (for
+   candidates without a correlation id) by the triggering event.
+   * **The port contract is stronger than "a monotonic number".** A consumer advances its cursor to the
+     highest sequence it was given and never looks back, so `read_after` may only return a **gap-free,
+     committed prefix**: no event may be returned while a lower-numbered one can still become visible.
+     SQLite satisfies this (one connection and a lock serialise writes, so `rowid` order is commit
+     order; never `VACUUM` that table into a different order). **A PostgreSQL `bigserial` alone does
+     not**: values are assigned at insert time, not commit time, so concurrent transactions (one process
+     with a connection pool is enough) can commit out of order and a reader that has advanced past the
+     higher value skips the lower one forever. WS6 must serialise appends (for example
+     `pg_advisory_xact_lock` around the insert) or read only below the oldest in-flight transaction
+     (`pg_snapshot_xmin(pg_current_snapshot())` against the transaction id stored with each row).
+   * The activity failures of a run are stored *before* the run's own failure event. When an incident is
+     opened (or matched), the engine therefore looks up the stored activity failures of that run and
+     attaches them, so the symptoms never depend on where a batch or an interruption falls; failures that
+     arrive later are attached as they come.
 8. **No early stop when paging job instances.** The public documentation of *List Item Job
    Instances* (learn.microsoft.com, checked 2026-10-20) documents only a `continuationToken`,
    states that most items keep about the 100 most recent completed runs plus every active one, and
@@ -126,7 +139,9 @@ rewrite when that happens.
     * shutdown stops the scheduler, cancels its jobs and releases the lease before the app exits;
     * the local audit log re-reads the chain head when the file grew since it last wrote, so appends from
       two processes chain instead of forking (best effort: SMB has no byte-range locks, and two appends in
-      the same instant can still collide);
+      the same instant can still collide). A file that gets *smaller* is never explained by another
+      writer: the log refuses every further append (`AuditIntegrityError`) and `verify` reports it as
+      truncated, instead of absorbing the loss and re-chaining over the gap;
     * **until WS6, deploy with the scheduler off (`schedulerEnabled = false`) or accept this risk.**
       Nothing is deployed before WS6.
 
@@ -159,8 +174,8 @@ rewrite when that happens.
 * Detection processes every stored event once. On the first run after an upgrade the cursor starts at 0,
   so the existing events are read again; only those inside the detection horizon can open incidents and
   existing incidents are found by correlation.
-* The event store's insertion sequence relies on `rowid` in SQLite (never `VACUUM` that table into a
-  different order); PostgreSQL uses `bigserial`.
+* The event store's sequence relies on `rowid` in SQLite. The PostgreSQL adapter must honour the
+  gap-free-committed-prefix contract of `EventStore.read_after` (§7); a bare `bigserial` is not enough.
 * **Open questions for the orchestrator:** (1) verify live whether *List Item Job Instances* is
   newest-first and whether the runs' retention matches the documentation, then decide whether a
   duration-bounded early stop is worth adding; (2) the real Fabric/Power BI throttling quotas per

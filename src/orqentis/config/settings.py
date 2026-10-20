@@ -150,7 +150,8 @@ class Settings(BaseSettings):
         if self.build_retry_max_seconds < self.build_retry_initial_seconds:
             raise ValueError("ORQENTIS_BUILD_RETRY_MAX_SECONDS must be >= ORQENTIS_BUILD_RETRY_INITIAL_SECONDS")
         if self.scheduler_tick_seconds * 3 > self.scheduler_lease_ttl_seconds:
-            # The lease is renewed once a third of its TTL is left; it must survive two missed ticks.
+            # Renewal is attempted once a third of the TTL is left, so with TTL >= 3 ticks there is always at least
+            # one whole tick between a renewal attempt and expiry. A tick delayed by more than that can lose the lease.
             raise ValueError(
                 "ORQENTIS_SCHEDULER_LEASE_TTL_SECONDS must be at least three times ORQENTIS_SCHEDULER_TICK_SECONDS"
             )

@@ -55,7 +55,7 @@ sequenceDiagram
 | `FabricClient` + services (Workspace, Item, Job, Pipeline, SemanticModel, Capacity, Deployment, Dependency) | `fabric.ports` | `MockFabricClient` (synthetic estate) | `RestFabricClient` (Fabric + Power BI REST, read-only) | Both implemented |
 | `FabricWriteClient` | `fabric.ports` | `DisabledFabricWriteClient` (default), `MockFabricWriteClient` | REST write adapter | Write adapter deliberately not built (MVP is read-only) |
 | `TokenProvider` | `fabric.rest.auth` | `AzureIdentityTokenProvider` over `DefaultAzureCredential` / managed / workload identity / environment | same | Implemented |
-| `EventStore` | `storage.event_store` | `LocalEventStore` (SQLite) | `FabricEventhouseStore` (KQL database) | Local implemented; Eventhouse is milestone 9 |
+| `EventStore` | `storage.event_store` | `LocalEventStore` (SQLite) | PostgreSQL (the system of record, ADR-0008). Its `read_after` must return a gap-free, committed prefix (see ADR-0013 §7) | Local implemented; the PostgreSQL adapter arrives with the system of record |
 | `EvidenceStore` | `storage.evidence_store` | `LocalEvidenceStore` (filesystem, immutable) | OneLake (ADLS Gen2 API) | Local implemented |
 | `IncidentRepository` | `storage.incidents` | `SqliteIncidentRepository` | Eventhouse / Azure SQL (decision open, ADR-0003) | Local implemented |
 | `DependencyStore` | `topology.graph` | `SqliteDependencyStore`, `InMemoryDependencyStore` | relational tables | Implemented |

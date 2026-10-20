@@ -14,9 +14,16 @@ from pydantic import AwareDatetime, BaseModel, Field
 
 from orqentis.config.clock import Clock
 from orqentis.domain.common import new_id
+from orqentis.observability.logging import get_logger
 from orqentis.observability.redaction import redact
 
+_log = get_logger(__name__)
+
 GENESIS_HASH = "0" * 64
+
+
+class AuditIntegrityError(Exception):
+    """The audit file no longer matches what this process wrote (it shrank): appending is refused, not repaired."""
 
 
 class AuditRecord(BaseModel):
@@ -74,6 +81,11 @@ class LocalAuditLog:
     process last wrote and, if so, re-reads the chain head (last hash and sequence). That makes interleaved appends
     from two processes chain instead of fork. It is best effort: SMB offers no file locks, so two appends in the very
     same instant can still collide. Real multi-writer safety needs the database-serialised chain (PostgreSQL).
+
+    A file that gets *smaller* is never explained by another writer, so it is never absorbed: records were removed
+    (or the file was replaced) while the process was running. The log then refuses every further append with
+    :class:`AuditIntegrityError` and :meth:`verify` reports the log invalid, so tampering stays visible instead of being
+    silently re-chained over the gap.
     """
 
     def __init__(self, path: Path, clock: Clock) -> None:
@@ -83,6 +95,7 @@ class LocalAuditLog:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._last_hash, self._sequence = self._load_tail()
         self._size = self._file_size()
+        self._breach: str | None = None
 
     def _file_size(self) -> int:
         return self._path.stat().st_size if self._path.exists() else 0
@@ -112,9 +125,18 @@ class LocalAuditLog:
         return GENESIS_HASH, 0
 
     def _sync_tail(self) -> None:
-        if self._file_size() != self._size:  # somebody else appended since we last wrote
+        size = self._file_size()
+        if size < self._size:
+            self._flag_breach(f"the audit log shrank from {self._size} to {size} bytes while the process was running")
+        if size != self._size:  # somebody else appended since we last wrote
             self._last_hash, self._sequence = self._load_tail()
-            self._size = self._file_size()
+            self._size = size
+
+    def _flag_breach(self, reason: str) -> None:
+        if self._breach is None:
+            self._breach = reason
+            _log.error("audit log integrity breach; appends are refused", extra={"reason": reason})
+        raise AuditIntegrityError(self._breach)
 
     async def record(
         self,
@@ -128,10 +150,12 @@ class LocalAuditLog:
         timestamp: datetime | None = None,
     ) -> AuditRecord:
         async with self._lock:
+            if self._breach is not None:
+                raise AuditIntegrityError(self._breach)
             await asyncio.to_thread(self._sync_tail)
-            self._sequence += 1
+            sequence = self._sequence + 1
             draft = AuditRecord(
-                sequence=self._sequence,
+                sequence=sequence,
                 audit_id=new_id("AUD"),
                 timestamp=timestamp or self._clock.now(),
                 actor=actor,
@@ -146,7 +170,7 @@ class LocalAuditLog:
             record = draft.model_copy(update={"hash": _digest(self._last_hash, _body(draft))})
             line = record.model_dump_json() + "\n"
             self._size = await asyncio.to_thread(self._append, line)
-            self._last_hash = record.hash
+            self._sequence, self._last_hash = sequence, record.hash
             return record
 
     def _append(self, line: str) -> int:
@@ -187,4 +211,16 @@ class LocalAuditLog:
                     reason="hash chain broken",
                 )
             prev = record.hash
+        # The chain is intact as far as it goes. Records cut off the end leave no trace in the file itself, but this
+        # process knows how far it had written: fewer records than that, or a shrink it already refused, is tampering.
+        if self._breach is None and len(records) < self._sequence:
+            self._breach = f"the audit log holds {len(records)} records but this process had written {self._sequence}"
+            _log.error("audit log integrity breach; appends are refused", extra={"reason": self._breach})
+        if self._breach is not None:
+            return AuditVerification(
+                valid=False,
+                records=len(records),
+                first_invalid_sequence=len(records) + 1,
+                reason=f"log truncated: {self._breach}",
+            )
         return AuditVerification(valid=True, records=len(records))
