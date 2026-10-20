@@ -9,7 +9,7 @@ write capability turned on.
 
 | Identity | Used by | Permissions | Notes |
 |---|---|---|---|
-| Reader (operating identity), e.g. user-assigned managed identity `id-orqentis-reader` | `RestFabricClient` (all reads); Agent Framework chat client | Fabric workspace **Viewer** on monitored workspaces (includes semantic model read for refresh history); Azure OpenAI **Cognitive Services OpenAI User**; AcrPull on the image registry | Least privilege. No write role anywhere. |
+| Reader (operating identity), e.g. user-assigned managed identity `id-orqentis-reader` | `RestFabricClient` (all reads); Agent Framework chat client | Fabric workspace **Viewer** on monitored workspaces (workspaces, items, job instances and pipeline activity runs; **not** semantic model refresh history, see section 10); Azure OpenAI **Cognitive Services OpenAI User**; AcrPull on the image registry | Least privilege. No write role anywhere. |
 | Actor (write capability), e.g. `id-orqentis-actor` | `FabricWriteClient`, held only by the `ActionGateway` | Fabric **Contributor** only on workspaces where approved remediation is allowed | Not attached to the app unless `enableWriteActions` is set at deployment **and** `ORQENTIS_ENABLE_WRITE_ACTIONS=true`. The MVP ships no REST write adapter. |
 | Human approvers | REST API (`/approvals/*`) | Entra ID app roles `FabricOps.Operator`, `FabricOps.PlatformAdmin` | Roles arrive in the Easy Auth client principal. |
 | The agent | `AGENT_PRINCIPAL` (`agent:FabricOpsInvestigator`) | Tool allowlist from policy | Cannot approve, cannot execute, cannot be impersonated through the API. |
@@ -148,3 +148,72 @@ to keep these defences under test.
 * There is no rate limiting on the internal API, which is internal ingress only.
 * No REST write adapter is shipped. Enabling writes against a real tenant first requires
   implementing and reviewing one.
+
+## 10. Least-privilege findings from the live sandbox
+
+Measured on 2026-10-20 against the FabricOps sandbox estate (`docs/live-environment.md`) with the test
+service principal `fabricops-live-reader`, which holds the workspace **Viewer** role on the four sandbox
+workspaces and nothing else. The evidence is in `tests/live` (skipped unless `ORQENTIS_LIVE_TESTS=1`);
+`scripts/live-estate/create.sh` rebuilds the estate and the grants.
+
+| Read | Workspace Viewer alone | Notes |
+|---|---|---|
+| List workspaces (`GET /v1/workspaces`) | Works | Returns only the workspaces the principal holds a role on. |
+| List and get items | Works | A lakehouse also appears as a second item of type `SQLEndpoint` with the same name; the adapter keeps it as a generic item. |
+| Job instances of pipelines and notebooks | Works | Returned newest first. |
+| Pipeline activity runs (`POST .../queryactivityruns`, a read-only query) | Works | Carries the activity error text. A timed-out activity has an empty error object; the adapter now says "timed out". |
+| Semantic model metadata (`GET .../datasets/{id}`, list datasets and reports) | Works | |
+| **Semantic model refresh history** (`GET .../datasets/{id}/refreshes`) | **Denied: 403 `Unauthorized`** | Power BI requires write permission on the model for refresh history, and Fabric job instances do not cover semantic models (404). There is no read-only grant for it, so the programme did **not** grant one: a Viewer-only FabricOps cannot see refresh outcomes. The refresh collector records the 403 in `collector_errors` and the other collectors carry on. Decision for the owner: accept the gap, grant model-level write (a real privilege increase), or take refresh outcomes from another source (workspace monitoring, or refreshes driven by a pipeline so that the pipeline's run history carries the result). |
+| List capacities (`GET /v1/capacities`) | Works, but is not what it seems | Returns only capacities that are open to everyone (in the sandbox tenant a trial capacity and a PPU capacity). The dedicated F-SKU sandbox capacity is invisible. Capacity roles carry write rights, so they stay ungranted. |
+| Deployment pipelines | Empty list | No deployment-pipeline role is granted (the roles that expose them can deploy). |
+| OneLake (`_delta_log`, tables, files) | **Denied: 403 on every path** | See below. |
+
+### Reading a table's `_delta_log` over OneLake (schema-drift collector, ADR-0009)
+
+Workspace Viewer gives no OneLake data access. The narrowest working read-only grant is a **OneLake data
+access role** on the source lakehouse that gives the principal `Read` on one table. The call replaces the
+lakehouse's whole role set, so send the built-in `DefaultReader` role back unchanged:
+
+```bash
+az rest --method put --resource https://api.fabric.microsoft.com \
+  --url "https://api.fabric.microsoft.com/v1/workspaces/<workspaceId>/items/<lakehouseId>/dataAccessRoles" \
+  --body @roles.json
+```
+
+```json
+{"name": "fabricopsDeltaLogReader", "kind": "Policy",
+ "decisionRules": [{"effect": "Permit", "permission": [
+   {"attributeName": "Action", "attributeValueIncludedIn": ["Read"]},
+   {"attributeName": "Path", "attributeValueIncludedIn": ["Tables/customers"]}]}],
+ "members": {"microsoftEntraMembers": [{"tenantId": "<tenantId>", "objectId": "<principalObjectId>"}]}}
+```
+
+Proven with the test principal on the sandbox DEV lakehouse (`tests/live/test_live_onelake.py`, with the TEST
+lakehouse as the denied control):
+
+* before the role, listing `Tables/customers/_delta_log` and reading `00000000000000000000.json` were both
+  HTTP 403; after it both were HTTP 200, effective immediately; removing the role made them 403 again;
+* the grant is read-only and table-scoped: the other table (`customers_clean`) and `Files` stay 403, and
+  creating a file under `Files` or `Tables/customers` stays 403;
+* role names allow only letters and digits, and roles can be defined only at the lakehouse root or table
+  level, so `_delta_log` cannot be granted on its own: reading the log also lets the identity read that
+  table's data files;
+* no write right, item-level `Write` or Contributor role is involved, and the role goes away with the
+  lakehouse.
+
+The brief expected item-level `Read` + `ReadAll`. `ReadAll` exposes every table and all files, so the
+table-level role is the smaller grant, and there was nothing to stop on. Whether the role also works without
+the Viewer assignment could not be isolated: after the Viewer assignment was deleted, Fabric kept honouring
+it for the service principal for at least 16 minutes (workspace, items, runs and activity runs stayed
+readable). Grant both, and do not assume that removing a service principal's workspace role takes effect
+immediately.
+
+### Failure-injection facts that affect detection
+
+* A Fabric connection of type `WebForPipeline` (used by pipeline Web activities) cannot skip its connection
+  test but accepts any HTTP answer, so a deliberately invalid credential can be stored for failure testing.
+* The pipeline Web activity reports the body of a failed call, not its status code. A 401 from the Fabric API
+  surfaces as "Unable to process the request" and is not recognisable as an authentication failure; a call to
+  the Microsoft Entra token endpoint with a bad client surfaces the `AADSTS` text, which is.
+* A notebook that raises surfaces as pipeline error code 2451 with the exception name and text nested in the
+  message; a timed-out activity surfaces as pipeline error code 500 "InternalServerError executing request".
