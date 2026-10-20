@@ -6,6 +6,9 @@
   transaction has locked, so concurrent workers never get the same job and never wait for each other.
 * **Claim numbers.** Every claim increments ``claim_seq``; ``heartbeat``/``finish``/``release`` must present worker and
   claim number. A worker whose claim expired (a long stall) and was taken over cannot finish the job any more.
+* **Takeover waits for no write.** A write made under a claim holds a shared advisory lock named after the job while
+  it runs (``PostgresDatabase.transaction``); ``reclaim_expired`` takes the exclusive one with a *try* and leaves a job
+  with a write in flight for the next sweep, so neither side waits for the other and a heartbeat is never held up.
 * **Expiry uses the database clock** (``now()``), like the lease.
 """
 
@@ -239,7 +242,9 @@ class PostgresJobStore:
             rows = await conn.fetch(
                 _sql(
                     "WITH expired AS (SELECT job_id FROM investigation_jobs WHERE status = 'RUNNING' "
-                    "AND claim_expires_at < now() AND job_id <> ALL($3::text[]) FOR UPDATE SKIP LOCKED) "
+                    "AND claim_expires_at < now() AND job_id <> ALL($3::text[]) "
+                    "AND pg_try_advisory_xact_lock(hashtextextended('orqentis.job:' || job_id, 0)) "
+                    "FOR UPDATE SKIP LOCKED) "
                     "UPDATE investigation_jobs j SET attempts = j.attempts + 1, "
                     "status = CASE WHEN j.attempts + 1 >= $1 THEN 'FAILED' ELSE 'QUEUED' END, "
                     "claimed_by = NULL, claim_expires_at = NULL, "

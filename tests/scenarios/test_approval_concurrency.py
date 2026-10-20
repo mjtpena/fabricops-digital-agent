@@ -20,9 +20,10 @@ import pytest
 from orqentis.actions.gateway import ActionBlockedError, ActionGateway, ActionOutcome, GatewayStatus
 from orqentis.approvals.service import ApprovalService, ApprovalStateError
 from orqentis.bootstrap import Container, build_container
+from orqentis.config.clock import FixedClock
 from orqentis.domain.actions import Action, ActionStatus
 from orqentis.domain.approvals import ApprovalRequest, ApprovalStatus
-from orqentis.domain.principals import Principal, PrincipalKind
+from orqentis.domain.principals import AGENT_PRINCIPAL, Principal, PrincipalKind
 from orqentis.fabric.errors import FabricError
 from orqentis.policies.engine import PolicyEngine
 from tests.conftest import ADMIN, OPERATOR, detect_and_investigate, make_settings
@@ -278,3 +279,55 @@ async def test_an_action_reclassified_to_a_higher_risk_needs_a_new_approval(
     assert blocked.value.code == "POLICY_RISK_ESCALATED"
     assert spy.calls == []
     assert (await armed.approvals.get(approval_id)).proposed_action.status is ActionStatus.APPROVED
+
+
+# ---- one open approval per action -------------------------------------------------------------------------
+
+
+async def asked_again(c: Container, approval_id: str) -> ActionOutcome:
+    """The agent (or a second investigation) proposes the very action that approval ``approval_id`` is for."""
+    approval = await c.approvals.get(approval_id)
+    incident = await c.incidents.get(approval.incident_id)
+    again = approval.proposed_action.model_copy(update={"status": ActionStatus.PROPOSED, "approval_id": None})
+    return await c.gateway.submit(again, principal=AGENT_PRINCIPAL, incident=incident)
+
+
+async def test_proposing_an_action_that_is_already_granted_and_unused_returns_that_approval(
+    armed: Container, spy: SlowSpy
+) -> None:
+    """Reproduced: it opened a second approval; both could be granted and executed, and the write happened twice."""
+    approval_id = await approved(armed)
+    outcome = await asked_again(armed, approval_id)
+    assert outcome.status is GatewayStatus.ACTION_REQUIRES_APPROVAL
+    assert outcome.approval is not None and outcome.approval.approval_id == approval_id
+    assert outcome.action.approval_id == approval_id and outcome.action.status is ActionStatus.APPROVED
+    assert "already granted" in outcome.message
+    approval = await armed.approvals.get(approval_id)
+    same_action = [
+        a
+        for a in await armed.approvals.list(incident_id=approval.incident_id)
+        if a.action_fingerprint == approval.action_fingerprint
+    ]
+    assert [a.approval_id for a in same_action] == [approval_id]
+
+
+async def test_once_the_granted_action_has_been_used_it_can_be_requested_again(armed: Container, spy: SlowSpy) -> None:
+    approval_id = await approved(armed)
+    assert (await armed.gateway.execute(approval_id, principal=ADMIN)).status is GatewayStatus.EXECUTED
+    outcome = await asked_again(armed, approval_id)
+    assert outcome.approval is not None and outcome.approval.approval_id != approval_id
+    assert outcome.approval.status is ApprovalStatus.PENDING
+
+
+async def test_a_granted_approval_that_ran_out_unused_is_ended_when_the_action_is_requested_again(
+    armed: Container, spy: SlowSpy
+) -> None:
+    approval_id = await approved(armed)
+    assert isinstance(armed.clock, FixedClock)
+    armed.clock.advance(timedelta(minutes=armed.settings.approval_ttl_minutes + 1))
+    outcome = await asked_again(armed, approval_id)
+    assert outcome.approval is not None and outcome.approval.approval_id != approval_id
+    assert outcome.approval.status is ApprovalStatus.PENDING
+    assert (await armed.approvals.get(approval_id)).status is ApprovalStatus.EXPIRED
+    expiries = [r for r in await armed.audit.list() if r.action == "approval.expire"]
+    assert any(r.details.get("approval_id") == approval_id for r in expiries)

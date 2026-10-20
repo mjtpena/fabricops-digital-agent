@@ -50,6 +50,11 @@ class EpochMarker(BaseModel):
     started_at: AwareDatetime
     started_by: str = Field(max_length=200)
     reason: str = Field(max_length=500)
+    # Object names of anchors (``epoch-NNNN/<sequence>-<hash>.json``) that verification no longer holds against the
+    # chain, because the operator who opened this epoch, over an audited override, judged them to be junk (for example
+    # an anchor written by a compromised application identity). Anchors are immutable and cannot be deleted; this is the
+    # only way to stop one from failing verification for ever, and it is itself immutable and names who and why.
+    disregarded_anchors: tuple[str, ...] = Field(default=(), max_length=100)
 
     @property
     def name(self) -> str:

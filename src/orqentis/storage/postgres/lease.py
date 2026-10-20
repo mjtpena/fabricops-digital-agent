@@ -9,8 +9,9 @@
   kept when the current holder re-acquires an unexpired lease. It is never reset: releasing keeps the row with
   ``holder_id`` NULL. Renewals and fenced writes check holder *and* generation (see
   :mod:`orqentis.runtime.fencing` and ``PostgresDatabase.transaction``). A fenced write holds a shared advisory
-  lock named after the lease; ``acquire`` takes the exclusive one. ``renew`` and ``release`` change no generation, so
-  they take none and are never held up by a stream of fenced writes.
+  lock named after the lease; ``acquire`` takes the exclusive one, but only when the lease is free, expired or its
+  own: a follower's request for a lease someone else holds is answered without it. ``renew`` and ``release`` change no
+  generation, so they take none and are never held up by a stream of fenced writes.
 * ``renew`` fails only when the lease was released or taken over -- not merely because it expired and nobody claimed it
   (port contract) -- so a slow leader that nobody replaced keeps its tenure.
 """
@@ -33,6 +34,12 @@ ON CONFLICT (name) DO UPDATE SET
     expires_at = EXCLUDED.expires_at
 WHERE l.expires_at <= now() OR l.holder_id = EXCLUDED.holder_id
 RETURNING generation, EXTRACT(EPOCH FROM (expires_at - now()))::float8 AS remaining
+"""
+
+# A lease another holder has and that has not expired: a follower's request for it needs no exclusive lock.
+_HELD_BY_ANOTHER = """
+SELECT 1 FROM leases
+WHERE name = $1 AND holder_id IS NOT NULL AND holder_id <> $2 AND expires_at > now()
 """
 
 _RENEW = """
@@ -60,6 +67,10 @@ class PostgresLeaderLease:
     async def acquire(self, name: str, ttl: timedelta) -> Lease | None:
         sent_at = self._clock.now()
         async with self._db.transaction(fenced=False) as conn:
+            # A follower is told "not yours" without taking the exclusive lock below: it would queue behind the
+            # leader's writes in flight, and hold the leader's next ones up, at every poll of every follower.
+            if await conn.fetchval(_HELD_BY_ANOTHER, name, self._holder_id) is not None:
+                return None
             # Exclusive against the shared lock every fenced write holds: a takeover waits for the writes in flight
             # (and those that start later queue behind it), so the generation never changes under a write.
             await conn.execute("SELECT pg_advisory_xact_lock($1)", lease_lock_key(name))

@@ -15,6 +15,7 @@
   a takeover waits for the writes in flight, and writes that start after it queued wait behind it: PostgreSQL grants
   lock requests in order, so neither side is starved. (A row-level ``FOR SHARE`` on the lease row lets overlapping
   writers keep a waiting renewal or takeover out for ever; a renewal changes no generation and takes no such lock.)
+  The claim fence of a durable investigation works the same way with a lock named after the job.
 * Every table name in the adapters is unqualified; the connection's ``search_path`` selects the schema.
 """
 
@@ -98,6 +99,11 @@ def _role_initialiser(role: str | None) -> Any:
         await connection.execute(statement)
 
     return init
+
+
+def claim_lock_name(job_id: str) -> str:
+    """The text a job claim's advisory lock is derived from; ``hashtextextended`` of it is the key, in SQL and here."""
+    return f"orqentis.job:{job_id}"
 
 
 def lease_lock_key(name: str) -> int:
@@ -213,9 +219,16 @@ class PostgresDatabase:
                         f"{fence.holder_id}: the write was refused"
                     )
             if fenced and (claim := current_claim_fence()) is not None:
+                # Shared, like the lease fence, and for the same reason: a row-level FOR SHARE would keep the claim's
+                # heartbeat (an UPDATE of that row) waiting behind overlapping writers. Only a takeover of the job
+                # (``reclaim_expired``) takes the exclusive side, and it does not wait: it leaves a job with a write in
+                # flight for the next sweep.
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))", claim_lock_name(claim.job_id)
+                )
                 row = await conn.fetchrow(
                     "SELECT job_id FROM investigation_jobs WHERE job_id = $1 AND claimed_by = $2 AND claim_seq = $3 "
-                    "AND status = 'RUNNING' FOR SHARE",
+                    "AND status = 'RUNNING'",
                     claim.job_id,
                     claim.worker_id,
                     claim.claim,

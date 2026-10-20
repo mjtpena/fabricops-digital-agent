@@ -200,6 +200,7 @@ append-only):
 
 ```bash
 cat > restore-counts.sql <<'SQL'
+SET ROLE :"app_role";   -- the administrator group owns none of the tables: act as the application's role
 SELECT 'incidents', count(*) FROM orqentis.incidents WHERE detected_at <= :'restore_time'
 UNION ALL SELECT 'approvals', count(*) FROM orqentis.approvals WHERE requested_at <= :'restore_time'
 UNION ALL SELECT 'operational_events', count(*) FROM orqentis.operational_events WHERE ts <= :'restore_time'
@@ -207,7 +208,7 @@ UNION ALL SELECT 'audit_records', count(*) FROM orqentis.audit_records WHERE ts 
 UNION ALL SELECT 'investigation_jobs', count(*) FROM orqentis.investigation_jobs WHERE created_at <= :'restore_time'
 UNION ALL SELECT 'audit_sequence_at_restore_time', coalesce(max(sequence), 0) FROM orqentis.audit_records WHERE ts <= :'restore_time';
 SQL
-q() { psql "host=$1 port=5432 dbname=$DB user=$ADMIN_NAME sslmode=verify-full" -At -v ON_ERROR_STOP=1 -v restore_time="$RESTORE_TIME" -f restore-counts.sql; }
+q() { psql "host=$1 port=5432 dbname=$DB user=$ADMIN_NAME sslmode=verify-full" -Atq -v ON_ERROR_STOP=1 -v restore_time="$RESTORE_TIME" -v app_role="$APP_ROLE" -f restore-counts.sql; }
 q "$NEW_FQDN"                                            # the restored server
 diff <(q "$OLD_FQDN") <(q "$NEW_FQDN") && echo "counts match"   # needs the source server to still exist
 ```
@@ -215,7 +216,7 @@ diff <(q "$OLD_FQDN") <(q "$NEW_FQDN") && echo "counts match"   # needs the sour
 The chain head of the restored server against the anchors (the current epoch is in `audit_chain_head`):
 
 ```bash
-psql "host=$NEW_FQDN port=5432 dbname=$DB user=$ADMIN_NAME sslmode=verify-full" -At \
+psql "host=$NEW_FQDN port=5432 dbname=$DB user=$ADMIN_NAME sslmode=verify-full" -Atq \
   -c "SET ROLE \"$APP_ROLE\"" -c "SELECT 'epoch ' || epoch || ', head sequence ' || sequence || ', hash ' || left(hash, 16) FROM orqentis.audit_chain_head"
 az storage blob list --account-name "$EVSA" -c audit-anchors --prefix epoch-0001/ --auth-mode login --num-results '*' \
   --query "[-1].name" -o tsv                             # newest anchor of epoch 1: epoch-0001/<sequence, 12 digits>-<hash, 64 hex>.json
@@ -245,8 +246,9 @@ marker cannot be written it rolls back: **nothing changes.** Run with the applic
 `Audit epoch not started: ... cannot write to the audit epoch container ... Nothing was changed` and exit code 1; ask an
 audit operator. If the process dies between the marker and the commit, the database stays in the old epoch and a marker
 exists for a new one: `orqentis audit` says "restored or rewound", the anchor job refuses to anchor, and running
-`start-epoch` again opens the next epoch number (the unused marker is ignored, because the record it names never existed in
-the chain).
+`start-epoch` again opens the next epoch number. The unused marker then pins nothing and cuts nothing off, because the
+record it names never existed in the chain; that holds even if the app appended records in between. (It is also why a
+marker's list of disregarded anchors, below, counts only once its epoch has really started: nothing audited it before.)
 
 **This step is permanent.** The marker is immutable, so never run `start-epoch` as a rehearsal against an environment's own
 `audit-epochs` container, and run it exactly once per real restore.
@@ -255,6 +257,26 @@ From then on the app anchors under `epoch-NNNN/`, verification checks the new ep
 anchors **below the point where the new epoch opened** keep binding the surviving history: the restored prefix cannot be
 rewritten later without contradicting them. The anchors at or beyond that point describe the records the restore lost; they
 stay in the immutable container as the evidence of the loss and are not held against the new chain. Nothing deletes them.
+
+**A junk anchor.** Anchors are immutable, so one that should never have been written (a compromised application
+identity can create anchors; it cannot change or delete them) stays in the container until its retention ends, and one at
+a sequence the chain has already passed makes `orqentis audit` report `hash chain contradicts the audit anchor` for ever.
+Once you have established that it is junk (the genuine anchors are the ones the anchor job logged as `audit head anchored`;
+compare the container's listing and the storage logs), an operator sets exactly those objects aside when opening the next
+epoch, with the audited override:
+
+```bash
+orqentis audit start-epoch --reason "junk anchor written with the application identity, <ticket>" \
+  --override-verification "<ticket>: anchors epoch-0001/000000000002-<64 hex>.json are not ours" \
+  --disregard-anchor epoch-0001/000000000002-<64 hex>.json          # repeatable, up to 100
+```
+
+Each name is checked to exist (a typo changes nothing) and goes into the new epoch's marker (immutable: who and why) and
+into the `audit.epoch` record. Verification then skips those objects and nothing else; they stay in the container as
+evidence. An ordinary `start-epoch` refuses over such an anchor, and `--disregard-anchor` without
+`--override-verification` is refused too, because it accepts a failed verification. A junk anchor at a sequence *beyond*
+the head looks like a restore and needs no override: the anchors of an earlier epoch at or beyond the sequence where the
+next epoch opened are evidence of lost records, not claims on the new chain.
 
 **Why before.** The restored chain resumes at the sequence numbers the lost records had. Every anchor binds the chain, so if
 the app appended first, its new records would sit at sequence numbers the old epoch already anchored with other hashes: the
@@ -276,8 +298,8 @@ not touch them**, in either direction.
   ```bash
   az storage blob list --account-name "$EVSA" -c evidence --auth-mode login --num-results '*' --query "[].name" -o tsv \
     | cut -d/ -f1 | sort -u > evidence-ids.txt
-  psql "host=$NEW_FQDN port=5432 dbname=$DB user=$ADMIN_NAME sslmode=verify-full" -At \
-    -c "SELECT incident_id FROM orqentis.incidents" | sort -u > database-ids.txt
+  psql "host=$NEW_FQDN port=5432 dbname=$DB user=$ADMIN_NAME sslmode=verify-full" -Atq \
+    -c "SET ROLE \"$APP_ROLE\"" -c "SELECT incident_id FROM orqentis.incidents" | sort -u > database-ids.txt
   comm -23 evidence-ids.txt database-ids.txt | tee orphan-incidents.txt        # evidence of incidents the database no longer knows
   ```
 

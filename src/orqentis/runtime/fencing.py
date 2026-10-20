@@ -9,10 +9,10 @@ database, so there is no window in which a leader that lost the lease (a long pa
 change state.
 
 A **claim fence** does the same for a durable investigation: the worker that claimed the job runs the investigation
-under a :class:`ClaimFence` (job id, worker, claim number), and each write transaction checks, with a shared lock on the
-job row, that this worker still holds that claim. A worker that lost its claim (a database outage longer than the claim
-lifetime, a long pause) and whose job another replica has taken over can then no longer change the incident or request
-approvals; only the new holder can.
+under a :class:`ClaimFence` (job id, worker, claim number), and each write transaction checks, holding a shared lock
+named after the job, that this worker still holds that claim. A worker that lost its claim (a database outage longer
+than the claim lifetime, a long pause) and whose job another replica has taken over can then no longer change the
+incident or request approvals; only the new holder can.
 
 Writes outside a job (API requests: approvals, audit records) carry no fence and are never refused by it. The local
 SQLite adapters ignore fences: they belong to one process, which cannot be deposed.

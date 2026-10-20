@@ -19,6 +19,7 @@ from orqentis.actions.gateway import ActionBlockedError, AuditUnavailableError
 from orqentis.bootstrap import Container, build_container
 from orqentis.domain.actions import Action, ActionStatus
 from orqentis.domain.approvals import ApprovalRequest
+from orqentis.domain.incidents import IncidentStatus
 from tests.conftest import ADMIN, OPERATOR, detect_and_investigate, make_settings
 
 pytestmark = pytest.mark.security
@@ -135,3 +136,28 @@ async def test_when_only_the_outcome_cannot_be_recorded_the_write_stands_and_the
     assert approval.proposed_action.status is ActionStatus.SUCCEEDED  # the approval says what happened
     assert approval.revision >= 2
     assert (await armed.audit.verify()).valid
+
+
+async def test_when_the_intent_cannot_be_recorded_the_incident_does_not_stay_remediating(
+    armed: Container, spy: SpyWriteClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduced: the incident had been moved to REMEDIATING for an execution that then never happened, and stayed
+    there with nothing running and the failed action not shown on it."""
+    approval_id = await approved(armed)
+    incident_id = (await armed.approvals.get(approval_id)).incident_id
+    assert (await armed.incidents.get(incident_id)).status is IncidentStatus.AWAITING_APPROVAL
+    failing_for(armed, monkeypatch, action="action.execute.intent", outcomes=None)
+
+    with pytest.raises(AuditUnavailableError):
+        await armed.gateway.execute(approval_id, principal=OPERATOR)
+
+    monkeypatch.undo()
+    incident = await armed.incidents.get(incident_id)
+    assert incident.status is IncidentStatus.DIAGNOSED
+    shown = next(a for r in incident.recommended_actions for a in r.actions if a.approval_id == approval_id)
+    assert shown.status is ActionStatus.FAILED and shown.result is not None
+    assert shown.result["code"] == "AUDIT_UNAVAILABLE"
+    assert any("audit trail was unavailable" in entry.summary for entry in incident.timeline)
+    transitions = [r for r in await armed.audit.list() if r.action == "incident.transition"]
+    assert any(r.details.get("to") == "DIAGNOSED" and r.details.get("from") == "REMEDIATING" for r in transitions)
+    assert spy.calls == [] and (await armed.audit.verify()).valid

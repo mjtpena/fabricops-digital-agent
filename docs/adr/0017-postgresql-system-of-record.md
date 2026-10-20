@@ -131,7 +131,10 @@ have exactly one winner across any number of processes, and a write behind the c
   on the storage account either, so it cannot change an immutability policy), and a restore that skips the operator step
   is reported and refused rather than waved through. The marker is written inside the transaction, before the commit: with
   the application's identity `start-epoch` stops with a clear error and **nothing changes**; if the process dies between
-  the marker and the commit, the next run opens the next epoch number and the unused marker is ignored.
+  the marker and the commit, the database stays in the old epoch and verification reports "restored or rewound" until the
+  next run, which opens the next epoch number. The **unused marker** (the record it names is not in the chain) then pins
+  nothing and cuts nothing off, even if the application appended records in between, and it disregards no anchors,
+  because nothing audited it. Markers whose record is in the chain are used; the current epoch's marker always is.
   Anchors of an earlier epoch below the sequence where the next epoch opened keep binding the surviving history;
   those at or beyond it describe the records the restore lost and stay as evidence.
 * **What this does not protect, stated plainly.** Tampering is detectable **up to the last anchor**. The records
@@ -141,8 +144,19 @@ have exactly one winner across any number of processes, and a write behind the c
   write junk anchors, which only makes verification fail; someone who also holds the operator role can open an epoch,
   and that is recorded in the chain and in a marker that names who and why. An owner of the storage account who can change
   the immutability policy before it is locked can delete anchors: keep that role small and lock the policy in production.
-* The timestamp is the application clock's, taken while holding the head lock. Audit appends are never fenced (see 7):
-  a record of something that happened is kept even from a deposed leader.
+* **Junk anchors and how an operator sets one aside.** An anchor cannot be deleted before its retention ends, so a junk
+  one written with the application's storage identity (an invented sequence and hash) that sits at a sequence the chain
+  has already passed fails verification for ever, and ordinary `start-epoch` refuses over it. The operator's way out is
+  `orqentis audit start-epoch --reason ... --override-verification <reason> --disregard-anchor
+  epoch-NNNN/<sequence>-<hash>.json` (repeatable, up to 100). Each name must exist; the list is written into the new
+  epoch's marker (immutable, with who and why) and into the `audit.epoch` record, and verification skips exactly those
+  objects and nothing else. They stay in the container as evidence. The application cannot do this (it cannot write the
+  marker), and it needs the audited override. A junk anchor at a sequence *beyond* the head looks like a restore and
+  needs no override: anchors of an earlier epoch at or beyond the sequence where the next epoch opened are evidence of
+  lost records, not claims on the new chain.
+* The timestamp is the database's clock (`clock_timestamp()` taken while holding the head lock) in deployed
+  environments, and never earlier than the previous record; scenario clocks (tests, demos) keep the application's. Audit
+  appends are never fenced (see 7): a record of something that happened is kept even from a deposed leader.
 
 ### 7. Leases with the database clock; fenced writes
 
@@ -153,11 +167,14 @@ have exactly one winner across any number of processes, and a write behind the c
   expired, which is the port's contract. The `Lease` returned carries `expires_at` on the *application* clock (the
   instant the request was sent plus the remaining time the database reports), which can only be early.
 * **Fencing.** The scheduler runs each job under a `Fence(lease, holder, generation)` held in a `ContextVar`. Every write
-  transaction of the PostgreSQL adapters first runs `SELECT ... FROM leases WHERE name AND holder_id AND generation
-  FOR SHARE` and raises `FencingError` if no row matches. The share lock stays for the whole transaction, so a competing
-  `acquire` (an `UPDATE` of that row) **waits for in-flight fenced writes**, and every later fenced write sees the new
-  generation: the check and the write are one atomic unit, with no window for a paused leader to slip through
-  (`tests/concurrency/test_lease_fencing.py`). Writes outside a job (API requests, audit records) carry no fence. The
+  transaction of the PostgreSQL adapters first takes a **shared advisory lock** named after the lease
+  (`pg_advisory_xact_lock_shared`), then runs `SELECT ... FROM leases WHERE name AND holder_id AND generation` and raises
+  `FencingError` if no row matches. The lock stays for the whole transaction, and a competing `acquire` takes the
+  exclusive one, so it **waits for in-flight fenced writes**, writers that start later queue behind it, and every later
+  fenced write sees the new generation: the check and the write are one atomic unit, with no window for a paused leader
+  to slip through (`tests/concurrency/test_lease_fencing.py`). A follower that asks for a lease someone else holds is
+  answered from a plain read, without the exclusive lock, so followers polling every few seconds never queue behind the
+  leader's writes or hold up its next ones. Writes outside a job (API requests, audit records) carry no fence. The
   durable investigation workers start in a clean context.
 * **Mutex for check-then-act.** Detection looks for an incident covering a failure and opens one if there is none. The
   leader's scheduled run and a `POST /telemetry/collect` that lands on another replica could both find none. Detection
@@ -222,19 +239,26 @@ its fix:
   untouched chain used to report it under one append every 20 ms).
 * **A stalled or partitioned worker is harmless.** Its investigation stops once the claim could have been taken over
   (the last renewal older than the claim lifetime minus one interval), and every database write of the investigation
-  runs under a **claim fence**: the transaction takes a shared lock on the job row and checks worker and claim number,
-  so a replaced worker's late writes are refused. Two further backstops in the database: at most **one pending
-  approval per incident and action** (a partial unique index; `submit` returns the existing request), and at most one
-  incident per **detection identity** (item and run, or item and trigger event; `DuplicateIncidentError`). The heartbeat
-  is not moved to a thread: the Entra credential and the pool belong to the event loop, and with the fence a starved
-  heartbeat can no longer do harm; a stall is logged.
+  runs under a **claim fence**: the transaction takes a shared advisory lock named after the job and checks worker and
+  claim number, so a replaced worker's late writes are refused. A takeover of the job (`reclaim_expired`) *tries* the
+  exclusive lock and leaves a job with a write in flight for the next sweep; the heartbeat takes no lock. (A row-level
+  `FOR SHARE` on the job row kept the heartbeat waiting behind six or more overlapping writers.) Two further backstops in
+  the database: at most **one open approval per incident and action** (open: pending, or granted and not yet used; a
+  partial unique index; `submit` returns the existing request, and a grant that ran out unused is ended, audited, when
+  the action is requested again), and at most one incident per **detection identity** (item and run, or item and trigger
+  event; `DuplicateIncidentError`). Migration 0002 creates that index on databases written before it existed: of
+  several open requests for one action it keeps the granted one, else the oldest, and cancels the others with the reason
+  in the document, so the upgrade cannot fail on existing data. The heartbeat is not moved to a thread: the Entra
+  credential and the pool belong to the event loop, and with the fence a starved heartbeat can no longer do harm; a
+  stall is logged.
 * **The detection mutex notices its own death.** A watchdog checks every second that the lock connection answers and
   still holds the lock in `pg_locks`; if not, the section is cancelled with `MutexLostError`. The unique incident key is
   what makes the window until then harmless.
 * **No write without a record.** The gateway appends `action.execute.intent` (approval, fingerprint, claim revision)
   before the write client is called; if that cannot be appended nothing is written, the claim ends as failed and the
-  caller gets 503 `AUDIT_UNAVAILABLE`. If only the outcome record fails the write stands, the intent record names it and
-  an ERROR is logged. (`approval.decide` keeps its order: the decision is durable in the approval row itself.)
+  caller gets 503 `AUDIT_UNAVAILABLE`, and the incident goes back from `REMEDIATING` to `DIAGNOSED` with the failed
+  action and the reason on its timeline (best effort: recording the transition needs the same audit trail). If only the
+  outcome record fails the write stands, the intent record names it and an ERROR is logged. (`approval.decide` keeps its order: the decision is durable in the approval row itself.)
 * **Time comes from the database where it decides something.** Approval expiry is part of the claiming and deciding
   statement (`expires_at > now()` of the database, in deployed environments); audit timestamps are the database's clock,
   never earlier than the previous record. Scenario clocks (tests, demos) keep using the application's clock.
@@ -287,9 +311,10 @@ its fix:
     approvals, audit, leases and jobs, which carry the safety rules, do not depend on it.
   * Rate limits are per replica and in memory (ADR-0015 section 3), so the effective limit is N times the setting.
   * Immutability lasts for the retention period (`evidenceRetentionDays`), after which the reader identity (Blob Data
-    Contributor) could delete an old anchor. Verification compares only the *latest* anchor, which is at most one
-    interval old and always inside the period, so expiry of old anchors loses forensic history, not protection. Lock the
-    policy in production and keep the retention long.
+    Contributor) could delete an old anchor. Verification checks **every** anchor that exists; the newest ones are at most
+    one interval old and always inside the period, and because every record's hash depends on all earlier ones they bind
+    all the history before them, so expiry of old anchors loses forensic detail (where a past discrepancy began), not
+    protection. Lock the policy in production and keep the retention long.
   * Detection serialises on a mutex; a very long detection pass delays other replicas' manual collections up to the
     wait bound (2 minutes) and then fails visibly.
   * Stored aggregates (incidents, approvals, events, principals, jobs) are strict Pydantic models (`extra="forbid"`)

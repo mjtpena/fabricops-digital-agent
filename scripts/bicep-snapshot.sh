@@ -55,7 +55,8 @@ export EVIDENCE_IMMUTABILITY_LOCKED="false"
 export CONTAINER_APPS_SUBNET_ID="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/virtualNetworks/vnet-example/subnets/snet-example-apps"
 export POSTGRES_DELEGATED_SUBNET_ID="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/virtualNetworks/vnet-example/subnets/snet-example-postgres"
 export POSTGRES_PRIVATE_DNS_ZONE_ID="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/privateDnsZones/example.private.postgres.database.azure.com"
-unset FABRIC_MODE POSTGRES_ENTRA_ADMIN_TYPE POSTGRES_EXISTING_SERVER_NAME AUDIT_OPERATORS_OBJECT_ID ALERT_EMAIL_RECEIVERS ALERT_TEAMS_WEBHOOK_URI ALERT_ACTION_GROUP_ID
+unset FABRIC_MODE ALERT_EMAIL_RECEIVERS ALERT_TEAMS_WEBHOOK_URI ALERT_ACTION_GROUP_ID
+unset POSTGRES_ENTRA_ADMIN_TYPE POSTGRES_EXISTING_SERVER_NAME AUDIT_OPERATORS_OBJECT_ID
 # One opt-in, for the check that the alerts use a separately managed action group (scripts/check_action_group_snapshots.py).
 if [[ -n "${SNAPSHOT_ALERT_ACTION_GROUP_ID:-}" ]]; then
   export ALERT_ACTION_GROUP_ID="$SNAPSHOT_ALERT_ACTION_GROUP_ID"

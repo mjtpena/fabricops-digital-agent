@@ -10,8 +10,11 @@ import asyncpg
 import pytest
 
 from orqentis.config.clock import SystemClock
+from orqentis.domain.actions import ActionStatus
+from orqentis.domain.approvals import ApprovalRequest, ApprovalStatus
 from orqentis.storage.postgres import MigrationRunner, PostgresConfig, PostgresDatabase, PostgresStorage
 from orqentis.storage.postgres.migrations import MigrationError, SchemaNotCurrentError, load_migrations
+from tests.contract.conftest import make_approval
 from tests.support.services import PostgresServer
 
 
@@ -148,5 +151,72 @@ async def test_a_failing_migration_leaves_nothing_behind(pg_config: PostgresConf
         status = await MigrationRunner(db, [*good, broken]).status()
         assert [m.version for m in status.pending] == [broken.version]  # the good ones were applied, this one was not
         assert await db.fetchval("SELECT to_regclass('half')") is None  # and its first statement was rolled back
+    finally:
+        await db.close()
+
+
+async def test_upgrading_a_database_with_duplicate_open_approvals_cancels_the_extras_instead_of_failing(
+    pg_config: PostgresConfig,
+) -> None:
+    """Reproduced: the unique index of migration 0002 failed on data the previous release allowed, so the app could
+    not start. The older request of each group is kept (a granted one first) and the others are cancelled."""
+
+    def granted(request: ApprovalRequest, action_status: ActionStatus) -> ApprovalRequest:
+        action = request.proposed_action.model_copy(update={"status": action_status})
+        return request.model_copy(update={"status": ApprovalStatus.APPROVED, "proposed_action": action})
+
+    second, third = "INC-2026-0002", "INC-2026-0003"
+    requests = [
+        make_approval(1),  # a pending twin pair: the older stays
+        make_approval(2),
+        make_approval(3, second),  # a pending one and a granted one that is newer: the granted one stays
+        granted(make_approval(4, second), ActionStatus.APPROVED),
+        granted(make_approval(5, third), ActionStatus.SUCCEEDED),  # used: not a claim on the action any more
+        make_approval(6, third),
+    ]
+    db = await PostgresDatabase.connect(pg_config, None)
+    try:
+        await MigrationRunner(db, load_migrations()[:1]).migrate()  # the previous release's schema
+        for request in requests:
+            await db.execute(
+                "INSERT INTO approvals (approval_id, incident_id, status, action_fingerprint, requested_at, revision, "
+                "body) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                request.approval_id,
+                request.incident_id,
+                request.status.value,
+                request.action_fingerprint,
+                request.requested_at,
+                request.revision,
+                request.model_dump_json(),
+            )
+        assert len(await MigrationRunner(db).migrate()) == len(load_migrations()) - 1  # it does not fail
+
+        stored = {
+            r["approval_id"]: ApprovalRequest.model_validate_json(r["body"])
+            for r in await db.fetch("SELECT approval_id, body FROM approvals")
+        }
+        assert {k: v.status for k, v in stored.items()} == {
+            "APR-1": ApprovalStatus.PENDING,
+            "APR-2": ApprovalStatus.CANCELLED,
+            "APR-3": ApprovalStatus.CANCELLED,
+            "APR-4": ApprovalStatus.APPROVED,
+            "APR-5": ApprovalStatus.APPROVED,
+            "APR-6": ApprovalStatus.PENDING,
+        }
+        cancelled = stored["APR-2"]
+        assert cancelled.revision == 1 and cancelled.proposed_action.status is ActionStatus.CANCELLED
+        assert cancelled.decision_comment is not None and "database upgrade" in cancelled.decision_comment
+        columns = await db.fetch("SELECT approval_id, status, revision, action_status FROM approvals ORDER BY 1")
+        assert [(r["approval_id"], r["status"], r["revision"], r["action_status"]) for r in columns][:2] == [
+            ("APR-1", "PENDING", 0, "PROPOSED"),
+            ("APR-2", "CANCELLED", 1, "CANCELLED"),
+        ]
+        # ...and the index is there: a new request for a covered action is not a second open approval.
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await db.execute(
+                "INSERT INTO approvals (approval_id, incident_id, status, action_fingerprint, requested_at, "
+                "body, action_status) SELECT 'APR-9', incident_id, 'PENDING', action_fingerprint, now(), body, "
+                "'AWAITING_APPROVAL' FROM approvals WHERE approval_id = 'APR-1'"
+            )
     finally:
         await db.close()

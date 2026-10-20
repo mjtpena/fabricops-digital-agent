@@ -60,3 +60,15 @@ async def test_refs_list_every_anchor_of_an_epoch_by_name_with_its_full_hash(anc
     assert {r.hash for r in refs if r.sequence == 5} == {f"{5:064x}", "b" * 64}
     assert all(len(r.hash) == 64 for r in refs)
     assert [r.sequence for r in await anchor_store.refs(2)] == [7]
+
+
+async def test_latest_skips_the_anchors_an_operator_disregarded(anchor_store: AuditAnchorStore) -> None:
+    for sequence in (5, 40):
+        await anchor_store.put(anchor(sequence))
+    junk = anchor(900, "c" * 64)
+    await anchor_store.put(junk)
+    top = await anchor_store.latest(1)
+    assert top is not None and top.sequence == 900
+    skipped = await anchor_store.latest(1, exclude=[junk.name])
+    assert skipped is not None and skipped.sequence == 40
+    assert await anchor_store.latest(1, exclude=[anchor(5).name, anchor(40).name, junk.name]) is None

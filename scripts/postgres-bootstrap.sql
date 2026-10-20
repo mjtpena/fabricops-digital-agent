@@ -72,7 +72,7 @@ WHERE NOT :'entra_role_exists'::boolean
 -- 1b. Creating objects OWNED by the application role needs the right to SET ROLE to it. On PostgreSQL 16 and later a role
 -- that creates another role holds only the ADMIN option on it, not the right to use it (see `createrole_self_grant`);
 -- before 16, membership is needed. If the person running this cannot yet, grant it to them, without INHERIT, for the
--- next steps. Section 5 takes the SET part back (16 and later), so the right does not outlive the bootstrap.
+-- next steps. Section 3b takes the SET part back (16 and later), so the right does not outlive the bootstrap.
 SELECT (CASE WHEN current_setting('server_version_num')::int >= 160000
              THEN pg_has_role(current_user, :'app_role', 'SET')
              ELSE pg_has_role(current_user, :'app_role', 'MEMBER') END) AS can_set_app_role \gset
@@ -134,6 +134,18 @@ WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'azure_pg_admin')
 \gexec
 GRANT CONNECT ON DATABASE :"app_db" TO CURRENT_USER;
 
+-- 3b. Take back the temporary right to SET ROLE (PostgreSQL 16 and later; the ADMIN option stays, so this can be run again).
+--
+-- This comes BEFORE the operators grant below on purpose. The operators group is very often the very role running this
+-- (members of the Entra administrator group sign in with the group's name, so current_user is the group): taking SET back
+-- after the operators grant would overwrite that grant for the same role. Done first, the person who ran this loses the
+-- temporary right, and the operators grant, which comes last, gives the operators group SET TRUE for good. An individual
+-- administrator who belongs to the group ends with no right of their own and keeps SET through the group.
+SELECT format('GRANT %I TO CURRENT_USER WITH SET FALSE, INHERIT FALSE', :'app_role')
+WHERE current_setting('server_version_num')::int >= 160000
+  AND NOT :'can_set_app_role'::boolean
+\gexec
+
 -- 4. Optional: the operators group may act as the application role (psql variable `operator_role`; skipped when unset).
 --
 -- After a restore someone has to run `orqentis audit start-epoch` against the restored server (docs/operations/restore.md).
@@ -168,12 +180,6 @@ GRANT CONNECT ON DATABASE :"app_db" TO CURRENT_USER;
     )
     \gexec
 \endif
-
--- 5. Take back the temporary right to SET ROLE (PostgreSQL 16 and later; the ADMIN option stays, so this can be run again).
-SELECT format('GRANT %I TO CURRENT_USER WITH SET FALSE, INHERIT FALSE', :'app_role')
-WHERE current_setting('server_version_num')::int >= 160000
-  AND NOT :'can_set_app_role'::boolean
-\gexec
 
 -- Show the result.
 SELECT r.rolname AS role, r.rolsuper AS superuser, r.rolcreatedb AS createdb, r.rolcreaterole AS createrole,

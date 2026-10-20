@@ -34,10 +34,18 @@ section does not match.
   action: its marker lives in the `audit-epochs` container that the application can only read) records a restore after
   verifying the chain, with an audited `--override-verification`. `orqentis db migrate|status|reseed-counters`.
 - Safe against stalled or partitioned replicas: a worker that cannot renew its job claim stops, its database writes are
-  fenced by the claim, there is at most one pending approval per action and one incident per detection (migration 0002),
+  fenced by the claim, there is at most one open approval (pending, or granted and not yet used) per action and one
+  incident per detection (migration 0002, which cancels duplicates a database already holds instead of failing),
   the detection mutex cancels its section if its lock connection dies, approval expiry and audit timestamps use the
-  database clock, the lease fence no longer starves renewals, and a Fabric write is preceded by an
-  `action.execute.intent` audit record (503 `AUDIT_UNAVAILABLE`, nothing written, if it cannot be appended).
+  database clock, neither the lease fence nor the claim fence starves a renewal or a heartbeat, a polling follower never
+  queues behind the leader's writes, and a Fabric write is preceded by an `action.execute.intent` audit record (503
+  `AUDIT_UNAVAILABLE`, nothing written, the incident back to `DIAGNOSED`, if it cannot be appended).
+- Audit operators can set a junk anchor aside: `orqentis audit start-epoch --override-verification ... --disregard-anchor
+  <object name>` records it in the new epoch's immutable marker and in the chain; an epoch marker whose commit never
+  happened pins nothing, even if the app appended records before the retry. Documented in `docs/operations/restore.md`.
+- `/health/ready` on the leader says `degraded: ["audit anchoring stale"]` when the anchor job has not succeeded for twice
+  its interval; `scripts/postgres-bootstrap.sql` leaves the operators group with `SET TRUE` whether the group itself or one
+  of its members runs it.
 - Bicep: test and prod are private (VNet-integrated Container Apps environment and PostgreSQL, no "Allow Azure services"),
   `audit-epochs` container and operators group, an explicit `EVIDENCE_IMMUTABILITY_LOCKED` decision for prod, a connection
   budget that assumes overlapping revisions, and the Storage Blob Data Reader role id corrected.

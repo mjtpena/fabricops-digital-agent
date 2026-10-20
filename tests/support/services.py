@@ -32,6 +32,7 @@ class PostgresServer:
     port: int
     user: str = "postgres"
     database: str = "postgres"
+    container: str | None = None  # the Docker container, when this module started the server (for `docker exec psql`)
 
 
 @dataclass(frozen=True)
@@ -103,9 +104,52 @@ def start_postgres() -> Iterator[PostgresServer]:
                 raise RuntimeError("PostgreSQL did not become ready")
             time.sleep(0.5)
         time.sleep(1.0)  # the entrypoint restarts the server once after initialisation
-        yield PostgresServer("127.0.0.1", _published_port(name, 5432))
+        yield PostgresServer("127.0.0.1", _published_port(name, 5432), container=name)
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
+
+
+def run_psql(
+    server: PostgresServer,
+    *,
+    user: str,
+    database: str,
+    stdin: str,
+    arguments: tuple[str, ...] = (),
+    password: str | None = None,
+    timeout: float = 120,
+) -> subprocess.CompletedProcess[str]:
+    """Run the ``psql`` client against ``server`` as ``user``, reading ``stdin`` as a script (``-f -``).
+
+    Output is unaligned and tuples-only, so a query's rows are one ``a|b`` line each. The server's own user
+    (``server.user``, normally a superuser) needs no password; any other role logs in with ``password`` (a value the
+    test generated for the run). A server this module started is reached with ``docker exec`` (the Windows host has no
+    psql); an existing server (CI) with the psql on PATH, over TCP for a role that needs a password, because the local
+    socket there may be peer-authenticated. Without either, the test is skipped (failed under REQUIRE_SERVICES=1).
+    """
+    environment = dict(os.environ)
+    environment.pop("PGPASSWORD", None)
+    if password is not None:
+        environment["PGPASSWORD"] = password
+    tail = ["-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", *arguments, "-f", "-"]
+    if server.container is not None:
+        command = ["docker", "exec", "-i", "-e", "PGPASSWORD", server.container, "psql", "-U", user, "-d", database]
+    else:
+        if shutil.which("psql") is None:
+            skip_or_fail("this test needs a psql client on PATH, or Docker")
+        host = "127.0.0.1" if password is not None and server.host.startswith("/") else server.host
+        command = ["psql", "-h", host, "-p", str(server.port), "-U", user, "-d", database]
+    done = subprocess.run(
+        [*command, *tail],
+        input=stdin.encode("utf-8"),
+        capture_output=True,
+        timeout=timeout,
+        env=environment,
+        check=False,
+    )
+    return subprocess.CompletedProcess(
+        done.args, done.returncode, done.stdout.decode("utf-8", "replace"), done.stderr.decode("utf-8", "replace")
+    )
 
 
 def start_azurite() -> Iterator[AzuriteServer]:

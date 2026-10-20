@@ -230,3 +230,39 @@ async def test_renewing_and_taking_over_are_not_starved_by_a_stream_of_fenced_wr
         await asyncio.gather(*writers, return_exceptions=True)
         await busy.close()
         await second.close()
+
+
+async def test_a_follower_polling_for_the_lease_does_not_queue_behind_the_leaders_writes(
+    pg: PostgresStorage, pg_config: PostgresConfig
+) -> None:
+    """Every follower asks every few seconds; an answer of "not yours" must not wait for, or hold up, a write."""
+    second = await open_instance(pg_config, "replica-b")
+    lease = await pg.lease.acquire(LEASE, timedelta(seconds=60))
+    assert lease is not None
+    fence = Fence(LEASE, lease.holder_id, lease.fencing_token)
+    entered, leave = asyncio.Event(), asyncio.Event()
+
+    async def slow_write() -> None:
+        with fenced(fence):
+            async with pg.database.transaction():
+                entered.set()
+                await leave.wait()
+
+    writer = asyncio.create_task(slow_write())
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        assert await asyncio.wait_for(second.lease.acquire(LEASE, TTL), 5) is None  # was: waits for the write to end
+        assert loop.time() - started < 1.0
+
+        async def another_write() -> None:
+            with fenced(fence):
+                async with pg.database.transaction() as conn:  # not queued behind a follower's pending takeover
+                    await conn.execute("SELECT 1")
+
+        await asyncio.wait_for(another_write(), 5)
+    finally:
+        leave.set()
+        await writer
+        await second.close()

@@ -331,7 +331,7 @@ export ORQENTIS_STORAGE_BACKEND=postgres ORQENTIS_POSTGRES_HOST=127.0.0.1 ORQENT
   ORQENTIS_POSTGRES_SSL_MODE=disable ORQENTIS_EVIDENCE_BLOB_URL=https://<account>.blob.core.windows.net
 orqentis db status      # applied / pending migrations
 orqentis db migrate     # only as the role that owns the schema (the app migrates when it starts)
-orqentis audit          # verifies the chain and the latest anchor; `audit start-epoch --reason ...` after a restore
+orqentis audit          # verifies the chain, every anchor and the epoch markers; `audit start-epoch --reason ...` after a restore
 ```
 
 `tests/fixtures/fabric_rest/` holds real Fabric and Power BI responses recorded from the live sandbox

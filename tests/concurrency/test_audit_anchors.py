@@ -22,6 +22,7 @@ from orqentis.observability.anchors import (
     AnchorRefusedError,
     AuditAnchor,
     AuditAnchorTask,
+    ChainHead,
     LocalAuditAnchorStore,
 )
 from orqentis.observability.epochs import EpochMarker, EpochPreconditionError, LocalEpochMarkerStore
@@ -369,3 +370,120 @@ async def test_an_epoch_marker_must_name_the_audit_epoch_record_that_opened_that
     await setup.pg.database.execute("UPDATE audit_chain_head SET epoch = 3")
     result = await setup.app.verify()
     assert not result.valid and "is not the start of audit epoch" in (result.reason or "")
+
+
+# ------------------------------------------------------------------------------------- unused markers, junk anchors
+@pytest.mark.security
+async def test_an_unused_marker_is_harmless_even_when_records_were_appended_before_the_retry(setup: Setup) -> None:
+    """An operator run whose commit failed leaves a marker for an epoch that never started; the app keeps appending."""
+    await chain_of(setup.pg, 3)
+    await setup.anchor()  # sequence 3, epoch 1
+    await setup.epoch_store.put(
+        EpochMarker(
+            epoch=2, sequence=4, hash="d" * 64, started_at=AT, started_by="operator:olivia", reason="did not commit"
+        )
+    )
+    await chain_of(setup.pg, 3, start=10)  # records 4..6 are appended before the operator comes back
+    stuck = await setup.app.verify()
+    assert not stuck.valid and "restored or rewound" in (stuck.reason or "")
+
+    opened = await setup.operator.start_epoch(actor="operator:olivia", reason="second attempt")
+    assert opened.sequence == 7 and (await setup.pg.audit.head()).epoch == 3
+    resumed = await setup.app.verify()
+    assert resumed.valid, resumed.reason  # the unused marker (epoch 2, sequence 4) pins nothing
+
+    # ...and it does not cut anything off: an epoch-1 anchor in the range it names (>= 4) still binds the chain.
+    await setup.anchors.put(AuditAnchor(epoch=1, sequence=5, hash="e" * 64, anchored_at=AT))
+    wrong = await setup.app.verify()
+    assert not wrong.valid and "contradicts the audit anchor (epoch 1) for sequence 5" in (wrong.reason or "")
+
+
+@pytest.mark.security
+async def test_a_junk_anchor_can_only_be_set_aside_by_an_operator_over_an_audited_override_and_stays_in_the_store(
+    setup: Setup,
+) -> None:
+    await chain_of(setup.pg, 6)
+    await setup.anchor()
+    junk = AuditAnchor(epoch=1, sequence=2, hash="b" * 64, anchored_at=AT)  # written by a compromised app identity
+    await setup.anchors.put(junk)
+    assert not (await setup.app.verify()).valid  # it contradicts record 2, and it can never be removed
+
+    with pytest.raises(EpochPreconditionError, match="contradicts"):
+        await setup.operator.start_epoch(actor="operator:olivia", reason="clean up")
+    with pytest.raises(EpochPreconditionError, match="override"):
+        await setup.operator.start_epoch(actor="operator:olivia", reason="x", disregard_anchors=[junk.name])
+    with pytest.raises(EpochPreconditionError, match="no such anchor"):
+        await setup.operator.start_epoch(
+            actor="operator:olivia",
+            reason="x",
+            override_verification="INC-9",
+            disregard_anchors=["epoch-0001/000000000099-" + "a" * 64 + ".json"],
+        )
+    assert (await setup.pg.audit.head()).epoch == 1 and list(await setup.epoch_store.all()) == []
+
+    # An override without naming the anchor opens an epoch but the junk anchor still fails verification for ever.
+    # (Not done here: it would consume the epoch; the next assertions cover the way that works.)
+    record = await setup.operator.start_epoch(
+        actor="operator:olivia",
+        reason="junk anchor from a compromised identity (INC-9)",
+        override_verification="INC-9: the application identity was compromised and wrote anchor 2",
+        disregard_anchors=[junk.name],
+    )
+    assert record.details["disregarded_anchors"] == [junk.name] and "verification_override" in record.details
+    (marker,) = await setup.epoch_store.all()
+    assert marker.disregarded_anchors == (junk.name,) and marker.started_by == "operator:olivia"
+    assert (
+        await setup.app.verify()
+    ).valid  # the junk anchor is still in the store, and no longer held against the chain
+    assert [r.sequence for r in await setup.anchors.refs(1)] == [2, 6]
+
+    await setup.pg.audit.record(actor="a", action="after", outcome="OK")
+    assert await setup.anchor() is not None  # anchoring goes on in the new epoch
+    assert (await setup.app.verify()).valid
+
+
+class StaleHeadThenFresh:
+    """An audit trail whose first read of the head is out of date: another leader appended and anchored meanwhile."""
+
+    def __init__(self, stale_sequence: int, real_sequence: int, real_hash: str) -> None:
+        self._reads = 0
+        self._stale, self._real, self._hash = stale_sequence, real_sequence, real_hash
+
+    async def head(self) -> ChainHead:
+        self._reads += 1
+        return ChainHead(epoch=1, sequence=self._stale if self._reads == 1 else self._real, hash=self._hash)
+
+    async def record_hash_at(self, sequence: int) -> str | None:
+        return self._hash if sequence == self._real else "0" * 64
+
+
+async def test_the_anchor_task_does_not_refuse_an_untampered_chain_at_a_leader_handover(tmp_path: Path) -> None:
+    """Reading the head before the anchors made another leader's newer anchor look like 'records were lost'."""
+    store = LocalAuditAnchorStore(tmp_path / "anchors")
+    real = "a" * 64
+    await store.put(AuditAnchor(epoch=1, sequence=6, hash=real, anchored_at=AT))  # the previous leader, just now
+    task = AuditAnchorTask(StaleHeadThenFresh(5, 6, real), store, SystemClock())
+    assert await task.run() is None  # nothing new to anchor (head 6 is anchored), and no refusal
+
+
+@pytest.mark.security
+async def test_a_marker_that_never_started_its_epoch_disregards_nothing(setup: Setup) -> None:
+    """The disregard is audited by the ``audit.epoch`` record; a marker that never got one has not been audited."""
+    await chain_of(setup.pg, 6)
+    await setup.anchor()
+    junk = AuditAnchor(epoch=1, sequence=2, hash="b" * 64, anchored_at=AT)
+    await setup.anchors.put(junk)
+    await setup.epoch_store.put(
+        EpochMarker(
+            epoch=2,
+            sequence=7,
+            hash="d" * 64,
+            started_at=AT,
+            started_by="operator:olivia",
+            reason="commit failed",
+            disregarded_anchors=(junk.name,),
+        )
+    )
+    await setup.operator.start_epoch(actor="operator:olivia", reason="retry", override_verification="INC-9: retry")
+    result = await setup.app.verify()
+    assert not result.valid and "contradicts the audit anchor (epoch 1) for sequence 2" in (result.reason or "")

@@ -85,8 +85,9 @@ async def run_audit_postgres(
     *,
     start_epoch_reason: str | None,
     override_verification: str | None = None,
+    disregard_anchors: tuple[str, ...] = (),
 ) -> int:
-    """Verify the audit chain (and its latest anchor); with a reason, start a new anchor epoch first."""
+    """Verify the audit chain (and every anchor and epoch marker); with a reason, start a new epoch first."""
     session = await open_postgres_session(settings, SystemClock(), migrate=False)
     try:
         audit = session.storage.audit
@@ -96,6 +97,7 @@ async def run_audit_postgres(
                     actor=f"operator:{getpass.getuser()}",
                     reason=start_epoch_reason,
                     override_verification=override_verification,
+                    disregard_anchors=disregard_anchors,
                 )
             except EpochPreconditionError as exc:
                 console.print(

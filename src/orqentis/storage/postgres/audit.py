@@ -36,7 +36,7 @@ from typing import Any
 
 from orqentis.config.clock import Clock
 from orqentis.domain.common import new_id
-from orqentis.observability.anchors import AnchorConflictError, AuditAnchorStore, ChainHead
+from orqentis.observability.anchors import AnchorConflictError, AuditAnchorStore, ChainHead, anchor_name
 from orqentis.observability.audit import GENESIS_HASH, AuditRecord, AuditVerification, record_digest
 from orqentis.observability.epochs import EpochMarker, EpochMarkerStore, EpochPreconditionError, current_epoch
 from orqentis.observability.logging import get_logger
@@ -335,12 +335,27 @@ class PostgresAuditTrail:
     ) -> str | None:
         """What the immutable side says the chain must contain: every anchor and epoch marker that still applies.
 
-        The records an earlier epoch anchored at or beyond the sequence where the next epoch opened are the ones the
-        restore lost; they are evidence, not a claim on the chain that replaced them.
+        * The records an earlier epoch anchored at or beyond the sequence where the next epoch opened are the ones the
+          restore lost; they are evidence, not a claim on the chain that replaced them.
+        * A marker whose record is not in the chain is **unused** when a later epoch was opened over it (an operator
+          run whose commit failed, and the retry): it neither pins anything nor cuts anything off. The later marker, and
+          the hash chain, which makes every later hash depend on every earlier record, cover the same ground, so a
+          rewrite of an old epoch record is still caught by them. The current epoch's marker always counts.
+        * Anchors that an operator disregarded when opening an epoch (``EpochMarker.disregarded_anchors``) are skipped,
+          but only by markers that are used: an unused marker was never audited in the chain, so it disregards nothing.
         """
+        stored: dict[int, str] = {}
+        sequences = sorted({m.sequence for m in markers if m.epoch <= epoch})
+        for start in range(0, len(sequences), _PAGE):
+            rows = await self._db.fetch(
+                "SELECT sequence, hash FROM audit_records WHERE sequence = ANY($1)", sequences[start : start + _PAGE]
+            )
+            stored |= {int(r["sequence"]): str(r["hash"]) for r in rows}
+        used = [m for m in markers if m.epoch <= epoch and (m.epoch == epoch or stored.get(m.sequence) == m.hash)]
+        disregarded = frozenset(name for m in used for name in m.disregarded_anchors)
 
         def lost(item_epoch: int, sequence: int) -> bool:
-            later = [m.sequence for m in markers if m.epoch > item_epoch]
+            later = [m.sequence for m in used if m.epoch > item_epoch]
             return item_epoch < epoch and bool(later) and sequence >= min(later)
 
         def add(sequence: int, digest: str, what: str) -> str | None:
@@ -350,15 +365,15 @@ class PostgresAuditTrail:
             wanted[sequence] = (digest, what)
             return None
 
-        for marker in markers:
-            if marker.epoch <= epoch and not lost(marker.epoch, marker.sequence):
+        for marker in used:
+            if not lost(marker.epoch, marker.sequence):
                 marker_sequences[marker.sequence] = marker.epoch
                 if (problem := add(marker.sequence, marker.hash, f"epoch {marker.epoch} marker")) is not None:
                     return problem
         if self._anchors is not None:
             for k in range(1, epoch + 1) if self._epochs is not None else [epoch]:
                 for ref in await self._anchors.refs(k):
-                    if lost(k, ref.sequence):
+                    if lost(k, ref.sequence) or anchor_name(ref) in disregarded:
                         continue
                     if (problem := add(ref.sequence, ref.hash, f"audit anchor (epoch {k})")) is not None:
                         return problem
@@ -400,14 +415,28 @@ class PostgresAuditTrail:
         )
 
     # ------------------------------------------------------------------------------------------------ epochs
-    async def start_epoch(self, *, actor: str, reason: str, override_verification: str | None = None) -> AuditRecord:
+    async def start_epoch(
+        self,
+        *,
+        actor: str,
+        reason: str,
+        override_verification: str | None = None,
+        disregard_anchors: Sequence[str] = (),
+    ) -> AuditRecord:
         """Record, in the chain, that history was cut (a restore) and begin a new epoch. An operator action.
 
         The new epoch's **marker is written first, inside the transaction that appends the ``audit.epoch`` record**, to
         a container the application's identity can only read: with the application's identity this raises, the
         transaction rolls back and the epoch does not change. With an operator's identity both happen or neither does
-        (a crash between the marker and the commit leaves an unused marker; the next ``start-epoch`` picks the next
-        epoch number and verification ignores the unused one, because its record never existed in the chain).
+        (a crash between the marker and the commit leaves an unused marker, which verification only reports until the
+        next ``start-epoch``: that picks the next epoch number, and the unused marker, whose record never existed in the
+        chain, then pins nothing, even if records were appended in between).
+
+        ``disregard_anchors`` names anchors (``epoch-NNNN/<sequence>-<hash>.json``) that are junk, for example written
+        by a compromised application identity. They cannot be deleted before their retention ends and a low-sequence
+        one would fail verification for ever, so the new marker records that they are disregarded. This is accepting a
+        failed verification and therefore needs ``override_verification``; the names are checked to exist and written
+        to the marker (immutable, with who and why) and to the audit record.
 
         The record names the head the restored database has and the last anchor of the epoch that ends, so the loss is
         documented in the chain itself and in the immutable anchors of the old epoch, which are never removed.
@@ -417,6 +446,10 @@ class PostgresAuditTrail:
         # Precondition: do not bless a database that is tampered with. A restore leaves the chain behind its anchors,
         # which is exactly what an epoch is for; anything else wrong (a broken hash, a record that contradicts an
         # anchor, a moved epoch counter) refuses, unless an operator overrides with a reason that is itself audited.
+        if disregard_anchors and override_verification is None:
+            raise EpochPreconditionError(
+                "disregarding anchors accepts a failed verification: give --override-verification with the reason"
+            )
         verification = await self._verify(restore=True)
         if not verification.valid:
             if override_verification is None:
@@ -429,9 +462,17 @@ class PostgresAuditTrail:
         head = await self.head()
         markers = await self._epochs.all()
         new_epoch = max(head.epoch, current_epoch(markers)) + 1
+        if disregard_anchors:
+            known = (
+                {anchor_name(r) for k in range(1, head.epoch + 1) for r in await self._anchors.refs(k)}
+                if self._anchors
+                else set()
+            )
+            if missing := sorted(set(disregard_anchors) - known):
+                raise EpochPreconditionError(f"no such anchor to disregard: {', '.join(missing)}")
         if self._anchors is not None:
             try:
-                previous_anchor = await self._anchors.latest(head.epoch)
+                previous_anchor = await self._anchors.latest(head.epoch, exclude=disregard_anchors)
             except AnchorConflictError as exc:
                 _log.warning("conflicting anchors while starting a new audit epoch", extra={"error": str(exc)})
         details: dict[str, Any] = {
@@ -446,6 +487,8 @@ class PostgresAuditTrail:
         if not verification.valid:
             details["verification_override"] = override_verification
             details["verification_failure"] = verification.reason
+        if disregard_anchors:
+            details["disregarded_anchors"] = sorted(disregard_anchors)
         async with self._db.transaction(fenced=False) as conn:
             record = await self._append(
                 conn,
@@ -468,6 +511,7 @@ class PostgresAuditTrail:
                     started_at=self._clock.now(),
                     started_by=redact_text(actor)[:200],
                     reason=redact_text(reason)[:500],
+                    disregarded_anchors=tuple(sorted(disregard_anchors)),
                 )
             )
         return record

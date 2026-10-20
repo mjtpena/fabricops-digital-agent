@@ -290,25 +290,53 @@ async def test_a_nul_character_is_kept_in_the_record_and_does_not_break_the_inde
     assert (await pg.audit.verify()).valid
 
 
-async def test_verification_against_a_live_appender_never_reports_tampering(pg: PostgresStorage) -> None:
-    """Reproduced: 40 of 40 verifications of an untouched chain were 'invalid' with one append every 20 ms."""
-    await chain_of(pg, 400)
-    stop = asyncio.Event()
+async def test_an_append_that_commits_while_a_verification_scans_is_not_tampering(pg: PostgresStorage) -> None:
+    """Reproduced: 40 of 40 verifications of an untouched chain were 'invalid' with one append every 20 ms.
 
-    async def appender() -> int:
-        n = 0
+    Deterministic: the append is made, from another connection, exactly between the scan of the records and the final
+    check for rows beyond the head, which is where the first version looked at a head that was already out of date.
+    """
+    await chain_of(pg, 50)
+    real_fetch = pg.database.fetch
+    appended: list[int] = []
+
+    async def fetch_then_append(sql: str, *args: object) -> object:
+        rows = await real_fetch(sql, *args)
+        if sql.startswith("SELECT sequence, audit_id") and not appended:  # the page of records has just been read
+            appended.append((await pg.audit.record(actor="live", action="during-the-scan", outcome="OK")).sequence)
+        return rows
+
+    pg.database.fetch = fetch_then_append  # type: ignore[method-assign]
+    try:
+        result = await pg.audit.verify()
+    finally:
+        pg.database.fetch = real_fetch  # type: ignore[method-assign]
+    assert appended == [51], "the append must have happened during the scan"
+    assert result.valid, result.reason
+    assert result.records == 50  # it verified the chain as it was when it started
+    assert (await pg.audit.verify()).records == 51
+
+
+async def test_verification_against_a_continuous_appender_never_reports_tampering(pg: PostgresStorage) -> None:
+    """The same property under load. No timing is assumed: it runs until both sides have done enough work."""
+    await chain_of(pg, 200)
+    stop = asyncio.Event()
+    appended = 0
+
+    async def appender() -> None:
+        nonlocal appended
         while not stop.is_set():
-            await pg.audit.record(actor="live", action=f"append-{n}", outcome="OK")
-            n += 1
-            await asyncio.sleep(0.005)
-        return n
+            await pg.audit.record(actor="live", action=f"append-{appended}", outcome="OK")
+            appended += 1
+            await asyncio.sleep(0.002)
 
     task = asyncio.create_task(appender())
+    results = []
     try:
-        results = [await pg.audit.verify() for _ in range(25)]
+        async with asyncio.timeout(120):
+            while len(results) < 25 or appended < 60:  # until verification and appends have each done their share
+                results.append(await pg.audit.verify())
     finally:
         stop.set()
-        appended = await task
-    assert appended > 25, "the appender must have been running during the verifications"
+        await task
     assert [r.reason for r in results if not r.valid] == []
-    assert all(r.valid for r in results)

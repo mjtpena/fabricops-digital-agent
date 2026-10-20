@@ -9,11 +9,13 @@ everything verification needs (epoch, sequence, hash).
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import ContainerClient
 
-from orqentis.observability.anchors import AnchorRef, AuditAnchor, parse_anchor_name, pick_latest
+from orqentis.observability.anchors import AnchorRef, AuditAnchor, anchor_name, parse_anchor_name, pick_latest
 from orqentis.storage.blob.evidence import normalise_prefix
 
 
@@ -43,8 +45,9 @@ class BlobAuditAnchorStore:
                 found.append(AnchorRef(*parsed))
         return sorted(found, key=lambda r: (r.sequence, r.hash))
 
-    async def latest(self, epoch: int) -> AuditAnchor | None:
-        refs = await self.refs(epoch)
+    async def latest(self, epoch: int, *, exclude: Collection[str] = ()) -> AuditAnchor | None:
+        skipped = frozenset(exclude)
+        refs = [r for r in await self.refs(epoch) if anchor_name(r) not in skipped]
         if not refs:
             return None
         top = refs[-1].sequence

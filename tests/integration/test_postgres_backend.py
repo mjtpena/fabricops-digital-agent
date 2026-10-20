@@ -6,16 +6,21 @@ Everything but the Blob credential is the production composition: ``build_contai
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 
+from orqentis.api.app import create_app
 from orqentis.bootstrap import Container, build_container
+from orqentis.config.clock import FixedClock
 from orqentis.domain.approvals import ApprovalStatus
 from orqentis.domain.incidents import IncidentStatus
 from orqentis.observability.anchors import AuditAnchorTask
 from orqentis.storage.postgres import PostgresAuditTrail
 from tests.conftest import ADMIN, OPERATOR, detect_and_investigate
+from tests.support.polling import wait_until
 from tests.support.postgres_app import AppStorage
 
 
@@ -91,3 +96,53 @@ async def test_a_job_submitted_through_the_runner_is_durable_and_visible_by_id(c
     assert job is not None and job.status is InvestigationJobStatus.SUCCEEDED and job.requested_by == OPERATOR.id
     again = await container.investigation_jobs.latest_for(incident.incident_id)
     assert again is not None and again.job_id == job.job_id
+
+
+async def test_a_leader_whose_audit_anchoring_has_stopped_says_so_in_its_readiness_and_stays_ready(
+    app_storage: AppStorage, tmp_path: Path
+) -> None:
+    """Anchoring is what makes a rewrite of the database detectable; the leader runs it and must say when it has not
+    worked for twice its interval. A follower does not run it, so it has nothing to report."""
+    settings = app_storage.settings(
+        tmp_path / "leader",
+        scheduler_enabled=True,
+        scheduler_tick_seconds=0.05,
+        scheduler_audit_anchor_enabled=False,  # the job that would keep it fresh does not run: it has stopped working
+    )
+    follower = await build_container(app_storage.settings(tmp_path / "follower"))
+    app = create_app(settings)
+    try:
+        async with app.router.lifespan_context(app):
+            leader = app.state.runtime.container
+            assert leader is not None and leader.audit_anchoring is not None
+            await wait_until(lambda: leader.scheduler.is_leader, within=30)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:  # type: ignore[arg-type]
+                fresh = await http.get("/health/ready")
+                assert fresh.status_code == 200 and fresh.json() == {"status": "ready", "scheduler": "leader"}
+
+                assert isinstance(leader.clock, FixedClock) and isinstance(follower.clock, FixedClock)
+                leader.clock.advance(timedelta(minutes=31))  # more than twice the 15-minute anchor interval
+                follower.clock.advance(timedelta(minutes=31))
+                await wait_until(lambda: leader.scheduler.is_leader, within=30)
+                stale = await http.get("/health/ready")
+                assert stale.status_code == 200  # still ready: the service keeps working, but it says what is wrong
+                assert stale.json() == {"status": "ready", "scheduler": "leader", "degraded": ["audit anchoring stale"]}
+
+                # A run that works (even one with nothing new to anchor) clears it.
+                await leader.audit.record(actor="test", action="test.append", outcome="OK")  # something to anchor
+                assert await leader.audit_anchoring.run() is not None
+                recovered = await http.get("/health/ready")
+                assert recovered.json() == {"status": "ready", "scheduler": "leader"}
+
+            # The follower's own anchoring is as stale, and it does not report it: it is not the one that anchors.
+            assert follower.audit_anchoring is not None and follower.audit_anchoring.stale
+            follower_app = create_app(follower.settings, container=follower)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=follower_app),  # type: ignore[arg-type]
+                base_url="http://test",
+            ) as http:
+                body = (await http.get("/health/ready")).json()
+            assert "degraded" not in body
+    finally:
+        await follower.investigation_jobs.shutdown()
+        await follower.aclose()

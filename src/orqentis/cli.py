@@ -305,6 +305,7 @@ async def _cmd_audit(
     *,
     start_epoch_reason: str | None = None,
     override_verification: str | None = None,
+    disregard_anchors: tuple[str, ...] = (),
 ) -> int:
     from orqentis.config.clock import SystemClock
     from orqentis.observability.audit import LocalAuditLog
@@ -313,7 +314,11 @@ async def _cmd_audit(
         from orqentis.db_commands import run_audit_postgres
 
         return await run_audit_postgres(
-            settings, console, start_epoch_reason=start_epoch_reason, override_verification=override_verification
+            settings,
+            console,
+            start_epoch_reason=start_epoch_reason,
+            override_verification=override_verification,
+            disregard_anchors=disregard_anchors,
         )
     if start_epoch_reason is not None:
         console.print(
@@ -342,7 +347,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("notify-test", help="Send one test notification through the configured notifier")
     sub.add_parser("scenarios", help="List synthetic scenarios")
     sub.add_parser("runbooks", help="Validate and list runbooks")
-    audit = sub.add_parser("audit", help="Verify the audit trail hash chain (and its latest anchor with PostgreSQL)")
+    audit = sub.add_parser(
+        "audit", help="Verify the audit trail hash chain (and every anchor and epoch marker with PostgreSQL)"
+    )
     audit.add_argument("--data-dir", type=Path, default=None)
     audit_sub = audit.add_subparsers(dest="audit_command")
     epoch = audit_sub.add_parser(
@@ -355,6 +362,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="WHY",
         default=None,
         help="Open the epoch although the chain failed verification beyond being behind its anchors (audited)",
+    )
+    epoch.add_argument(
+        "--disregard-anchor",
+        metavar="NAME",
+        action="append",
+        default=[],
+        help="Object name of a junk anchor (epoch-NNNN/<sequence>-<hash>.json) that verification should stop "
+        "holding against the chain; repeatable; needs --override-verification; recorded in the marker",
     )
     db = sub.add_parser("db", help="PostgreSQL system of record: migrate, status, reseed-counters")
     db.add_argument("db_command", choices=["migrate", "status", "reseed-counters"])
@@ -394,7 +409,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = _settings(**({"data_dir": args.data_dir} if args.data_dir else {}))
         reason = args.reason if args.audit_command == "start-epoch" else None
         override = getattr(args, "override_verification", None) if reason is not None else None
-        return asyncio.run(_cmd_audit(settings, console, start_epoch_reason=reason, override_verification=override))
+        disregard = tuple(getattr(args, "disregard_anchor", ()) or ()) if reason is not None else ()
+        return asyncio.run(
+            _cmd_audit(
+                settings,
+                console,
+                start_epoch_reason=reason,
+                override_verification=override,
+                disregard_anchors=disregard,
+            )
+        )
     if args.command == "db":
         from orqentis.db_commands import run_db
 

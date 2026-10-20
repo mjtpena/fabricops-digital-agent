@@ -8,10 +8,11 @@ approval being ``EXECUTING`` happens at most once (ADR-0015).
 
 Two further guarantees are enforced by the database rather than by the callers:
 
-* **One pending approval per action.** A partial unique index on ``(incident_id, action_fingerprint)`` where the
-  status is ``PENDING`` makes ``submit`` idempotent: asking again for an action that already has a pending request
-  (a stalled worker and its replacement, two replicas) returns that request instead of creating a second one that
-  could be approved and executed on its own.
+* **One open approval per action.** A partial unique index on ``(incident_id, action_fingerprint)`` over the
+  approvals that are *open* (``PENDING``, or ``APPROVED`` with the action not used yet) makes ``submit`` idempotent:
+  asking again for an action that already has an open request (a stalled worker and its replacement, two replicas, a
+  second investigation) returns that request instead of creating a second one that could be approved and executed on
+  its own.
 * **Expiry by the database clock.** A decision or an execution claim made with ``enforce_expiry`` only succeeds while
   ``expires_at`` is in the future *by the database's clock* (the application's own clock when it is a scenario clock),
   inside the same statement that checks the revision. A replica whose clock lags cannot use an expired approval, and an
@@ -29,7 +30,8 @@ _log = get_logger(__name__)
 
 _INSERT = (
     "INSERT INTO approvals (approval_id, incident_id, status, action_fingerprint, requested_at, revision, body, "
-    "expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING RETURNING approval_id"
+    "expires_at, action_status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING "
+    "RETURNING approval_id"
 )
 
 
@@ -53,18 +55,19 @@ class PostgresApprovalProvider:
                 request.revision,
                 request.model_dump_json(),
                 request.expires_at,
+                request.proposed_action.status.value,
             )
             if inserted is None:
-                pending = await conn.fetchrow(
+                open_one = await conn.fetchrow(
                     "SELECT body FROM approvals WHERE incident_id = $1 AND action_fingerprint = $2 "
-                    "AND status = 'PENDING'",
+                    "AND (status = 'PENDING' OR (status = 'APPROVED' AND action_status = 'APPROVED'))",
                     request.incident_id,
                     request.action_fingerprint,
                 )
-                if pending is not None and request.status is ApprovalStatus.PENDING:
-                    existing = ApprovalRequest.model_validate_json(pending["body"])
+                if open_one is not None and request.status is ApprovalStatus.PENDING:
+                    existing = ApprovalRequest.model_validate_json(open_one["body"])
                     _log.info(
-                        "approval already pending for this action",
+                        "approval already open for this action",
                         extra={"approval_id": existing.approval_id, "incident_id": existing.incident_id},
                     )
                     return existing
@@ -84,9 +87,9 @@ class PostgresApprovalProvider:
         async with self._db.transaction() as conn:
             await conn.execute(
                 "INSERT INTO approvals (approval_id, incident_id, status, action_fingerprint, requested_at, revision, "
-                "body, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (approval_id) DO UPDATE SET "
-                "status = EXCLUDED.status, revision = EXCLUDED.revision, body = EXCLUDED.body, "
-                "expires_at = EXCLUDED.expires_at",
+                "body, expires_at, action_status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
+                "ON CONFLICT (approval_id) DO UPDATE SET status = EXCLUDED.status, revision = EXCLUDED.revision, "
+                "body = EXCLUDED.body, expires_at = EXCLUDED.expires_at, action_status = EXCLUDED.action_status",
                 request.approval_id,
                 request.incident_id,
                 request.status.value,
@@ -95,6 +98,7 @@ class PostgresApprovalProvider:
                 request.revision,
                 request.model_dump_json(),
                 request.expires_at,
+                request.proposed_action.status.value,
             )
 
     async def transition(
@@ -105,7 +109,7 @@ class PostgresApprovalProvider:
         now = None if self._database_clock or self._clock is None else self._clock.now()
         async with self._db.transaction() as conn:
             row = await conn.fetchrow(
-                "UPDATE approvals SET status = $1, revision = $2, body = $3 "
+                "UPDATE approvals SET status = $1, revision = $2, body = $3, action_status = $8 "
                 "WHERE approval_id = $4 AND revision = $5 "
                 "AND ($6::boolean IS NOT TRUE OR expires_at IS NULL OR expires_at > COALESCE($7::timestamptz, now())) "
                 "RETURNING revision",
@@ -116,6 +120,7 @@ class PostgresApprovalProvider:
                 expected_revision,
                 enforce_expiry,
                 now,
+                stored.proposed_action.status.value,
             )
         return stored if row is not None else None
 

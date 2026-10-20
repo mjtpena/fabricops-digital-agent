@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -40,7 +40,7 @@ from typing import Protocol
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 from orqentis.config.clock import Clock
-from orqentis.observability.epochs import EpochMarkerStore, current_epoch
+from orqentis.observability.epochs import EpochMarker, EpochMarkerStore, current_epoch
 from orqentis.observability.logging import get_logger
 
 _log = get_logger(__name__)
@@ -87,13 +87,20 @@ class AuditAnchor(BaseModel):
         return AnchorRef(self.epoch, self.sequence, self.hash)
 
 
+def anchor_name(ref: AnchorRef) -> str:
+    return f"epoch-{ref.epoch:04d}/{ref.sequence:012d}-{ref.hash}.json"
+
+
 class AuditAnchorStore(Protocol):
     async def put(self, anchor: AuditAnchor) -> bool:
         """Store ``anchor`` write-once. ``False`` when exactly this anchor already existed."""
         ...
 
-    async def latest(self, epoch: int) -> AuditAnchor | None:
-        """The anchor with the highest sequence in ``epoch``; raises :class:`AnchorConflictError` on disagreement."""
+    async def latest(self, epoch: int, *, exclude: Collection[str] = ()) -> AuditAnchor | None:
+        """The anchor with the highest sequence in ``epoch``; raises :class:`AnchorConflictError` on disagreement.
+
+        ``exclude`` are object names an operator has disregarded (see ``EpochMarker.disregarded_anchors``).
+        """
         ...
 
     async def refs(self, epoch: int) -> list[AnchorRef]:
@@ -162,17 +169,17 @@ class LocalAuditAnchorStore:
         parsed = (parse_anchor_name(f"{folder.name}/{p.name}") for p in sorted(folder.iterdir()))
         return [AnchorRef(e, s, h) for e, s, h in (x for x in parsed if x is not None)]
 
-    async def latest(self, epoch: int) -> AuditAnchor | None:
-        return await asyncio.to_thread(self._latest, epoch)
+    async def latest(self, epoch: int, *, exclude: Collection[str] = ()) -> AuditAnchor | None:
+        return await asyncio.to_thread(self._latest, epoch, frozenset(exclude))
 
-    def _latest(self, epoch: int) -> AuditAnchor | None:
+    def _latest(self, epoch: int, exclude: frozenset[str]) -> AuditAnchor | None:
         folder = self._root / f"epoch-{epoch:04d}"
         if not folder.is_dir():
             return None
         anchors = [
             AuditAnchor.model_validate_json(p.read_text(encoding="utf-8"))
             for p in sorted(folder.iterdir())
-            if parse_anchor_name(f"{folder.name}/{p.name}") is not None
+            if parse_anchor_name(f"{folder.name}/{p.name}") is not None and f"{folder.name}/{p.name}" not in exclude
         ]
         return pick_latest(anchors)
 
@@ -219,13 +226,25 @@ class AuditAnchorTask:
         return self._stale_after is not None and self._clock.now() - self._last_ok > self._stale_after
 
     async def run(self) -> AuditAnchor | None:
+        # Read in this order: the epoch, then the anchors, then the head. An anchor written by another replica in
+        # between (a leader handover) can then never be ahead of the head we compare it with.
+        epoch = (await self._audit.head()).epoch
+        markers = list(await self._epochs.all()) if self._epochs is not None else []
+        previous: AuditAnchor | None = None
+        conflict: str | None = None
+        try:
+            previous = await self._store.latest(epoch)
+        except AnchorConflictError as exc:
+            conflict = str(exc)
         head = await self._audit.head()
+        if head.epoch != epoch:  # an epoch was opened in between: look again on the next run
+            return None
         if head.sequence == 0:
             self._last_ok = self._clock.now()
             return None
         # Checked on every run, also when the head did not move: a chain that stops matching its anchors should be
         # reported at the next interval, not only when someone appends to it.
-        if (problem := await self._continuity_problem(head)) is not None:
+        if (problem := await self._continuity_problem(head, markers, previous, conflict)) is not None:
             _log.error(
                 AUDIT_VERIFICATION_FAILURE_MESSAGE,
                 extra={
@@ -252,10 +271,11 @@ class AuditAnchorTask:
             _log.info("audit head anchored", extra={"epoch": head.epoch, "sequence": head.sequence})
         return anchor if created else None
 
-    async def _continuity_problem(self, head: ChainHead) -> str | None:
+    async def _continuity_problem(
+        self, head: ChainHead, markers: Sequence[EpochMarker], previous: AuditAnchor | None, conflict: str | None
+    ) -> str | None:
         marker = None
         if self._epochs is not None:
-            markers = await self._epochs.all()
             expected = current_epoch(markers)
             if head.epoch != expected:
                 return (
@@ -263,10 +283,8 @@ class AuditAnchorTask:
                     "counter was moved, or the database was restored, without `orqentis audit start-epoch`"
                 )
             marker = next((m for m in markers if m.epoch == head.epoch), None)
-        try:
-            previous = await self._store.latest(head.epoch)
-        except AnchorConflictError as exc:
-            return str(exc)
+        if conflict is not None:
+            return conflict
         if previous is not None:
             if head.sequence < previous.sequence:
                 return (

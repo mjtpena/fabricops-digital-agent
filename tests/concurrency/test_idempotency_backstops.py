@@ -22,7 +22,8 @@ from tests.support.services import PostgresServer
 from orqentis.approvals.service import ApprovalExpiredError, ApprovalService
 from orqentis.bootstrap import Container, build_container
 from orqentis.config.clock import FixedClock
-from orqentis.domain.approvals import ApprovalStatus
+from orqentis.domain.actions import ActionStatus
+from orqentis.domain.approvals import ApprovalRequest, ApprovalStatus
 from orqentis.domain.incidents import IncidentStatus
 from orqentis.storage.incidents import DuplicateIncidentError
 from orqentis.storage.postgres import PostgresApprovalProvider, PostgresAuditTrail, PostgresConfig, PostgresStorage
@@ -53,13 +54,39 @@ async def test_requesting_the_same_action_again_returns_the_pending_request_inst
     assert len(await pg.approvals.list(status=ApprovalStatus.PENDING)) == 1
 
 
-async def test_a_decided_approval_does_not_block_a_new_request_for_the_same_action(pg: PostgresStorage) -> None:
+async def test_a_rejected_approval_does_not_block_a_new_request_for_the_same_action(pg: PostgresStorage) -> None:
     first = make_approval(1)
     await pg.approvals.submit(first)
-    approved = first.model_copy(update={"status": ApprovalStatus.APPROVED})
-    assert await pg.approvals.transition(approved, expected_revision=first.revision) is not None
-    again = await pg.approvals.submit(make_approval(2))  # nothing is pending any more: a fresh request is legitimate
+    rejected = first.model_copy(update={"status": ApprovalStatus.REJECTED})
+    assert await pg.approvals.transition(rejected, expected_revision=first.revision) is not None
+    again = await pg.approvals.submit(make_approval(2))  # nothing is open any more: a fresh request is legitimate
     assert again.approval_id == "APR-2"
+
+
+def granted(request: ApprovalRequest, action_status: ActionStatus = ActionStatus.APPROVED) -> ApprovalRequest:
+    action = request.proposed_action.model_copy(update={"status": action_status})
+    return request.model_copy(update={"status": ApprovalStatus.APPROVED, "proposed_action": action})
+
+
+async def test_a_granted_approval_that_has_not_been_used_blocks_a_second_request_for_the_same_action(
+    pg: PostgresStorage,
+) -> None:
+    """Reproduced: a re-proposal while the first approval waited to be executed made a second approval, so two humans
+    could each grant and execute the same action, and it was written twice."""
+    first = make_approval(1)
+    await pg.approvals.submit(first)
+    stored = await pg.approvals.transition(granted(first), expected_revision=first.revision)
+    assert stored is not None
+    returned = await pg.approvals.submit(make_approval(2))
+    assert returned.approval_id == first.approval_id and returned.status is ApprovalStatus.APPROVED
+    answers = await asyncio.gather(*(pg.approvals.submit(make_approval(10 + n)) for n in range(5)))
+    assert {a.approval_id for a in answers} == {first.approval_id}
+    assert [a.approval_id for a in await pg.approvals.list()] == [first.approval_id]
+
+    # Once it is used (the execution claim: the action is EXECUTING) the action may be requested again.
+    claimed = await pg.approvals.transition(granted(stored, ActionStatus.EXECUTING), expected_revision=stored.revision)
+    assert claimed is not None
+    assert (await pg.approvals.submit(make_approval(3))).approval_id == "APR-3"
 
 
 async def test_without_the_unique_index_the_same_race_creates_a_second_pending_approval(
@@ -68,7 +95,7 @@ async def test_without_the_unique_index_the_same_race_creates_a_second_pending_a
     """The control: the index is what prevents the duplicate, not luck."""
     conn = await admin(postgres_server, pg_config.schema)
     try:
-        await conn.execute("DROP INDEX ux_approvals_pending_action")
+        await conn.execute("DROP INDEX ux_approvals_open_action")
     finally:
         await conn.close()
     await pg.approvals.submit(make_approval(1))
