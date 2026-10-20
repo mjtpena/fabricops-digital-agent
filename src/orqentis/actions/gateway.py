@@ -4,6 +4,8 @@
   (or ``ACTION_DENIED``).
 * ``execute`` runs a mutation only for an APPROVED, unexpired approval whose fingerprint still
   matches the action, decided by a human with the required role, while the write capability is enabled.
+  The CURRENT policy is re-evaluated at execution time (deny, risk escalation and its required role), and the
+  single use is claimed with a compare-and-set persisted before the write call.
 """
 
 from __future__ import annotations
@@ -146,68 +148,111 @@ class ActionGateway:
         raise ActionBlockedError(code, message)
 
     async def execute(self, approval_id: str, *, principal: Principal) -> ActionOutcome:
-        approval = await self._approvals.get(approval_id)
-        action = approval.proposed_action
-        if principal.kind is not PrincipalKind.HUMAN:
-            await self._block(
-                approval, principal, "PRINCIPAL_NOT_HUMAN", "Only a human principal can trigger an approved mutation"
-            )
-        if approval.status is not ApprovalStatus.APPROVED:
-            await self._block(
-                approval,
-                principal,
-                "ACTION_REQUIRES_APPROVAL",
-                f"Approval {approval_id} is {approval.status.value}; execution requires APPROVED",
-            )
-        if self._clock.now() > approval.expires_at:
-            await self._block(approval, principal, "APPROVAL_EXPIRED", f"Approval {approval_id} has expired")
-        if action.fingerprint() != approval.action_fingerprint:
-            await self._block(
-                approval, principal, "ACTION_FINGERPRINT_MISMATCH", "The action differs from what was approved"
-            )
-        if not principal.has_role(approval.required_role):
-            await self._block(
-                approval,
-                principal,
-                "ROLE_REQUIRED",
-                f"Role {approval.required_role} is required to execute this action",
-            )
-        if action.status in {ActionStatus.EXECUTING, ActionStatus.SUCCEEDED, ActionStatus.FAILED}:
-            await self._block(approval, principal, "ALREADY_EXECUTED", "This approval has already been used")
-        decision = self._policy.evaluate(action)
-        if decision.effect is PolicyEffect.DENY:
-            await self._block(approval, principal, "ACTION_DENIED", "Policy now prohibits this action")
-        if not self._write_enabled:
-            await self._block(
-                approval,
-                principal,
-                "WRITE_CAPABILITY_NOT_GRANTED",
-                "The write capability boundary is closed (ORQENTIS_ENABLE_WRITE_ACTIONS=false)",
-            )
+        # Everything up to and including the claim runs under the approval's lock. The claim itself is a
+        # compare-and-set that is persisted BEFORE the write call, so of any number of concurrent executes
+        # (in this or another process) exactly one reaches the write client.
+        async with self._approvals.exclusive(approval_id):
+            approval = await self._approvals.get(approval_id)
+            action = approval.proposed_action
+            if principal.kind is not PrincipalKind.HUMAN:
+                await self._block(
+                    approval,
+                    principal,
+                    "PRINCIPAL_NOT_HUMAN",
+                    "Only a human principal can trigger an approved mutation",
+                )
+            if approval.status is not ApprovalStatus.APPROVED:
+                await self._block(
+                    approval,
+                    principal,
+                    "ACTION_REQUIRES_APPROVAL",
+                    f"Approval {approval_id} is {approval.status.value}; execution requires APPROVED",
+                )
+            if self._clock.now() > approval.expires_at:
+                await self._block(approval, principal, "APPROVAL_EXPIRED", f"Approval {approval_id} has expired")
+            if action.fingerprint() != approval.action_fingerprint:
+                await self._block(
+                    approval, principal, "ACTION_FINGERPRINT_MISMATCH", "The action differs from what was approved"
+                )
+            if not principal.has_role(approval.required_role):
+                await self._block(
+                    approval,
+                    principal,
+                    "ROLE_REQUIRED",
+                    f"Role {approval.required_role} is required to execute this action",
+                )
+            if action.status in {ActionStatus.EXECUTING, ActionStatus.SUCCEEDED, ActionStatus.FAILED}:
+                await self._block(approval, principal, "ALREADY_EXECUTED", "This approval has already been used")
+            # Re-evaluate the CURRENT policy: it may have changed since the approval was granted.
+            decision = self._policy.evaluate(action)
+            if decision.effect is PolicyEffect.DENY:
+                await self._block(approval, principal, "ACTION_DENIED", "Policy now prohibits this action")
+            if decision.risk.rank > approval.risk.rank:
+                await self._block(
+                    approval,
+                    principal,
+                    "POLICY_RISK_ESCALATED",
+                    f"The current policy classifies this action as {decision.risk.value}, higher than the "
+                    f"{approval.risk.value} that was approved; request a new approval",
+                )
+            if not principal.has_role(decision.required_role):
+                await self._block(
+                    approval,
+                    principal,
+                    "ROLE_REQUIRED",
+                    f"Role {decision.required_role} is required by the current policy to execute this action",
+                )
+            if not self._write_enabled:
+                await self._block(
+                    approval,
+                    principal,
+                    "WRITE_CAPABILITY_NOT_GRANTED",
+                    "The write capability boundary is closed (ORQENTIS_ENABLE_WRITE_ACTIONS=false)",
+                )
 
-        incident = await self._incidents.get(approval.incident_id)
-        if incident.status is IncidentStatus.AWAITING_APPROVAL:
-            await self._incidents.transition(
-                incident,
-                IncidentStatus.REMEDIATING,
-                actor=principal.id,
-                reason=f"Executing approved action {action.action_type.value}",
+            incident = await self._incidents.get(approval.incident_id)
+            if incident.status is IncidentStatus.AWAITING_APPROVAL:
+                await self._incidents.transition(
+                    incident,
+                    IncidentStatus.REMEDIATING,
+                    actor=principal.id,
+                    reason=f"Executing approved action {action.action_type.value}",
+                )
+            action = action.model_copy(update={"status": ActionStatus.EXECUTING})
+            claimed = await self._approvals.transition(
+                approval.model_copy(update={"proposed_action": action}), expected_revision=approval.revision
             )
-        action = action.model_copy(update={"status": ActionStatus.EXECUTING})
+            if claimed is None:
+                await self._block(approval, principal, "ALREADY_EXECUTED", "This approval has already been used")
+            assert claimed is not None  # _block raises
+
         try:
-            result = await self._write.execute(action, approval=approval)
+            result = await self._write.execute(action, approval=claimed)
         except FabricError as exc:
             action = action.model_copy(
                 update={"status": ActionStatus.FAILED, "result": exc.to_dict(), "executed_at": self._clock.now()}
             )
             status, message = GatewayStatus.EXECUTION_FAILED, f"Execution failed: {exc.message}"
+        except Exception:
+            # The outcome is unknown, so the claim stays EXECUTING: a retry must not repeat a write that may
+            # have happened. A person reconciles it.
+            await self._audit.record(
+                actor=principal.id,
+                action="action.execute",
+                outcome="UNKNOWN",
+                incident_id=incident.incident_id,
+                details={"approval_id": approval_id, "action_type": action.action_type.value},
+            )
+            raise
         else:
             action = action.model_copy(
                 update={"status": ActionStatus.SUCCEEDED, "result": result, "executed_at": self._clock.now()}
             )
             status, message = GatewayStatus.EXECUTED, "Action executed"
-        approval = approval.model_copy(update={"proposed_action": action})
-        await self._approvals.save(approval)
+        finished = await self._approvals.transition(
+            claimed.model_copy(update={"proposed_action": action}), expected_revision=claimed.revision
+        )
+        approval = finished or claimed.model_copy(update={"proposed_action": action})
         await self._audit.record(
             actor=principal.id,
             action="action.execute",

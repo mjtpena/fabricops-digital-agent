@@ -19,7 +19,19 @@ _log = get_logger(__name__)
 class ApprovalProvider(Protocol):
     async def submit(self, request: ApprovalRequest) -> ApprovalRequest: ...
 
-    async def save(self, request: ApprovalRequest) -> None: ...
+    async def save(self, request: ApprovalRequest) -> None:
+        """Unconditional write. Only for the initial submit (and tests); state changes use ``transition``."""
+        ...
+
+    async def transition(self, updated: ApprovalRequest, *, expected_revision: int) -> ApprovalRequest | None:
+        """Compare-and-set: store ``updated`` only if the stored revision is still ``expected_revision``.
+
+        Returns the stored request (revision ``expected_revision + 1``), or ``None`` when another writer got
+        there first and nothing was written. It must be atomic across processes (a conditional ``UPDATE``, or a
+        row lock in PostgreSQL). Deciding, expiring, cancelling and claiming an execution all go through it, so
+        exactly one of any set of racing writers wins.
+        """
+        ...
 
     async def get(self, approval_id: str) -> ApprovalRequest | None: ...
 
@@ -72,6 +84,15 @@ class LocalApprovalProvider:
                 request.model_dump_json(),
             ),
         )
+
+    async def transition(self, updated: ApprovalRequest, *, expected_revision: int) -> ApprovalRequest | None:
+        stored = updated.model_copy(update={"revision": expected_revision + 1})
+        changed = await self._db.execute(
+            "UPDATE approvals SET status = ?, body = ? "
+            "WHERE approval_id = ? AND COALESCE(json_extract(body, '$.revision'), 0) = ?",
+            (stored.status.value, stored.model_dump_json(), stored.approval_id, expected_revision),
+        )
+        return stored if changed == 1 else None
 
     async def get(self, approval_id: str) -> ApprovalRequest | None:
         row = await self._db.fetchone("SELECT body FROM approvals WHERE approval_id = ?", (approval_id,))

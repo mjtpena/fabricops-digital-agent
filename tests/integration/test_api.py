@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from orqentis.api.app import create_app
 from orqentis.config.settings import ApiAuthMode
 from tests.conftest import make_settings
+from tests.support.jobs import await_job
 
 OPERATOR = {"X-Orqentis-User": "olivia@contoso.com", "X-Orqentis-Roles": "FabricOps.Operator"}
 VIEWER = {"X-Orqentis-User": "victor@contoso.com"}
@@ -25,22 +26,32 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 
 
 def investigated(client: TestClient) -> dict[str, object]:
+    """Investigate the first incident over HTTP (202 + job) and return the incident summary and job result."""
     incident_id = client.get("/incidents", headers=VIEWER).json()[0]["incident_id"]
     response = client.post(f"/incidents/{incident_id}/investigate", headers=VIEWER)
-    assert response.status_code == 200, response.text
-    body: dict[str, object] = response.json()
-    return body
+    assert response.status_code == 202, response.text
+    job = await_job(client, response.json()["job_id"], VIEWER)
+    assert job["status"] == "SUCCEEDED", job
+    summary = next(i for i in client.get("/incidents", headers=VIEWER).json() if i["incident_id"] == incident_id)
+    result: dict[str, object] = {"incident": summary, **job["result"]}  # type: ignore[dict-item]
+    return result
 
 
 def test_health_and_openapi(client: TestClient) -> None:
     health = client.get("/health").json()
-    assert health["status"] == "ok" and health["fabric_mode"] == "mock" and health["write_actions_enabled"] is False
+    assert health["status"] == "ok" and health["fabric_mode"] == "mock"
+    # The anonymous answer does not disclose the write capability; the authenticated one does.
+    assert "write_actions_enabled" not in health
+    assert client.get("/system/info", headers=VIEWER).json()["write_actions_enabled"] is False
     paths = client.get("/openapi.json").json()["paths"]
     for path in (
         "/health",
         "/incidents",
         "/incidents/{incident_id}",
         "/incidents/{incident_id}/investigate",
+        "/incidents/{incident_id}/investigation",
+        "/investigations/{job_id}",
+        "/health/ready",
         "/incidents/{incident_id}/evidence",
         "/incidents/{incident_id}/recommendations",
         "/runbooks",
@@ -123,12 +134,16 @@ def test_unknown_incident_and_conflicts(client: TestClient) -> None:
 
 def test_easy_auth_principal(tmp_path: Path) -> None:
     settings = make_settings(tmp_path, api_auth_mode=ApiAuthMode.EASY_AUTH)
+    # A delegated user token as Easy Auth forwards it. A principal with only oid, name and roles is ambiguous
+    # (it could be an app-only token) and is refused; see tests/integration/test_api_identity.py.
     principal = {
         "auth_typ": "aad",
         "name_typ": "name",
         "role_typ": "roles",
         "claims": [
             {"typ": "http://schemas.microsoft.com/identity/claims/objectidentifier", "val": "oid-123"},
+            {"typ": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier", "val": "pairwise-123"},
+            {"typ": "http://schemas.microsoft.com/identity/claims/scope", "val": "FabricOps.Access"},
             {"typ": "name", "val": "Olivia"},
             {"typ": "roles", "val": "FabricOps.Operator"},
         ],
@@ -138,7 +153,11 @@ def test_easy_auth_principal(tmp_path: Path) -> None:
         assert client.get("/incidents").status_code == 401
         assert client.get("/incidents", headers={"X-MS-CLIENT-PRINCIPAL": "%%%"}).status_code == 401
         incident_id = client.get("/incidents", headers=header).json()[0]["incident_id"]
-        approvals = client.post(f"/incidents/{incident_id}/investigate", headers=header).json()["approval_ids"]
+        accepted = client.post(f"/incidents/{incident_id}/investigate", headers=header)
+        assert accepted.status_code == 202
+        job = await_job(client, accepted.json()["job_id"], header)
+        assert job["status"] == "SUCCEEDED", job
+        approvals = job["result"]["approval_ids"]  # type: ignore[index]
         # Requester is the agent, approver is the Easy Auth principal with the Operator role.
         approved = client.post(f"/approvals/{approvals[0]}/approve", headers=header)
         assert approved.status_code == 200 and approved.json()["approved_by"] == "oid-123"

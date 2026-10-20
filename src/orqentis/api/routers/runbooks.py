@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, status
 
-from orqentis.api.auth import CurrentPrincipal
+from orqentis.api.authz import ReadPrincipal
 from orqentis.api.deps import ContainerDep
 from orqentis.api.schemas import RunbookSummary
 from orqentis.domain.runbooks import Runbook
@@ -13,7 +13,7 @@ router = APIRouter(prefix="/runbooks", tags=["runbooks"])
 
 
 @router.get("", response_model=list[RunbookSummary])
-async def list_runbooks(c: ContainerDep, _: CurrentPrincipal) -> list[RunbookSummary]:
+async def list_runbooks(c: ContainerDep, _: ReadPrincipal) -> list[RunbookSummary]:
     return [
         RunbookSummary(
             id=r.id,
@@ -31,7 +31,7 @@ async def list_runbooks(c: ContainerDep, _: CurrentPrincipal) -> list[RunbookSum
 
 
 @router.get("/{runbook_id}", response_model=Runbook)
-async def get_runbook(runbook_id: str, c: ContainerDep, _: CurrentPrincipal) -> Runbook:
+async def get_runbook(runbook_id: str, c: ContainerDep, _: ReadPrincipal) -> Runbook:
     runbook = c.runbooks.get(runbook_id)
     if runbook is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Runbook {runbook_id} not found")

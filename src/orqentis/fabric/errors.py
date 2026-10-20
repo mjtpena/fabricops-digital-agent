@@ -61,5 +61,9 @@ class FabricCapabilityUnavailableError(FabricError):
     """The requested data is not exposed by this adapter (e.g. no public API exists)."""
 
 
+class ServicePrincipalConfigError(ValueError):
+    """``ORQENTIS_AUTH_MODE=service_principal`` without the environment variables azure-identity needs."""
+
+
 class WriteCapabilityNotGrantedError(FabricError):
     """A mutation was attempted while the write capability boundary is closed."""

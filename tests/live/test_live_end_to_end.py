@@ -86,7 +86,7 @@ async def test_collection_reads_runs_and_reports_the_refresh_gap(container: Cont
     ingestion, _ = await container.collect_and_detect()
     types = {e.event_type for e in ingestion.new_events}
     assert {EventType.PIPELINE_RUN_SUCCEEDED, EventType.PIPELINE_RUN_FAILED} <= types
-    # Viewer cannot read Power BI refresh history (docs/security.md section 10): reported, not fatal.
+    # Viewer cannot read Power BI refresh history (docs/security.md section 11): reported, not fatal.
     assert set(ingestion.errors) == {"semantic-model-refreshes"}
     assert "403" in ingestion.errors["semantic-model-refreshes"]
 

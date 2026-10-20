@@ -25,15 +25,26 @@ class EvidenceRecorder:
         self._clock = clock
         # Agent tool calls can run concurrently; id allocation + persistence must be atomic.
         self._lock = asyncio.Lock()
+        # Raw artefacts already in the store for this incident (read once, on the first record).
+        self._stored: set[str] | None = None
 
     @property
     def incident(self) -> Incident:
         return self._incident
 
-    def _next_id(self) -> str:
-        existing = {e.evidence_id for e in self._incident.evidence}
+    async def _next_id(self) -> str:
+        """Next free evidence id.
+
+        An investigation that was interrupted (error, timeout, shutdown) leaves its immutable raw artefacts behind
+        while the incident forgets the evidence that referenced them. Ids already used in the store are skipped, so a
+        retry never collides with, or overwrites, what an earlier attempt recorded.
+        """
+        if self._stored is None:
+            uris = await self._store.list(self._incident.incident_id)
+            self._stored = {uri.rsplit("/", 1)[-1].removesuffix(".json") for uri in uris}
+        taken = {e.evidence_id for e in self._incident.evidence} | self._stored
         n = len(self._incident.evidence) + 1
-        while (candidate := f"{self._incident.incident_id}-EV{n:03d}") in existing:
+        while (candidate := f"{self._incident.incident_id}-EV{n:03d}") in taken:
             n += 1
         return candidate
 
@@ -79,7 +90,7 @@ class EvidenceRecorder:
         tool_response: ToolResponse | None,
         raw: Any,
     ) -> Evidence:
-        evidence_id = self._next_id()
+        evidence_id = await self._next_id()
         raw_payload = raw if raw is not None else (tool_response.model_dump(mode="json") if tool_response else None)
         raw_reference = (
             await self._store.put_json(self._incident.incident_id, f"{evidence_id}.json", raw_payload)

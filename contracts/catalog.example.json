@@ -1,0 +1,111 @@
+{
+  "workspaces": [
+    {
+      "id": "00000000-0000-0000-0000-0000000000a1",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "display_name": "Sales Analytics",
+      "environment": "PROD",
+      "source": "fabric",
+      "metadata": {}
+    },
+    {
+      "id": "00000000-0000-0000-0000-0000000000a2",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "display_name": "Finance Reporting",
+      "environment": "PROD",
+      "source": "fabric",
+      "metadata": {}
+    },
+    {
+      "id": "00000000-0000-0000-0000-0000000000a3",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "display_name": "Marketing-sandbox",
+      "environment": "DEV",
+      "source": "fabric",
+      "metadata": {}
+    }
+  ],
+  "items": [
+    {
+      "id": "00000000-0000-0000-0000-0000000000b1",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "workspace_id": "00000000-0000-0000-0000-0000000000a1",
+      "display_name": "ingest_sales",
+      "environment": "PROD",
+      "source": "fabric",
+      "tags": [],
+      "metadata": {},
+      "item_type": "DataPipeline",
+      "activities": []
+    },
+    {
+      "id": "00000000-0000-0000-0000-0000000000b2",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "workspace_id": "00000000-0000-0000-0000-0000000000a1",
+      "display_name": "transform_sales",
+      "environment": "PROD",
+      "source": "fabric",
+      "tags": [],
+      "metadata": {},
+      "item_type": "Notebook"
+    },
+    {
+      "id": "00000000-0000-0000-0000-0000000000b3",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "workspace_id": "00000000-0000-0000-0000-0000000000a1",
+      "display_name": "sales_gold",
+      "environment": "PROD",
+      "source": "fabric",
+      "tags": [],
+      "metadata": {},
+      "item_type": "Lakehouse",
+      "tables": []
+    },
+    {
+      "id": "00000000-0000-0000-0000-0000000000b4",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "workspace_id": "00000000-0000-0000-0000-0000000000a1",
+      "display_name": "SalesModel",
+      "environment": "PROD",
+      "source": "fabric",
+      "tags": [],
+      "metadata": {},
+      "item_type": "SemanticModel"
+    },
+    {
+      "id": "00000000-0000-0000-0000-0000000000b5",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "workspace_id": "00000000-0000-0000-0000-0000000000a1",
+      "display_name": "SalesDashboard",
+      "environment": "PROD",
+      "source": "fabric",
+      "tags": [],
+      "metadata": {},
+      "item_type": "Report",
+      "semantic_model_id": "00000000-0000-0000-0000-0000000000b4"
+    },
+    {
+      "id": "00000000-0000-0000-0000-0000000000b6",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "workspace_id": "00000000-0000-0000-0000-0000000000a1",
+      "display_name": "explore_pricing",
+      "environment": "DEV",
+      "source": "fabric",
+      "tags": [],
+      "metadata": {},
+      "item_type": "Notebook"
+    },
+    {
+      "id": "00000000-0000-0000-0000-0000000000c1",
+      "tenant_id": "00000000-0000-0000-0000-000000000000",
+      "workspace_id": "00000000-0000-0000-0000-0000000000a2",
+      "display_name": "ingest_finance",
+      "environment": "PROD",
+      "source": "fabric",
+      "tags": [],
+      "metadata": {},
+      "item_type": "DataPipeline",
+      "activities": []
+    }
+  ]
+}

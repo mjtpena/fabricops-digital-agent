@@ -54,17 +54,31 @@ sequenceDiagram
 |---|---|---|---|---|
 | `FabricClient` + services (Workspace, Item, Job, Pipeline, SemanticModel, Capacity, Deployment, Dependency) | `fabric.ports` | `MockFabricClient` (synthetic estate) | `RestFabricClient` (Fabric + Power BI REST, read-only) | Both implemented |
 | `FabricWriteClient` | `fabric.ports` | `DisabledFabricWriteClient` (default), `MockFabricWriteClient` | REST write adapter | Write adapter deliberately not built (MVP is read-only) |
-| `TokenProvider` | `fabric.rest.auth` | `AzureIdentityTokenProvider` over `DefaultAzureCredential` / managed / workload identity / environment | same | Implemented |
-| `EventStore` | `storage.event_store` | `LocalEventStore` (SQLite) | `FabricEventhouseStore` (KQL database) | Local implemented; Eventhouse is milestone 9 |
+| `TokenProvider` | `fabric.rest.auth` | `AzureIdentityTokenProvider` over `DefaultAzureCredential` / managed / workload identity / environment, with the configured authority host and scopes (sovereign clouds) | same | Implemented |
+| `LineageScanner` | `contracts.lineage` | none in the runtime | `PowerBiScanner` (Power BI admin Scanner API), used only by `orqentis contracts scaffold --scanner` under an interactive administrator sign-in | Implemented (CLI only) |
+| `EventStore` | `storage.event_store` | `LocalEventStore` (SQLite) | PostgreSQL (the system of record, ADR-0008). Its `read_after` must return a gap-free, committed prefix (see ADR-0013 §7) | Local implemented; the PostgreSQL adapter arrives with the system of record |
 | `EvidenceStore` | `storage.evidence_store` | `LocalEvidenceStore` (filesystem, immutable) | OneLake (ADLS Gen2 API) | Local implemented |
 | `IncidentRepository` | `storage.incidents` | `SqliteIncidentRepository` | Eventhouse / Azure SQL (decision open, ADR-0003) | Local implemented |
 | `DependencyStore` | `topology.graph` | `SqliteDependencyStore`, `InMemoryDependencyStore` | relational tables | Implemented |
 | `ApprovalProvider` | `approvals.provider` | `LocalApprovalProvider` (SQLite, API-driven) | `TeamsApprovalProvider` (Adaptive Cards) | Local implemented; Teams is milestone 10 |
 | `AuditTrail` | `observability.audit` | `LocalAuditLog` (hash-chained JSONL) | append-only Eventhouse table / immutable storage | Local implemented |
 | `Reasoner` | `agents.reasoning` | `RuleBasedReasoner` | `AgentFrameworkReasoner` (Azure OpenAI or Foundry via Microsoft Agent Framework) | Both implemented |
+| `LeaderLease` | `runtime.lease` | `InProcessLeaderLease` (single replica) | database-backed lease (PostgreSQL system of record) | In-process implemented |
 | `Collector` | `telemetry.collectors` | pipeline runs, refreshes, capacity, static replay | Eventhouse-backed capacity / schema collectors | Implemented for REST-available data |
 | `DetectionRule` | `incidents.detection` | `PipelineFailureRule` | more rules per secondary scenario | Implemented for the primary scenario |
 | `InvestigationWorkflow` | `incidents.workflows.base` | `PipelineFailureWorkflow` | refresh failure, SLA, drift workflows | Implemented for the primary scenario |
+
+### Declared contracts and environments
+
+What Fabric cannot tell FabricOps is declared in a version-controlled **contracts file** (`contracts/`,
+schema in `schemas/contracts.schema.json`, ADR-0014): environments, external sources, data products,
+dependencies and SLAs. `load_contracts` validates it and raises a typed `ContractsError` that names the
+path and every violation; `orqentis contracts validate | scaffold | schema` author and check it
+offline. The **environment** of a workspace is its declaration (by id, then by name pattern) or, failing
+that, an inference from its name (`topology/environment.py`); items inherit it unless declared. The REST
+adapter resolves it once, so detection severity and the policy engine see the same value. Scaffold drafts a
+contracts file through the read-only `FabricClient` port; the draft is reviewed and never applied
+automatically.
 
 ## 4. Domain model
 
@@ -226,3 +240,74 @@ The score is capped at 0.95. Levels are HIGH (0.75 and above), MEDIUM (0.45 and 
 | A detection rule | Implement `DetectionRule.evaluate(event) -> IncidentCandidate | None` and add it to `DetectionEngine`. |
 | An investigation workflow | Implement `InvestigationWorkflow` (`supports`, `run`) and register it in `bootstrap.py`. |
 | A storage backend | Implement the port and wire it in `bootstrap.py`; domain code is unchanged. |
+| A scheduled job | Add a `JobSpec` (name, interval, async function) in `bootstrap.py` and a `scheduler_<name>_*` setting pair (enabled, interval). |
+
+## 13. Autonomous runtime
+
+FabricOps works without being called. Everything below lives in `orqentis.runtime` and is wired in
+`bootstrap.py`; the investigation workflow itself is unchanged.
+
+**Process lifecycle** (`api/app.py`, `runtime/service.py`). The FastAPI lifespan starts a `Runtime`
+that builds the container in the background and returns within `ORQENTIS_STARTUP_GRACE_SECONDS`, so
+the port opens even when reading the estate takes minutes. `GET /health` is liveness (no
+dependencies, always `200` while the process runs). `GET /health/ready` is `503` with a fixed
+reason code and the exception type (never its message: the probe is unauthenticated) until the container is built and the first catalog load finished. If the build
+raises (invalid contracts, Fabric unreachable, anything), the exception is logged, the process
+stays up, and the build is retried with exponential backoff (`ORQENTIS_BUILD_RETRY_*`); resources
+opened by a failed attempt are closed. Other endpoints answer `503 NOT_READY` meanwhile.
+
+**Scheduler** (`runtime/scheduler.py`). Jobs are `JobSpec(name, interval, async function)`. Every
+tick (`ORQENTIS_SCHEDULER_TICK_SECONDS`) the scheduler acquires or, once a third of the TTL is left,
+renews a `LeaderLease` (TTL >= 3 x tick); only the holder starts jobs, each with a `JobContext` (holder
+and fencing token), and a holder that loses the lease cancels its running jobs. A job never
+overlaps with itself: a run that outlasts its interval makes the next slot be skipped (counted),
+not queued, and missed slots collapse into one run. A job that raises or times out is logged and
+recorded in `Scheduler.status()`; it is audited when its health *changes* (first failure,
+recovery), and never stops the scheduler or other jobs. The scheduler reads time from the injected
+`Clock`, so tests drive it with a fake clock.
+
+| Job | Default | What it does |
+|---|---|---|
+| `collect-detect` | every 5 min | `TelemetryIngestor` then `DetectionEngine` (serialised with `POST /telemetry/collect`) |
+| `auto-investigate` | every 1 min | submits an investigation job for each `DETECTED` incident not already being investigated (most severe first, bounded per run and per incident) |
+| `sla-sweep` | every 15 min | assesses every declared SLA and appends an `SLA_ASSESSED` event when an SLA enters a new state for a deadline day |
+| `catalog-refresh` | every 60 min | reloads workspaces, items, capacities and declared dependencies, applies the diff to the live catalog and graph, audits it |
+
+**Investigation jobs** (`runtime/investigations.py`). `POST /incidents/{id}/investigate` returns
+`202` with a job; the scheduler submits through the same runner, so there is one code path.
+Submitting while a job for the incident is queued or running returns that job (idempotent per
+incident). At most `ORQENTIS_INVESTIGATION_MAX_CONCURRENCY` run at once, each with a timeout; a job
+that times out, is cancelled or fails puts its incident back to `DETECTED`. Auto-investigation gives
+up on an incident after `ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_MAX_ATTEMPTS` failures (a human can
+still investigate it) and resets incidents orphaned in `INVESTIGATING` by a crashed process.
+Automation acts as `system:orqentis`; the agent still cannot approve or execute.
+
+**Incremental collection** (`telemetry/collectors.py`, `storage/event_store.py`). Watermarks live in
+the event store, one per collector and, for collectors over many independent things (pipelines,
+semantic models, capacities), one per **scope** (the item id). A scope reads
+`[watermark - overlap, now]`, never further back than `ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS`; a
+scope with no watermark (a pipeline that appeared through a catalog refresh) reads the full maximum
+lookback, so it is not blind before the collector's overall progress, even after a restart. The
+watermark advances only after the events were stored, so a failed scope retries the same window and
+does not hold back the others. A watermark ahead of the clock is not trusted: it is logged, the
+maximum lookback is re-read once and the watermark is corrected. The overlap is safe because events
+are de-duplicated by `dedupe_key`. Fabric documents no ordering for "List Item Job Instances", so job
+listings filter by the watermark without stopping early and are capped at
+`ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES` pages.
+
+**Durable detection** (`incidents/detection_runner.py`). Storing events and detecting from them are
+separate steps, and a run can be cut short between them. The event store numbers every inserted
+event and keeps a cursor per consumer; `DetectionRunner` reads the events after its cursor, runs the
+detection engine and advances the cursor only after the engine returned. `CollectionService` runs it
+after collecting and also when collecting is interrupted or fails; the SLA sweep uses the same
+runner. Re-reading after an interruption is harmless because the engine de-duplicates by item and
+correlation (or by the triggering event).
+
+**Fabric call budget** (`fabric/rest/budget.py`). One semaphore and one token bucket, shared by every
+Fabric and Power BI call through `FabricHttp`, cap concurrency and request rate. A `429` or any
+`Retry-After` pauses all callers, and retry sleeps never hold a slot.
+
+**Catalog refresh** (`topology/refresh.py`). A new snapshot is built first (any error applies
+nothing), an empty estate is refused, and the dictionaries of the live catalog are rebound, so a
+collector iterating them is unaffected. The diff (added, removed, changed ids per kind, including
+dependencies) is logged and audited.

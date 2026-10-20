@@ -44,6 +44,7 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.11",
   "types-PyYAML>=6.0",
+  "jsonschema>=4.23",  # tests: the committed contracts schema accepts and rejects what the model does
 ]
 
 [project.scripts]

@@ -203,3 +203,23 @@ def test_the_contracts_template_is_valid_json_with_only_placeholders_for_ids() -
     document = json.loads(template)
     assert set(document) == {"external_sources", "data_products", "dependencies", "slas"}
     assert not re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", template, re.IGNORECASE)
+
+
+def test_the_contracts_template_passes_the_contracts_validator_once_ids_are_filled_in() -> None:
+    """create.sh fills the @@placeholders@@ with live ids; the result must satisfy `orqentis contracts validate`."""
+    from orqentis.contracts.validate import validate_text
+
+    template = (LIVE / "contracts.sandbox.template.json").read_text(encoding="utf-8")
+    ids: dict[str, str] = {}
+    fixed = {"TENANT_ID": "tenant-sandbox", "SLA_DEADLINE": "23:59:00", "SLA_TIMEZONE": "Australia/Sydney"}
+
+    def fill(match: re.Match[str]) -> str:
+        token = match.group(1)
+        return fixed.get(token) or ids.setdefault(token, f"00000000-0000-4000-8000-{len(ids) + 1:012x}")
+
+    report = validate_text(re.sub(r"@@([A-Za-z_.]+)@@", fill, template), tenant_id="tenant-sandbox")
+    assert report.contracts is not None, [str(v) for v in report.violations]
+    assert not report.errors, [str(v) for v in report.errors]
+    contracts = report.contracts
+    assert (len(contracts.external_sources), len(contracts.data_products), len(contracts.slas)) == (3, 3, 3)
+    assert len(contracts.dependencies) == 17

@@ -116,7 +116,11 @@ async def test_job_instances_are_mapped_and_environment_is_stamped(
 async def test_list_item_job_instances_comes_back_newest_first_from_the_service(
     rest_client: RestFabricClient, sandbox: Sandbox
 ) -> None:
-    """Evidence for WS1: the raw service order, before the adapter's own sort touches it."""
+    """Observed (Fabric documents no ordering): the raw service order, before the adapter's own sort touches it.
+
+    The adapter does not depend on this; it sorts and never stops reading early. If this ever fails, the order
+    changed, and nothing else is affected.
+    """
     workspace_id, pipeline_id = await _pipeline(rest_client, sandbox, "[TEST]")
     http = rest_client.jobs._ctx.http
     url = rest_client.jobs._instances_url(workspace_id, pipeline_id)
