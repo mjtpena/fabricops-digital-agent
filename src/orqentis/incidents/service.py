@@ -13,6 +13,7 @@ from orqentis.domain.incidents import Incident, IncidentStatus, Symptom, Timelin
 from orqentis.domain.taxonomy import CategoryName, Severity
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import DISABLED, Metrics
 from orqentis.storage.event_store import EventStore
 from orqentis.storage.incidents import IncidentRepository
 
@@ -52,12 +53,19 @@ class IncidentCandidate(BaseModel):
 
 class IncidentService:
     def __init__(
-        self, repository: IncidentRepository, event_store: EventStore, audit: AuditTrail, clock: Clock
+        self,
+        repository: IncidentRepository,
+        event_store: EventStore,
+        audit: AuditTrail,
+        clock: Clock,
+        *,
+        metrics: Metrics = DISABLED,
     ) -> None:
         self._repo = repository
         self._events = event_store
         self._audit = audit
         self._clock = clock
+        self._metrics = metrics
 
     @property
     def repository(self) -> IncidentRepository:
@@ -113,6 +121,13 @@ class IncidentService:
             },
         )
         _log.info("incident created", extra={"incident_id": incident_id, "category": incident.category})
+        self._metrics.incident_opened(
+            category=incident.category,
+            severity=incident.severity,
+            environment=incident.environment,
+            # Failure time (the triggering event) to now: what the detection loop adds to the time the failure took.
+            detection_latency_seconds=(now - candidate.detected_at).total_seconds(),
+        )
         return incident
 
     def add_timeline(

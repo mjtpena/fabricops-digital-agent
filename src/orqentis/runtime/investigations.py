@@ -31,6 +31,7 @@ from orqentis.incidents.investigation import INVESTIGABLE, InvestigationNotPossi
 from orqentis.incidents.service import IncidentService
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
+from orqentis.observability.metrics import DISABLED, Metrics
 from orqentis.observability.redaction import redact_text
 from orqentis.storage.incidents import IncidentQuery
 from orqentis.topology.catalog import EstateCatalog
@@ -108,6 +109,7 @@ class InvestigationJobRunner:
         max_concurrency: int = 2,
         timeout: timedelta = timedelta(minutes=10),
         max_retained: int = 500,
+        metrics: Metrics = DISABLED,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
@@ -117,6 +119,7 @@ class InvestigationJobRunner:
         self._clock = clock
         self._timeout = timeout
         self._max_retained = max_retained
+        self._metrics = metrics
         self._slots = asyncio.Semaphore(max_concurrency)
         self._jobs: dict[str, InvestigationJob] = {}
         self._active: dict[str, InvestigationJob] = {}  # incident id -> its queued/running job
@@ -221,6 +224,7 @@ class InvestigationJobRunner:
     # ----------------------------------------------------------------------------------------------- internals
     async def _run(self, job: InvestigationJob, actor: Principal) -> None:
         budget: asyncio.Timeout | None = None
+        outcome = "succeeded"
         try:
             async with self._slots:
                 job.status = InvestigationJobStatus.RUNNING
@@ -244,18 +248,27 @@ class InvestigationJobRunner:
                 self._failures.pop(job.incident_id, None)
         except asyncio.CancelledError:
             # Being stopped by a deploy says nothing about the incident, so it does not use up a retry.
+            outcome = "cancelled"
             await self._fail(job, "Cancelled: the service is shutting down", reset=True, counts=False)
             raise
         except TimeoutError as exc:
             if budget is not None and budget.expired():
+                outcome = "timeout"
                 await self._fail(job, f"Timed out after {self._timeout.total_seconds():g}s", reset=True)
             else:
+                outcome = "failed"
                 await self._fail(job, f"{type(exc).__name__}: {redact_text(str(exc))}"[:_MAX_ERROR_TEXT], reset=True)
         except Exception as exc:
             # InvestigationService has already returned the incident to DETECTED and audited the abort.
+            outcome = "failed"
             await self._fail(job, f"{type(exc).__name__}: {redact_text(str(exc))}"[:_MAX_ERROR_TEXT], reset=False)
         finally:
             job.finished_at = self._clock.now()
+            self._metrics.investigation_finished(
+                outcome=outcome,
+                trigger=job.trigger,
+                seconds=(job.finished_at - job.started_at).total_seconds() if job.started_at else 0.0,
+            )
             if self._active.get(job.incident_id) is job:
                 del self._active[job.incident_id]
             self._remember_finished(job)

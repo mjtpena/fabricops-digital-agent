@@ -6,7 +6,9 @@ import importlib
 from typing import Any
 
 from agent_framework.observability import enable_instrumentation
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import ConsoleMetricExporter, PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
@@ -21,12 +23,15 @@ _configured = False
 def configure_tracing(
     *, service_name: str = "orqentis-fabricops", console: bool = False, appinsights_connection_string: str | None
 ) -> None:
-    """Install a tracer provider once per process.
+    """Install a tracer provider (and, for the console exporter, a meter provider) once per process.
 
     With ``APPLICATIONINSIGHTS_CONNECTION_STRING`` set and the ``azure-monitor`` extra installed,
-    traces, logs and metrics flow to Application Insights via the Azure Monitor distro. Agent
-    Framework GenAI spans (model, token usage) are enabled; prompt/message content is not recorded
-    because it contains Fabric metadata.
+    traces and metrics flow to Application Insights via the Azure Monitor distro (the application's own
+    metrics are in ``orqentis.observability.metrics``). Agent Framework GenAI spans (model, token usage)
+    are enabled; prompt/message content is not recorded because it contains Fabric metadata.
+
+    Nothing is exported by default: without a connection string and without ``console`` there is no
+    exporter, so spans are dropped and metric calls are no-ops. ``console`` prints spans and metrics.
     """
     global _configured
     if _configured:
@@ -45,6 +50,11 @@ def configure_tracing(
         provider = TracerProvider(resource=resource)
         if console:
             provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+            metrics.set_meter_provider(
+                MeterProvider(
+                    resource=resource, metric_readers=[PeriodicExportingMetricReader(ConsoleMetricExporter())]
+                )
+            )
         trace.set_tracer_provider(provider)
     enable_instrumentation(enable_sensitive_data=False)
     _configured = True
