@@ -99,20 +99,25 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The audited set is what the image ships (see the Dockerfile): the project plus its llm and azure-monitor
-      # extras, resolved fresh. pip-audit is installed outside that environment so it does not audit itself.
+      # The audited set is what the image ships (see the Dockerfile): the project plus its llm and azure-monitor extras,
+      # resolved fresh, and nothing else. The image removes pip, setuptools and wheel after installing, so they are
+      # build tooling, not part of what is deployed: findings in the runner's own pip must not fail this gate. The
+      # resolved set is therefore frozen without them (and without the project itself) and audited as pinned
+      # requirements; pip-audit is installed outside that environment so it does not audit itself either.
       - name: Resolve the runtime dependency set
         run: |
           python -m venv "$RUNNER_TEMP/audit-venv"
           "$RUNNER_TEMP/audit-venv/bin/python" -m pip install --quiet ".[llm,azure-monitor]"
+          "$RUNNER_TEMP/audit-venv/bin/python" -m pip freeze --exclude pip --exclude setuptools --exclude wheel \
+            --exclude orqentis-fabricops > "$RUNNER_TEMP/runtime-requirements.txt"
+          echo "Auditing $(wc -l < "$RUNNER_TEMP/runtime-requirements.txt") pinned runtime requirements"
 
       - name: Install pip-audit
         run: python -m pip install --quiet "pip-audit==2.10.1"
 
       - name: Audit (fails on anything not in .pip-audit-allowlist.toml)
         run: |
-          site_packages="$("$RUNNER_TEMP/audit-venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
-          python scripts/pip_audit_gate.py --path "$site_packages"
+          python scripts/pip_audit_gate.py -r "$RUNNER_TEMP/runtime-requirements.txt" --no-deps --disable-pip
 
   actionlint:
     name: Lint workflows (actionlint)

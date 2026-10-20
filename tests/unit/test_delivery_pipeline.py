@@ -435,3 +435,25 @@ def test_required_status_checks_are_pinned_to_the_github_actions_app() -> None:
     assert '"context": "' in text
     assert re.search(r'"context": "[^"]+" \}', text) is None, "a required check without integration_id"
     assert "refs/heads/cd-dryrun/**" in text, "a ruleset restricts who can create dry-run branches"
+
+
+def test_dependency_audit_covers_the_runtime_set_and_not_build_tooling() -> None:
+    """pip, setuptools and wheel are removed from the image, so CVEs in the runner's own pip must not fail the gate."""
+    steps = _load(WORKFLOWS / "ci.yml")["jobs"]["dependency-audit"]["steps"]
+    text = "\n".join(str(step.get("run", "")) for step in steps)
+    assert '.[llm,azure-monitor]"' in text, "the audited extras are the ones the Dockerfile installs"
+    for tool in ("pip", "setuptools", "wheel", "orqentis-fabricops"):
+        assert f"--exclude {tool}" in text, f"{tool} must be excluded from the audited set"
+    assert "-r " in text
+    assert "--no-deps" in text
+    assert "--disable-pip" in text
+    assert "--path" not in text, "auditing a whole environment would include the tooling"
+
+
+def test_the_audit_allowlist_never_excuses_build_tooling() -> None:
+    allowlist = (ROOT / ".pip-audit-allowlist.toml").read_text(encoding="utf-8")
+    code = "\n".join(line for line in allowlist.splitlines() if not line.lstrip().startswith("#"))
+    for tool in ("pip", "setuptools", "wheel"):
+        assert not re.search(rf'package\s*=\s*"{tool}"', code), (
+            f"{tool} belongs outside the audited set, not in the allowlist"
+        )

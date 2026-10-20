@@ -5,6 +5,7 @@ The script is bash and curl; these tests run it as a subprocess (Git Bash on Win
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -202,3 +203,57 @@ def test_the_token_comes_from_az_when_none_is_supplied(serve: Any, fake_az: Path
         serve("ok"), fake_az, SMOKE_TOKEN="", SMOKE_TOKEN_RESOURCE="api://00000000-0000-0000-0000-000000000000"
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_token_never_reaches_the_output_on_a_ci_runner(serve: Any, fake_az: Path) -> None:
+    """On GitHub Actions GITHUB_ACTIONS=true. The script once printed `::add-mask::<token>`: the token itself."""
+    for token_source in ({"SMOKE_TOKEN": TOKEN}, {"SMOKE_TOKEN": "", "SMOKE_TOKEN_RESOURCE": "api://x"}):
+        result = _run(
+            serve("ok"),
+            fake_az,
+            GITHUB_ACTIONS="true",
+            GITHUB_STEP_SUMMARY="",
+            **REVISION_CHECK,
+            **GOOD_REVISION,
+            **token_source,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert TOKEN not in result.stdout + result.stderr
+        assert "::add-mask::" not in result.stdout + result.stderr
+
+
+def test_a_rejected_token_is_described_by_its_claims_but_never_printed(serve: Any, fake_az: Path) -> None:
+    claims = (
+        base64.urlsafe_b64encode(json.dumps({"aud": "api://x", "roles": ["FabricOps.Reader"]}).encode())
+        .decode()
+        .rstrip("=")
+    )
+    jwt = f"e30.{claims}.signature-part-that-must-not-leak"
+    result = _run(serve("ok"), fake_az, GITHUB_ACTIONS="true", SMOKE_TOKEN=jwt)
+    output = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "roles=['FabricOps.Reader']" in output
+    assert jwt not in output
+    assert claims not in output, "the payload segment of the token is not printed either"
+    assert "signature-part-that-must-not-leak" not in output
+
+
+def test_the_script_cannot_trace_or_echo_the_token() -> None:
+    """Static guard: no shell tracing, no verbose curl, no runner mask command, no token on a command line."""
+    code = "\n".join(
+        line for line in SCRIPT.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")
+    )
+    for forbidden in (
+        "set -x",
+        "xtrace",
+        "set -v",
+        "curl -v",
+        "--verbose",
+        "--trace",
+        "add-mask",
+        'echo "$token"',
+        "echo $token",
+    ):
+        assert forbidden not in code, f"smoke-test.sh must not contain {forbidden!r}"
+    assert "Authorization: Bearer" in code
+    assert "--config -" in code, "the bearer header is passed to curl on stdin, not as an argument"

@@ -16,7 +16,8 @@
 # The token is requested for SMOKE_TOKEN_RESOURCE with `az account get-access-token`, so the caller must be
 # signed in as the pipeline's service principal (azure/login over OIDC) and that principal must hold the
 # FabricOps.Automation app role on the API. SMOKE_TOKEN (a ready-made token) is accepted for local use.
-# The token is never printed. No secrets are read from, or written to, the repository.
+# The token is never printed, not even as a runner mask command (see below). No secrets are read from, or written to,
+# the repository.
 #
 # Settings (environment variables):
 #   SMOKE_BASE_URL               required   Base URL of the API, without a trailing slash.
@@ -171,9 +172,9 @@ if [[ -z "$token" ]]; then
   echo "Token request returned nothing" >&2
   exit 1
 fi
-if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-  echo "::add-mask::${token}"
-fi
+# The token is deliberately NOT registered with the runner's log masker: `::add-mask::<value>` is a line on stdout, so it
+# would write the token to the script's own output (and to any file or pipe that output goes to). The token is kept in a
+# variable, handed to curl on stdin only, and never echoed, traced or put on a command line.
 
 # ---------------------------------------------------------------------------------------------- 1. /health
 health_token=""
