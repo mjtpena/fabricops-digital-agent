@@ -13,6 +13,16 @@ section does not match.
 
 ### Added
 
+- Observability and operations (ADR-0019): OpenTelemetry metrics behind `observability/metrics.py` (collection duration and
+  errors per collector, events ingested, incidents opened and detection latency, investigation duration and outcome, tool errors,
+  model tokens and estimated cost, pending approvals, scheduler job runs/failures/overruns, lease changes, and a collection
+  heartbeat that moves only for a collection in which not everything failed); the scheduled `audit-verify` job (metric plus an
+  ERROR log line on failure, optional immutable-anchor check); `infra/bicep/modules/monitoring.bicep` with an action group (email
+  receivers and an optional Teams Workflows webhook, both deployment-time inputs), six alerts (app down, restart loop, 5xx rate,
+  collector errors, collection heartbeat, audit verification failure) with parameterised windows and thresholds and runbook links,
+  and a workbook; `docs/operations.md` and `docs/cost.md`. New settings `ORQENTIS_SCHEDULER_AUDIT_VERIFY_*` and
+  `ORQENTIS_LLM_*_COST_PER_MILLION_TOKENS`; Bicep parameters `monitoringEnabled`, `alert*`, `auditVerify*`, `logDailyQuotaGb`,
+  `llm*CostPerMillionTokens`. Nothing is exported unless Application Insights or the console exporter is configured.
 - Delivery pipeline (ADR-0016): `cd.yml` runs CI first, then builds the image once, scans it with Trivy, generates an SPDX
   SBOM, pushes it to the shared registry by digest, tags it (`<git sha>` for `main`, `dryrun-<git sha>` otherwise) only
   after the scan gate passes, deploys `dev` and smoke-tests it, then promotes the same digest to `test` and `prod`
