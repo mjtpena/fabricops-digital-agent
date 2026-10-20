@@ -6,24 +6,24 @@ link to a PR, a CI run, a log or a document, never a claim.
 
 Status values: `not started`, `in progress`, `blocked`, `done`.
 
-Last updated: 2026-10-20 (kickoff).
+Last updated: 2026-10-20 (Wave 1 merged).
 
 ## 1. Definition of done
 
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
-| 1 | **Continuous delivery.** `dev`, `test`, `prod` deployed by GitHub Actions CD over OIDC; no secrets in repo or pipeline; manual approval for `prod`; `main` CI green | not started | |
-| 2 | **Autonomous operation.** `rest` mode against the live tenant; scheduled collect, detect, investigate, notify without human prompting | not started | |
-| 3 | **Detection on real failures.** Schema drift, notebook failure, pipeline timeout, credential/auth failure, semantic-model refresh failure, SLA breach: each detected within 10 min, investigated automatically, correct category (or honest LOW-confidence "undetermined"), human notified with a report link | not started | |
-| 4 | **Stateless and resilient.** 2+ replicas, leader election, zero-downtime deploys, audit chain verifies across replicas and deploys; no Azure Files or SQLite in deployed environments | not started | |
+| 1 | **Continuous delivery.** `dev`, `test`, `prod` deployed by GitHub Actions CD over OIDC; no secrets in repo or pipeline; manual approval for `prod`; `main` CI green | in progress | CD pipeline merged (WS4 #6: build once, Trivy, SBOM, promote by digest, required reviewers, OIDC only). Build identity configured with the immutable OIDC subject. Pending: deploy identities, GitHub environments and rulesets (Wave 2 list B3/B4), first dev deploy |
+| 2 | **Autonomous operation.** `rest` mode against the live tenant; scheduled collect, detect, investigate, notify without human prompting | in progress | Scheduler, auto-investigation and async jobs merged (WS1 #4). Pending: rest mode in a deployed environment, notifications (WS8) |
+| 3 | **Detection on real failures.** Schema drift, notebook failure, pipeline timeout, credential/auth failure, semantic-model refresh failure, SLA breach: each detected within 10 min, investigated automatically, correct category (or honest LOW-confidence "undetermined"), human notified with a report link | in progress | Live sandbox and 6 injectors (WS5 #7): schema drift, notebook, timeout and auth failures open incidents; refresh failure and SLA breach need WS7 rules (and D9) |
+| 4 | **Stateless and resilient.** 2+ replicas, leader election, zero-downtime deploys, audit chain verifies across replicas and deploys; no Azure Files or SQLite in deployed environments | in progress | Lease port, durable detection cursor, compare-and-set approvals merged (WS1, WS3). Pending: PostgreSQL adapters, 2+ replicas (WS6) |
 | 5 | **Durable data.** Backups or PITR; one restore rehearsed and documented | not started | |
 | 6 | **Operable.** Alerts for app down, restart loop, 5xx rate, collector errors, collection heartbeat (15 min), audit verification failure; test fire done; `docs/operations.md` | not started | |
-| 7 | **Secure.** Threat model updated; independent review with every finding fixed or accepted in writing; no unaccepted high/critical in dependency and image scans; SBOM published; app-only tokens can never approve or execute | not started | |
-| 8 | **Portable.** Fresh RG and different tenant from docs + parameter file + contracts scaffold; declared environment classification; configurable time zone; sovereign-cloud scopes/authority (unit-tested) | not started | |
+| 7 | **Secure.** Threat model updated; independent review with every finding fixed or accepted in writing; no unaccepted high/critical in dependency and image scans; SBOM published; app-only tokens can never approve or execute | in progress | App-only tokens can never approve or execute (WS3 #3, independent red-team, 218 security tests). Image: Azure Linux 3, Trivy 0 HIGH/CRITICAL; pip-audit gate; SBOM generated in CD. Pending: WS12 review, published SBOM on release |
+| 8 | **Portable.** Fresh RG and different tenant from docs + parameter file + contracts scaffold; declared environment classification; configurable time zone; sovereign-cloud scopes/authority (unit-tested) | in progress | Declared environments, contracts schema/validate/scaffold, time zone and sovereign-cloud settings (unit-tested), cross-tenant service principal with Key Vault (WS2 #5). Pending: portability rehearsal (Wave 4) |
 | 9 | **Supervised remediation.** `RERUN_PIPELINE` and `REFRESH_SEMANTIC_MODEL` end to end in sandbox DEV via approval flow and a separate executor holding only the actor identity; writes off by default and off in `prod`; two approvers for HIGH_RISK; "no mutation is ever auto-allowed" unchanged | not started | |
 | 10 | **LLM reasoner validated.** Golden-set eval against real Azure OpenAI; accuracy ≥ rule-based; 0 ungrounded findings accepted; cost and latency recorded; fallback proven | not started | |
 | 11 | **Soak.** 72 h continuous in `test` (or read-only `prod`), no unhandled errors, no unexplained restarts | not started | |
-| 12 | **Quality gates.** `make check` passes; `make demo` offline; ADR per architecture change; `v1.0.0` tagged with CHANGELOG | in progress | Local `make check` green on the WS0 branch (235 passed). CI blocked, see B1 |
+| 12 | **Quality gates.** `make check` passes; `make demo` offline; ADR per architecture change; `v1.0.0` tagged with CHANGELOG | in progress | `main` CI green on every merge (ruff, format, mypy --strict, pytest incl. 218 security tests, runbooks, Bicep, Docker); `make demo` offline; ADRs 0008–0016 |
 
 ## 2. Workstreams
 
@@ -32,12 +32,12 @@ one PR to `main`. Briefs live in [`docs/programme/briefs/`](programme/briefs/).
 
 | WS | Title | Wave | Depends on | Status | Owner session | PR | Evidence |
 |---|---|---|---|---|---|---|---|
-| WS0 | CI fix (Docker Hub 429; Windows local gates) | 0 | | in progress (blocked on B1) | orchestrator | [#1](https://github.com/mjtpena/fabricops-digital-agent/pull/1) | Local gates green; CI not started (B1) |
-| WS1 | Autonomous runtime | 1 | | approved, waiting for CI | `ws1-runtime` (Sonnet) | [#4](https://github.com/mjtpena/fabricops-digital-agent/pull/4) | fcefe0d: review 1 (11 findings) + verification round (audit truncation refused, port contract corrected, late symptoms attached) all fixed; orchestrator re-ran gates: make check, security, demo-all green |
-| WS2 | Portability and contracts | 1 | | approved, waiting for CIª83a41: review 1 (13 findings) + verification round (credential guard restored with negative cases) all fixed; orchestrator re-ran gates green |
-| WS3 | Identity and API hardening | 1 | | approved, waiting for CI | `ws3-identity` (Sonnet) | [#3](https://github.com/mjtpena/fabricops-digital-agent/pull/3) | Review 1 + independent red-team ([comment](https://github.com/mjtpena/fabricops-digital-agent/pull/3#issuecomment-6281103223)) → 19 findings fixed; verification: all fixed, starred fixes proven by revert, 8-process race gives exactly 1 write; 406 tests, 182 security tests |
-| WS4 | Delivery pipeline | 1 | A6 (done) for the push dry run | approved, waiting for CI | `ws4-delivery` (Sonnet) | [#6](https://github.com/mjtpena/fabricops-digital-agent/pull/6) | f264048: review 1 (15 findings) + verification round (immutable OIDC subjects, environment-first ordering, ruleset integration_id) all fixed; Azure Linux 3 base, Trivy 0 findings; orchestrator re-ran gates green |
-| WS5 | Live sandbox estate and live test harness | 1 | D8, A3–A5 | approved, waiting for CI | orchestrator's local subagent (Sonnet, shares the `az` login) | [#7](https://github.com/mjtpena/fabricops-digital-agent/pull/7) | d06b957: estate live (4 workspaces, idempotent create/teardown, 6 reversible injectors, 29 live tests); 4/6 injectors open incidents (refresh failure, SLA breach need WS7); 2 adapter mapping bugs + Power BI privacy-marker redaction fixed; review minors fixed; no tenant ids outside the live log; capacity paused. WS7 inputs: generic notebook-exception signature, schema-drift column extraction, signature_match redaction over-match, D9 |
+| WS0 | CI fix (Docker Hub 429; Windows local gates) | 0 | | merged | orchestrator | [#1](https://github.com/mjtpena/fabricops-digital-agent/pull/1) | Local gates green; CI not started (B1) |
+| WS1 | Autonomous runtime | 1 | | merged | `ws1-runtime` (Sonnet) | [#4](https://github.com/mjtpena/fabricops-digital-agent/pull/4) | fcefe0d: review 1 (11 findings) + verification round (audit truncation refused, port contract corrected, late symptoms attached) all fixed; orchestrator re-ran gates: make check, security, demo-all green |
+| WS2 | Portability and contracts | 1 | | merged | `ws2-portability` (Sonnet) | [#5](https://github.com/mjtpena/fabricops-digital-agent/pull/5) | Review 1 (13 findings) and verification round (credential guard restored with negative cases) fixed; orchestrator re-ran gates; merged after WS3 with all 209 security tests green |
+| WS3 | Identity and API hardening | 1 | | merged | `ws3-identity` (Sonnet) | [#3](https://github.com/mjtpena/fabricops-digital-agent/pull/3) | Review 1 + independent red-team ([comment](https://github.com/mjtpena/fabricops-digital-agent/pull/3#issuecomment-6281103223)) → 19 findings fixed; verification: all fixed, starred fixes proven by revert, 8-process race gives exactly 1 write; 406 tests, 182 security tests |
+| WS4 | Delivery pipeline | 1 | A6 (done) for the push dry run | merged | `ws4-delivery` (Sonnet) | [#6](https://github.com/mjtpena/fabricops-digital-agent/pull/6) | f264048: review 1 (15 findings) + verification round (immutable OIDC subjects, environment-first ordering, ruleset integration_id) all fixed; Azure Linux 3 base, Trivy 0 findings; orchestrator re-ran gates green |
+| WS5 | Live sandbox estate and live test harness | 1 | D8, A3–A5 | merged | orchestrator's local subagent (Sonnet, shares the `az` login) | [#7](https://github.com/mjtpena/fabricops-digital-agent/pull/7) | d06b957: estate live (4 workspaces, idempotent create/teardown, 6 reversible injectors, 29 live tests); 4/6 injectors open incidents (refresh failure, SLA breach need WS7); 2 adapter mapping bugs + Power BI privacy-marker redaction fixed; review minors fixed; no tenant ids outside the live log; capacity paused. WS7 inputs: generic notebook-exception signature, schema-drift column extraction, signature_match redaction over-match, D9 |
 | WS6 | Durable storage and stateless app | 2 | D1, WS1 | not started | | | |
 | WS7 | Signals and detection breadth | 2 | D2, WS1, WS5 | not started | | | |
 | WS8 | Notifications and web UI | 2 | D3, WS3 (WS6 preferred) | not started | | | |
@@ -70,7 +70,7 @@ Hot files (additive changes only; merged in dependency order): `src/orqentis/boo
 
 | Id | Item | Owner | Status |
 |---|---|---|---|
-| B1 | **GitHub Actions jobs do not start:** "recent account payments have failed or your spending limit needs to be increased" (run 39342626445). Every PR's review gate needs green CI | repo owner | open |
+| B1 | **GitHub Actions jobs do not start:** "recent account payments have failed or your spending limit needs to be increased" (run 39342626445). Every PR's review gate needs green CI | repo owner | resolved 2026-10-20: repository made public on the owner's instruction (secret scan of all branches and history first: no secrets) |
 | B2 | Repository default branch was `claude/amazing-feynman-sbw9fs`, not `main` | orchestrator (owner-approved) | resolved 2026-10-20: default branch is `main` |
 | R1 | `ubuntu-latest` migrates to Ubuntu 26 from 2026-10-19. WS4 pins runner images | WS4 | open |
 | R2 | The tenant hosts other production subscriptions and workspaces. All FabricOps resources stay in prefixed, tagged resource groups and workspaces | orchestrator | open |
@@ -93,7 +93,7 @@ two small non-programme resources, so the budget errs on the early side).
 | `crfabricopsshared` ACR Basic | USD 0.1666/day (≈ USD 5/month) | created 2026-10-20 |
 | `fabricdemocap2026` F4 (shared, D8) | USD 0.84/h while running | paused when idle; resume/pause logged in `docs/live-environment.md` |
 
-Spend to date (programme resources): ≈ USD 0. `RG-FABRICDEMO` month-to-date at kickoff: AUD 9.60 (pre-programme).
+Spend to date (programme resources): ≈ USD 2: sandbox capacity ≈ 2.0 h at USD 0.84/h (WS5) plus the registry (≈ USD 0.17/day). `RG-FABRICDEMO` month-to-date at kickoff: AUD 9.60 (pre-programme).
 
 ## 6. Change history
 
@@ -101,8 +101,25 @@ Spend to date (programme resources): ≈ USD 0. `RG-FABRICDEMO` month-to-date at
 |---|---|
 | 2026-10-20 | Kickoff: repo verified, live tenant discovered read-only, WS0 opened, ledger created |
 | 2026-10-20 | D8: sandbox uses the existing F4 `fabricdemocap2026`, with resume/pause authorised |
+| 2026-10-20 | Wave 1 merged to `main` in dependency order: #1 WS0, #2 ledger, #3 WS3, #5 WS2, #4 WS1, #6 WS4, #7 WS5. Repository made public (B1). Base image moved to MCR Azure Linux 3 after ECR Public also rate-limited runners |
 | 2026-10-20 | WS5 (#7) approved pending CI; D9 raised (refresh history needs dataset Write) |
 | 2026-10-20 | All Wave 1 PRs (#3–#6) approved after review, independent red-team (WS3) and verification rounds; merges wait on CI (B1). Merge order: #1, #2, #3, #5, #4, #6 |
 | 2026-10-20 | Wave 1 first-round reviews done (4 deep reviews + independent WS3 red-team); fixes sent back to each session |
 | 2026-10-20 | Wave 1 started: WS1–WS4 sub-sessions, WS5 live subagent |
 | 2026-10-20 | D0–D7 accepted; ADRs 0008–0012; default branch set to `main`; budget, shared ACR, CI/CD OIDC identity and test service principal created (A4–A6) |
+
+## 7. Wave 2 approvals (pending owner)
+
+Prices: Azure retail list prices, Australia East, USD; billing in AUD.
+
+| # | Action | Why | Cost | Undo |
+|---|---|---|---|---|
+| B1 | `rg-fabricops-dev` via CD (main.bicep + env/dev.bicepparam): Log Analytics + App Insights, reader and actor managed identities, Container Apps env + app (1 replica, 0.5 vCPU/1 GiB), evidence storage (Entra-only, immutability), PostgreSQL Flexible B1ms (Entra-only, PITR 7 d), Key Vault | First deployed environment: WS6 storage, WS8 notifications, WS9 alert test, WS11 later | ~USD 45/month (Container Apps idle ~12, PostgreSQL ~24, logs ~5, storage/KV ~1) | `az group delete -n rg-fabricops-dev` |
+| B2 | Entra app registration `FabricOps API (dev)` (Easy Auth audience, app roles Operator/PlatformAdmin/Reader/Automation, idtyp optional claim); assign you PlatformAdmin+Operator; Automation role to the dev deploy identity for smoke tests | Authenticated API and UI | 0 | `az ad app delete --id <appId>` |
+| B3 | Entra app `fabricops-deploy-dev` with federated credential `environment:dev` (immutable subject); Contributor on `rg-fabricops-dev`; RBAC Administrator on `rg-fabricops-dev` and `crfabricopsshared` constrained to the template's role ids, no deletes, ServicePrincipal only; custom role "FabricOps Nested Deployment" (`Microsoft.Resources/deployments/*`) on `rg-fabricops-shared`. Entra app `fabricops-whatif` with `pull_request` subject: Reader + what-if on `rg-fabricops-dev` | CD deploys dev; PR what-if | 0 | delete apps, role assignments, custom role |
+| B4 | GitHub (repo admin): environments `dev`, `test`, `prod`, `release` (required reviewers on test/prod/release, deployment branch `main` only); rulesets for `main` (PR required, 6 required checks bound to GitHub Actions, no bypass, no force push/delete) and `v*` tags; repository/environment variables (ids only, no secrets) | Protect promotion and releases | 0 | delete rulesets/environments/variables |
+| B5 | Fabric: dev reader managed identity gets Viewer on the 4 sandbox workspaces and the OneLake data-access Read role on the sandbox source table | Rest-mode collection in dev | 0 | remove role assignments |
+| B6 | Teams: you create a Workflows webhook in a chat or channel and send me the URL; I store it only in the dev Key Vault | WS8 live notification test | 0 | delete the workflow and the secret |
+| B7 | Azure Monitor action group (email to your work address) and the WS9 alert rules in dev; deliberate failures in dev to fire each alert | WS9 acceptance | ~USD 1–3/month for scheduled query rules | delete with the RG |
+| B8 | (R4) Viewer for the dev reader identity on the existing "Microsoft Fabric Capacity Metrics" workspace (non-programme; capacity-level metadata only) | Validate the WS7 capacity collector live | 0 | remove the role assignment |
+| B9 | Resume/pause `fabricdemocap2026` for Wave 2 live tests and the game-day rehearsal (already authorised by D8; listed for cost) | Live validation | USD 0.84/h while running | pause |
