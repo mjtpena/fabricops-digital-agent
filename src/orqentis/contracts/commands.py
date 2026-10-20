@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -16,57 +17,17 @@ from orqentis.config.settings import FabricMode, Settings
 from orqentis.contracts.catalog import CatalogSnapshot
 from orqentis.contracts.diagnostics import read_text
 from orqentis.contracts.errors import ContractsError
+from orqentis.contracts.lineage import LineageScanner
 from orqentis.contracts.scaffold import ScaffoldOptions, scaffold_contracts
 from orqentis.contracts.schema import contracts_json_schema, render_contracts_schema
 from orqentis.contracts.validate import ValidationReport, validate_text
-from orqentis.fabric.errors import FabricError
+from orqentis.fabric.errors import FabricError, ServicePrincipalConfigError
+from orqentis.fabric.ports import FabricClient
 
 _REGENERATE = "regenerate it with: orqentis contracts schema --output {path}"
-
-
-def add_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    contracts = sub.add_parser("contracts", help="Author and check the estate contracts file")
-    actions = contracts.add_subparsers(dest="contracts_command", required=True)
-
-    validate = actions.add_parser(
-        "validate", help="Check a contracts file: schema, duplicate ids, references (non-zero exit on errors)"
-    )
-    validate.add_argument("path", type=Path)
-    validate.add_argument(
-        "--catalog",
-        type=Path,
-        default=None,
-        help="Workspaces and items to check references against (a scaffold --catalog-output file or a full estate "
-        "file). A full estate file is its own catalog.",
-    )
-    validate.add_argument("--tenant-id", default=None, help="Require every record to carry this tenant id")
-    validate.add_argument("--strict", action="store_true", help="Treat warnings (unreviewed drafts) as errors")
-
-    scaffold = actions.add_parser(
-        "scaffold",
-        help="Draft a contracts file from a live read-only listing (a draft for human review, never applied)",
-    )
-    scaffold.add_argument("--output", type=Path, required=True, help="Where to write the draft contracts file")
-    scaffold.add_argument("--catalog-output", type=Path, default=None, help="Also write the listing, for validate")
-    scaffold.add_argument("--tenant-id", default=None, help="Fabric tenant id (default: ORQENTIS_TENANT_ID)")
-    scaffold.add_argument(
-        "--workspace", action="append", default=[], metavar="ID_OR_NAME", help="Only this workspace (repeatable)"
-    )
-    scaffold.add_argument("--max-runs", type=int, default=5, help="Recent runs read per pipeline (default 5)")
-    scaffold.add_argument("--schema-ref", default=None, help='Value for "$schema" in the draft (path or URL)')
-    scaffold.add_argument("--force", action="store_true", help="Overwrite existing output files")
-    scaffold.add_argument(
-        "--scanner",
-        action="store_true",
-        help="Add lineage from the Power BI admin Scanner API. Interactive only: you sign in as a Fabric administrator",
-    )
-    scaffold.add_argument(
-        "--scanner-client-id", default=None, help="Public-client app registration to sign in with (optional)"
-    )
-
-    schema = actions.add_parser("schema", help="Print or check the JSON Schema of the contracts file")
-    schema.add_argument("--output", type=Path, default=None, help="Write the schema to this file")
-    schema.add_argument("--check", type=Path, default=None, help="Exit non-zero if this file differs from the model")
+# Terminal control characters (including ESC, which starts ANSI sequences) from Fabric or from a file never reach the
+# terminal; newlines and tabs stay.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def run(args: argparse.Namespace, console: Console) -> int:
@@ -80,7 +41,7 @@ def run(args: argparse.Namespace, console: Console) -> int:
 
 
 def _say(console: Console, text: str) -> None:
-    console.print(text, markup=False, highlight=False, soft_wrap=True)
+    console.print(_CONTROL.sub("", text), markup=False, highlight=False, soft_wrap=True)
 
 
 def _print_report(report: ValidationReport, console: Console) -> None:
@@ -153,11 +114,12 @@ async def _scaffold(args: argparse.Namespace, console: Console) -> int:
             _say(console, f"  {'.'.join(str(p) for p in error['loc'])}: {error['msg']}")
         return 2
 
-    fabric = await bootstrap.build_discovery_client(settings)
-    scanner = (
-        await bootstrap.build_lineage_scanner(settings, client_id=args.scanner_client_id) if args.scanner else None
-    )
+    fabric: FabricClient | None = None
+    scanner: LineageScanner | None = None
     try:
+        fabric = await bootstrap.build_discovery_client(settings)
+        if args.scanner:
+            scanner = await bootstrap.build_lineage_scanner(settings, client_id=args.scanner_client_id)
         result = await scaffold_contracts(
             fabric,
             ScaffoldOptions(
@@ -169,11 +131,15 @@ async def _scaffold(args: argparse.Namespace, console: Console) -> int:
             ),
             scanner=scanner,
         )
+    except ServicePrincipalConfigError as exc:  # names the missing variables, never their values
+        _say(console, f"Cannot sign in to Fabric: {exc}")
+        return 2
     except FabricError as exc:
         _say(console, f"Fabric could not be read ({exc.error_code or type(exc).__name__}): {exc.message}")
         return 1
-    finally:
-        await fabric.aclose()
+    finally:  # close whatever was opened, also when building the second client or reading failed
+        if fabric is not None:
+            await fabric.aclose()
         if scanner is not None:
             await scanner.aclose()
 

@@ -52,7 +52,12 @@ from orqentis.fabric.ports import FabricClient
 from orqentis.fabric.rest.auth import FABRIC_SCOPE, POWERBI_SCOPE, TokenProvider
 from orqentis.fabric.rest.http import FabricHttp, JsonObject
 from orqentis.observability.logging import get_logger
-from orqentis.topology.environment import EnvironmentResolver, EnvironmentSource, infer_environment, stage_environment
+from orqentis.topology.environment import (
+    EnvironmentResolver,
+    EnvironmentSource,
+    infer_environment,  # noqa: F401  (re-exported: callers import it from this module)
+    stage_environment,
+)
 
 _log = get_logger(__name__)
 
@@ -305,15 +310,19 @@ class RestItemService:
             name for tag in raw.get("tags") or [] if isinstance(tag, dict) and (name := _clean(tag.get("displayName")))
         ]
         item_id = _required(raw, "id", "item")
+        resolved = self._ctx.environments.resolve_item(item_id, environment)  # workspace's unless declared
         fields: dict[str, Any] = {
             "id": item_id,
             "tenant_id": self._ctx.tenant_id,
             "workspace_id": _clean(raw.get("workspaceId")) or workspace_id,
             "display_name": _required(raw, "displayName", "item"),
             "description": _clean(raw.get("description")),
-            "environment": self._ctx.environments.item(item_id, environment),  # workspace's unless declared
+            "environment": resolved.environment,
             "tags": tags,
-            "metadata": _compact(folder_id=_clean(raw.get("folderId"))),
+            "metadata": _compact(
+                folder_id=_clean(raw.get("folderId")),
+                environment_source=None if resolved.source is EnvironmentSource.INHERITED else resolved.source.value,
+            ),
         }
         item_class = _ITEM_CLASSES.get(fabric_type or "")
         if item_class is not None:
@@ -347,13 +356,15 @@ class RestJobService:
 
     def _map(self, raw: JsonObject, workspace_id: str, item_id: str) -> PipelineRun:
         job_type, fabric_status = _clean(raw.get("jobType")), _clean(raw.get("status"))
+        run_item_id = _clean(raw.get("itemId")) or item_id
         return PipelineRun(
             id=_required(raw, "id", "job instance"),
             tenant_id=self._ctx.tenant_id,
             workspace_id=workspace_id,
-            item_id=_clean(raw.get("itemId")) or item_id,
+            item_id=run_item_id,
             item_type=_JOB_ITEM_TYPES.get(job_type or "Pipeline", ItemType.OTHER),
-            environment=self._workspaces.known_environment(workspace_id),
+            # The item's own environment: its workspace's, unless an item_id declaration says otherwise.
+            environment=self._ctx.environments.item(run_item_id, self._workspaces.known_environment(workspace_id)),
             status=_status(fabric_status, _JOB_STATUS),
             invoke_type=_clean(raw.get("invokeType")),
             start_time=parse_datetime(raw.get("startTimeUtc")),
@@ -489,15 +500,22 @@ class RestCapacityService:
         capacities: list[Capacity] = []
         for raw in await self._ctx.http.paginate(self._ctx.fabric("capacities"), scope=FABRIC_SCOPE):
             display_name = _required(raw, "displayName", "capacity")
+            capacity_id = _required(raw, "id", "capacity")
+            resolved = self._ctx.environments.resolve_capacity(capacity_id, display_name)  # declared > inferred
             capacities.append(
                 Capacity(
-                    id=_required(raw, "id", "capacity"),
+                    id=capacity_id,
                     tenant_id=self._ctx.tenant_id,
                     display_name=display_name,
                     sku=_clean(raw.get("sku")) or "Unknown",
                     region=_clean(raw.get("region")),
                     state=_clean(raw.get("state")) or "Unknown",
-                    environment=infer_environment(display_name),
+                    environment=resolved.environment,
+                    metadata=_compact(
+                        environment_source=None
+                        if resolved.source is EnvironmentSource.INFERRED
+                        else resolved.source.value
+                    ),
                 )
             )
         return capacities
@@ -547,6 +565,15 @@ class RestDeploymentService:
                 ]
             return self._pipelines
 
+    def _stage_environment(self, raw: JsonObject, position: int, count: int) -> Environment:
+        """A declared environment for the stage's workspace, else the stage's name, else its position."""
+        workspace_id = _clean(raw.get("workspaceId"))
+        if workspace_id is not None:
+            declared = self._ctx.environments.resolve_declared_workspace(workspace_id, _clean(raw.get("workspaceName")))
+            if declared is not None:
+                return declared.environment
+        return stage_environment(_clean(raw.get("displayName")), position, count)
+
     async def _list_stages(self, pipeline_id: str, pipeline_name: str | None) -> list[_Stage]:
         if pipeline_id not in self._stages:
             url = self._ctx.fabric("deploymentPipelines", pipeline_id, "stages")
@@ -560,7 +587,7 @@ class RestDeploymentService:
                     display_name=_clean(s.get("displayName")),
                     order=_as_int(s.get("order"), index),
                     workspace_id=_clean(s.get("workspaceId")),
-                    environment=stage_environment(_clean(s.get("displayName")), position, len(ordered)),
+                    environment=self._stage_environment(s, position, len(ordered)),
                 )
                 for position, (index, s) in enumerate(ordered)
             ]

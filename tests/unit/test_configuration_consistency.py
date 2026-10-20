@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from orqentis.config.settings import Settings
 from tests.conftest import REPO
 
@@ -88,17 +90,47 @@ def test_every_parameter_file_sets_only_declared_parameters() -> None:
         assert used <= declared, f"{path.name} sets undeclared parameters: {sorted(used - declared)}"
 
 
+# Key Vault DNS suffixes: public, US Government, China, Germany.
+KEY_VAULT_SECRET_URI = re.compile(
+    r"https://[\w-]+\.vault\.(?:azure\.net|usgovcloudapi\.net|azure\.cn|microsoftazure\.de)/secrets/[\w-]+"
+)
+
+
+@pytest.mark.parametrize(
+    ("uri", "valid"),
+    [
+        ("https://kv-fabricops.vault.azure.net/secrets/fabric-sp-secret", True),
+        ("https://kv-gov.vault.usgovcloudapi.net/secrets/sp", True),
+        ("https://kv-cn.vault.azure.cn/secrets/sp", True),
+        ("https://kv.vault.azure.net/keys/sp", False),
+        ("https://kv.vault.azure.net/secrets/sp/0123456789abcdef0123456789abcdef", False),  # versioned: pins a value
+        ("http://kv.vault.azure.net/secrets/sp", False),
+        ("hunter2-not-a-reference", False),
+    ],
+)
+def test_key_vault_secret_uri_shape(uri: str, valid: bool) -> None:
+    assert bool(KEY_VAULT_SECRET_URI.fullmatch(uri)) is valid
+
+
 def test_parameter_files_only_reference_secrets_in_key_vault() -> None:
     """A parameter file may point at a Key Vault secret (a versionless URI); it never holds a value."""
+    checked = 0
     for path in sorted(BICEP.rglob("*.bicepparam")):
         body = path.read_text(encoding="utf-8")
-        for name, value in re.findall(
-            r"^param (\w*(?:Secret|Password|Key|Certificate)\w*) = '([^']*)'", body, flags=re.M
-        ):
-            assert name.endswith("Uri") or name.endswith("Id") or not value, (
+        for name, value in re.findall(r"^param (fabricServicePrincipal\w*(?:Uri)) = '([^']*)'", body, flags=re.M):
+            checked += 1
+            assert not value or KEY_VAULT_SECRET_URI.fullmatch(value), (
                 f"{path.name}: {name} must be a Key Vault reference"
             )
-            if value:
-                assert re.fullmatch(r"https://[\w-]+\.vault\.azure\.net/secrets/[\w-]+", value) or value.startswith(
-                    "/subscriptions/"
-                )
+        for name, _ in re.findall(r"^param (\w*(?:Secret|Password|Key)\w*) = '([^']*)'", body, flags=re.M):
+            assert name.endswith("Uri"), f"{path.name}: {name} looks like a credential; use a Key Vault reference"
+    assert checked >= 1
+
+
+def test_main_bicep_checks_service_principal_inputs_and_scopes_the_key_vault_role() -> None:
+    main = text("infra/bicep/main.bicep")
+    assert "module servicePrincipalInputCheck 'modules/input-check.bicep'" in main
+    assert "servicePrincipalInputCheck" in main.split("dependsOn: [")[-1]  # the Container App waits for the check
+    role = text("infra/bicep/modules/keyvault-role.bicep")
+    assert "param secretNames array" in role and "scope: secrets[index]" in role  # per secret, never the vault
+    assert "scope: vault" not in role

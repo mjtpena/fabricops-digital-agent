@@ -36,7 +36,7 @@ class RecordedTransport:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         method, path = request.method, request.url.path
-        if method != "GET" and not any(path.endswith(suffix) for suffix in self._allowed_posts):
+        if method != "GET" and not (method == "POST" and any(path.endswith(s) for s in self._allowed_posts)):
             self.rejected.append(f"{method} {path}")
             return httpx.Response(
                 405, json={"errorCode": "MethodNotAllowed", "message": "recorded transport is read-only"}

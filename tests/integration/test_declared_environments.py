@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -39,9 +40,9 @@ ITEMS = {
 }
 
 
-def estate_router() -> Router:
+def estate_router(capacities: list[dict[str, Any]] | None = None) -> Router:
     router = Router()
-    router.add("GET", f"{FABRIC_PATH}/capacities", respond(body={"value": []}))
+    router.add("GET", f"{FABRIC_PATH}/capacities", respond(body={"value": capacities or []}))
     router.add("GET", f"{FABRIC_PATH}/workspaces", respond(body={"value": WORKSPACES}))
     for workspace_id, items in ITEMS.items():
         base = f"{FABRIC_PATH}/workspaces/{workspace_id}"
@@ -66,14 +67,14 @@ def estate_router() -> Router:
     return router
 
 
-def client_for(contracts: EstateContracts) -> RestFabricClient:
+def client_for(contracts: EstateContracts, *, router: Router | None = None) -> RestFabricClient:
     return RestFabricClient(
         fabric_base_url=FABRIC,
         powerbi_base_url=POWERBI,
         token_provider=FakeTokenProvider(),
         contracts=contracts,
         tenant_id="tenant-test",
-        transport=httpx.MockTransport(estate_router()),
+        transport=httpx.MockTransport(router or estate_router()),
         clock=FixedClock(NOW),
     )
 

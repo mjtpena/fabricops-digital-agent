@@ -6,9 +6,9 @@ without a catalog and raises on errors. Messages name ids and JSON pointers, nev
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from orqentis.contracts.catalog import CatalogSnapshot
-from orqentis.contracts.diagnostics import parse_json, pydantic_violations, read_text, violation
+from orqentis.contracts.diagnostics import parse_json, pydantic_violations, read_document, violation
 from orqentis.contracts.errors import ContractViolation, Severity
 from orqentis.contracts.locator import Locations
 from orqentis.contracts.model import CONTRACT_SECTIONS, ESTATE_ONLY_KEYS, EstateContracts
@@ -24,7 +24,7 @@ from orqentis.domain.common import Environment
 from orqentis.domain.estate import DataProduct, ExternalSource
 from orqentis.domain.sla import SLA
 from orqentis.domain.topology import Dependency
-from orqentis.topology.environment import name_matches
+from orqentis.topology.environment import EnvironmentResolver, infer_environment, is_downgrade, name_matches
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,7 @@ class ValidationReport:
     violations: tuple[ContractViolation, ...]
     contracts: EstateContracts | None  # None when the file is not valid JSON or does not match the schema
     catalog_checked: bool = False
+    source_sha256: str | None = None  # of the file's bytes, when read from a file
 
     @property
     def errors(self) -> tuple[ContractViolation, ...]:
@@ -131,6 +132,7 @@ class _Checker:
                     ("workspace_id", declaration.workspace_id),
                     ("workspace_name_pattern", declaration.workspace_name_pattern),
                     ("item_id", declaration.item_id),
+                    ("capacity_id", declaration.capacity_id),
                 )
                 if v is not None
             )
@@ -140,12 +142,25 @@ class _Checker:
             else:
                 seen[(kind, value)] = index
             if declaration.environment is Environment.UNKNOWN:
-                self.add(f"{pointer}/environment", "environment is UNKNOWN: declare DEV, TEST or PROD", "warning")
+                self.add(
+                    f"{pointer}/environment",
+                    "environment is UNKNOWN, so this entry is NOT enforced (the name decides): "
+                    "declare DEV, TEST or PROD",
+                    "warning",
+                )
             if declaration.inferred:
                 self.add(
                     pointer,
-                    "drafted from naming conventions and not yet reviewed: confirm the environment, "
+                    "drafted from naming conventions and NOT enforced until reviewed: confirm the environment, "
                     'then remove "inferred" (or set it to false)',
+                    "warning",
+                )
+            pattern = declaration.workspace_name_pattern
+            if pattern is not None and declaration.enforced and not any(ch not in "*?" for ch in pattern):
+                self.add(
+                    f"{pointer}/workspace_name_pattern",
+                    "a catch-all pattern: it overrides name inference for EVERY workspace in the tenant. "
+                    "Declare the workspaces or a narrower pattern instead",
                     "warning",
                 )
             if self.catalog is None:
@@ -154,13 +169,49 @@ class _Checker:
                 self.add(f"{pointer}/workspace_id", f"workspace '{declaration.workspace_id}' is not in the catalog")
             if declaration.item_id is not None and declaration.item_id not in self.catalog.items:
                 self.add(f"{pointer}/item_id", f"item '{declaration.item_id}' is not in the catalog")
-            pattern = declaration.workspace_name_pattern
             if pattern is not None and not any(
                 name_matches(pattern, w.display_name) for w in self.catalog.workspaces.values()
             ):
                 self.add(
                     f"{pointer}/workspace_name_pattern", "the pattern matches no workspace in the catalog", "warning"
                 )
+        self._downgrades()
+
+    def _downgrades(self) -> None:
+        """Warn about every enforced declaration that lowers an environment the names say is PROD.
+
+        A PROD workspace declared TEST or DEV gets a lower incident severity and escapes production-only policy
+        rules (``POL-002``, ``POL-020``), so it is flagged for the reviewer (and fails ``--strict``).
+        """
+        if self.catalog is None:
+            return
+        resolver = EnvironmentResolver(self.contracts.environments)
+        accepted = {i for i, d in enumerate(self.contracts.environments) if d.accepts_downgrade}
+        lowered: dict[int, list[str]] = defaultdict(list)
+        for workspace in self.catalog.workspaces.values():
+            resolved = resolver.resolve_workspace(workspace.id, workspace.display_name)
+            if resolved.declaration_index is not None and is_downgrade(
+                infer_environment(workspace.display_name), resolved.environment
+            ):
+                lowered[resolved.declaration_index].append(workspace.id)
+        for item in self.catalog.items.values():
+            owner = self.catalog.workspaces.get(item.workspace_id)
+            workspace_environment = resolver.workspace(owner.id, owner.display_name) if owner else Environment.UNKNOWN
+            resolved_item = resolver.resolve_item(item.id, workspace_environment)
+            if resolved_item.declaration_index is not None and is_downgrade(
+                workspace_environment, resolved_item.environment
+            ):
+                lowered[resolved_item.declaration_index].append(item.id)
+        for index, ids in sorted(lowered.items()):
+            if index in accepted:
+                continue
+            shown = ", ".join(f"'{i}'" for i in sorted(ids)[:3]) + (", ..." if len(ids) > 3 else "")
+            self.add(
+                f"/environments/{index}",
+                f"lowers {len(ids)} PROD workspace(s) or item(s) ({shown}): their incidents become less severe and "
+                "production-only policy rules (POL-002, POL-020) stop applying to them. Confirm this is intended",
+                "warning",
+            )
 
     def _dependencies(self, declared: set[str], fabric_items: set[str]) -> int:
         unchecked: set[str] = set()
@@ -222,16 +273,27 @@ class _Checker:
         unchecked: set[str] = set()
         c = self.contracts
         if self.catalog is not None:
+            resolver = EnvironmentResolver(c.environments)
             located: tuple[tuple[str, Sequence[ExternalSource | DataProduct]], ...] = (
                 ("external_sources", c.external_sources),
                 ("data_products", c.data_products),
             )
             for section, records in located:
                 for index, record in enumerate(records):
-                    if record.workspace_id not in self.catalog.workspaces:
+                    workspace = self.catalog.workspaces.get(record.workspace_id)
+                    if workspace is None:
                         self.add(
                             f"/{section}/{index}/workspace_id",
                             f"workspace '{record.workspace_id}' is not in the catalog",
+                        )
+                        continue
+                    resolved = resolver.workspace(workspace.id, workspace.display_name)
+                    if Environment.UNKNOWN not in (record.environment, resolved) and record.environment != resolved:
+                        self.add(
+                            f"/{section}/{index}/environment",
+                            f"'{record.id}' is {record.environment.value} but its workspace resolves to "
+                            f"{resolved.value}",
+                            "warning",
                         )
         for index, product in enumerate(c.data_products):
             for position, item_id in enumerate(product.backing_item_ids):
@@ -323,4 +385,8 @@ def validate_file(
     path: Path, *, catalog: CatalogSnapshot | None = None, tenant_id: str | None = None
 ) -> ValidationReport:
     """Read and validate ``path``. Raises :class:`ContractsFileNotFoundError` if it cannot be read."""
-    return validate_text(read_text(path), path, catalog=catalog, tenant_id=tenant_id)
+    text, digest = read_document(path)
+    report = validate_text(text, path, catalog=catalog, tenant_id=tenant_id)
+    if report.contracts is not None:
+        report.contracts.with_source_sha256(digest)
+    return replace(report, source_sha256=digest)

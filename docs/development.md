@@ -136,7 +136,7 @@ The contracts file is reviewed like code. Tools draft and check it; a person dec
 
    | Section | What is drafted | How to treat it |
    |---|---|---|
-   | `environments` | One entry per workspace, from its name (`Sales [PROD]` is PROD), each marked `"inferred": true`. A name with no environment becomes `UNKNOWN` | Confirm each one, fix wrong ones, then delete `"inferred"` |
+   | `environments` | One entry per workspace, from its name (`Sales [PROD]` is PROD), each marked `"inferred": true`. A name with no environment becomes `UNKNOWN` | **Not enforced** while `inferred` or `UNKNOWN` (the name still decides). Confirm each one, fix wrong ones, then delete `"inferred"` |
    | `dependencies` | `TRIGGERS` edges (notebook or pipeline) and `REFRESHES` edges (semantic model) observed in the `input` of recent pipeline activity runs (`--max-runs`, default 5 per pipeline) | Real observations, but only of what ran recently; add the rest |
    | `external_sources`, `data_products`, `slas` | **Placeholders** marked `"metadata": {"draft": true}`: `TODO` owners, one data product per workspace holding a lakehouse or warehouse, a 06:00 deadline | Fill in or delete, then remove `draft` |
 
@@ -154,22 +154,37 @@ The contracts file is reviewed like code. Tools draft and check it; a person dec
 
 2. **Review and edit** the draft in a pull request. Add `"$schema": "../schemas/contracts.schema.json"` (the
    path relative to your file) and an editor with JSON Schema support completes and checks the file as you type.
-   Environments can be declared by workspace id, by name pattern or for one item:
+   Environments can be declared by workspace id, by name pattern, for one item or for one capacity:
 
    ```json
    "environments": [
      {"workspace_id": "6f1c…", "environment": "PROD"},
      {"workspace_name_pattern": "Finance *", "environment": "PROD"},
-     {"item_id": "9ab2…", "environment": "DEV", "note": "experimental notebook inside a PROD workspace"}
+     {"item_id": "9ab2…", "environment": "DEV", "accepts_downgrade": true,
+      "note": "experimental notebook inside a PROD workspace"},
+     {"capacity_id": "c07e…", "environment": "PROD"}
    ]
    ```
 
-   A declaration always beats the name. Precedence for a workspace is its id, then the first matching pattern
+   A reviewed declaration beats the name. Precedence for a workspace is its id, then the first matching pattern
    in file order, then inference from the name; an item takes its workspace's environment unless an `item_id`
-   entry says otherwise. Patterns are case-insensitive; `*` matches any run of characters, `?` one character,
-   everything else (including `[` and `]`) is literal. The environment drives incident severity (PROD is HIGH)
-   and policy rules such as `POL-002`, so declaring a PROD workspace as DEV makes its incidents less severe
-   and its production-only policy rules stop applying. Review those changes closely.
+   entry says otherwise; a capacity is declared by `capacity_id` and otherwise inferred from its name. The
+   same classification reaches workspaces, items, pipeline runs, capacities and the deployment-pipeline stage
+   of a declared workspace. Patterns are case-insensitive; `*` matches any run of characters, `?` one
+   character, everything else (including `[` and `]`) is literal.
+
+   **Only reviewed entries are enforced.** An entry with `"inferred": true` (a scaffold draft) or with
+   environment `UNKNOWN` is *not* applied: the name keeps deciding, so a stale or unfinished draft can never
+   pin a workspace that was later renamed. Remove `inferred` once you have confirmed the entry.
+
+   **Lowering production is deliberate and visible.** The environment drives incident severity (PROD is HIGH)
+   and policy rules such as `POL-002`, so declaring a workspace the name calls PROD as TEST or DEV lowers its
+   incidents' severity and switches its production-only policy rules off. That is allowed (names do lie) but never
+   silent: at startup every override that changes a classification is logged (WARNING for a downgrade) and written
+   to the audit trail (`contracts.environment_override`: id, inferred and resolved environment, source, and the
+   SHA-256 of the contracts file; plus one `contracts.loaded` record), and `contracts validate` warns about each
+   downgrade and about catch-all patterns such as `*`. `"accepts_downgrade": true` records that a reviewer
+   confirmed one entry and silences that warning only; the log and audit records remain.
 
 3. **Validate**:
 
@@ -186,9 +201,10 @@ The contracts file is reviewed like code. Tools draft and check it; a person dec
    Errors (non-zero exit): invalid JSON, a field that does not match the schema, duplicate ids or edges, an
    id used by both a source and a data product, an edge from an item to itself, an SLA for an undeclared data
    product or with an invalid time zone or weekdays, and, against a catalog, any reference to a workspace or
-   item that does not exist. Warnings: unreviewed `inferred` environments and `draft` placeholders, a
-   declared `UNKNOWN`, a name pattern matching no workspace, and references that could not be checked
-   because no catalog was given. Schema errors are reported first; the consistency checks run once the
+   item that does not exist. Warnings: unreviewed (`inferred`) and `UNKNOWN` environment entries (neither is
+   enforced), `draft` placeholders, entries that lower a PROD workspace or item (unless `accepts_downgrade`), catch-all
+   name patterns, a name pattern matching no workspace, a data product or source whose environment disagrees
+   with its workspace's, and references that could not be checked because no catalog was given. Schema errors are reported first; the consistency checks run once the
    schema passes. A full estate file (`fixtures/fabric/estate.json`) is its own catalog.
    `--strict` turns warnings into failures, which is what a CI check on the reviewed file should use.
    Refresh the catalog with `scaffold --catalog-output` whenever the estate changes.

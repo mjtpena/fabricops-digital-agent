@@ -179,11 +179,11 @@ def test_unknown_field_missing_field_and_wrong_type_point_at_the_value() -> None
 def test_environment_selector_errors() -> None:
     both = check({"environments": [{"workspace_id": "a", "item_id": "b", "environment": "PROD"}]})
     assert errors_at(both, "/environments/0") == [
-        "declare exactly one of workspace_id, workspace_name_pattern or item_id"
+        "declare exactly one of workspace_id, workspace_name_pattern, item_id or capacity_id"
     ]
     neither = check({"environments": [{"environment": "PROD"}]})
     assert errors_at(neither, "/environments/0") == [
-        "declare exactly one of workspace_id, workspace_name_pattern or item_id"
+        "declare exactly one of workspace_id, workspace_name_pattern, item_id or capacity_id"
     ]
     bad_env = check({"environments": [{"workspace_id": "a", "environment": "STAGING"}]})
     assert errors_at(bad_env, "/environments/0/environment")

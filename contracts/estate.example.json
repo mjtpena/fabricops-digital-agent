@@ -18,7 +18,8 @@
     {
       "item_id": "00000000-0000-0000-0000-0000000000b6",
       "environment": "DEV",
-      "note": "Experimental notebook that lives in a PROD workspace"
+      "note": "Experimental notebook that lives in a PROD workspace; the downgrade is intended",
+      "accepts_downgrade": true
     }
   ],
   "external_sources": [

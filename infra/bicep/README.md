@@ -14,7 +14,8 @@
 | Container App auth config | `current` | Built-in authentication (Easy Auth) with Microsoft Entra ID, `Return401` |
 | Role assignment (optional) | n/a | `AcrPull` for the reader identity on an ACR in the same RG (`containerRegistryName`) |
 | Role assignment (optional) | `modules/openai-role.bicep` | `Cognitive Services OpenAI User` for the reader identity on `azureOpenAiResourceId` (any RG/subscription) |
-| Role assignment (optional) | `modules/keyvault-role.bicep` | `Key Vault Secrets User` for the reader identity on `keyVaultResourceId` (any RG/subscription), to read the Fabric service principal credential |
+| Role assignment (optional) | `modules/keyvault-role.bicep` | `Key Vault Secrets User` for the reader identity on **each referenced secret only** (not the vault), in the vault of `keyVaultResourceId` (any RG/subscription) |
+| Deployment check | `modules/input-check.bicep` | Fails the deployment with a readable reason when the `service_principal` inputs cannot work (see *Cross-tenant Fabric access*) |
 | Container App secrets (optional) | `fabric-sp-client-secret` / `fabric-sp-certificate` | Key Vault references (`keyVaultUrl` + the reader identity), only in `service_principal` mode |
 
 The app runs with these settings (see `src/orqentis/config/settings.py`):
@@ -22,7 +23,7 @@ The app runs with these settings (see `src/orqentis/config/settings.py`):
 | Variable | Value |
 |---|---|
 | `ORQENTIS_DEPLOYMENT_ENVIRONMENT` | `deploymentEnvironment` (default `prod`) |
-| `ORQENTIS_TENANT_ID` | `fabricTenantId` (default: the deployment tenant; required in rest mode) |
+| `ORQENTIS_TENANT_ID` | `fabricTenantId` (empty, the default: the deployment tenant; **required** in `service_principal` mode) |
 | `ORQENTIS_API_AUTH_MODE` | `easy_auth` (required outside `local`) |
 | `ORQENTIS_AUTH_MODE` | `fabricAuthMode` (default `managed_identity`; `service_principal` for a Fabric tenant in another Entra tenant) |
 | `ORQENTIS_MANAGED_IDENTITY_CLIENT_ID` | reader identity client id |
@@ -187,11 +188,13 @@ Use this when the Fabric tenant is a **different Entra tenant** from the one tha
    | Parameter | Value |
    |---|---|
    | `fabricAuthMode` | `service_principal` |
-   | `fabricTenantId` | The **Fabric** tenant id (`ORQENTIS_TENANT_ID` and `AZURE_TENANT_ID`) |
+   | `fabricTenantId` | The **Fabric** tenant id (a GUID; `ORQENTIS_TENANT_ID` and `AZURE_TENANT_ID`). Required |
    | `fabricServicePrincipalClientId` | The app registration's application (client) id. Not a secret |
    | `fabricServicePrincipalSecretUri` **or** `fabricServicePrincipalCertificateUri` | `https://<vault>.vault.azure.net/secrets/<name>` (no version, so a new version is picked up). Set exactly one |
-   | `keyVaultResourceId` | Optional. Full resource id of the vault; the template then grants the reader identity `Key Vault Secrets User`. Leave empty and grant it yourself if the vault uses another model |
+   | `keyVaultResourceId` | Optional. Full resource id of the vault; the template then grants the reader identity `Key Vault Secrets User` **on the referenced secret(s) only**, so a compromised reader identity cannot read anything else in the vault. Leave empty and grant it yourself if the vault uses another model |
    | `entraClientId`, `entraTenantId` | Unchanged: they protect the **FabricOps API** in the Azure tenant, whoever your approvers are |
+
+   The template checks these inputs when the deployment runs and fails with the reason instead of deploying a container that crash-loops: no client id, no explicit `fabricTenantId` (a GUID), not exactly one of the two URIs, a URI that is not a Key Vault secret (`https://<vault>.<dns-suffix>/secrets/<name>`), or a URI in a different vault from `keyVaultResourceId`. The Key Vault role is assigned on those secrets only.
 
    Container Apps resolves the Key Vault reference when a revision starts, so a Key Vault role assignment made in the same deployment can take a few minutes to take effect. If the first deployment fails with a Key Vault access error, wait and re-run it.
 5. **What the app receives.** `ORQENTIS_AUTH_MODE=service_principal`, `ORQENTIS_TENANT_ID` and `AZURE_TENANT_ID` (Fabric tenant), `AZURE_CLIENT_ID` (service principal), and either `AZURE_CLIENT_SECRET` (a secret reference) or `AZURE_CLIENT_CERTIFICATE_PATH` (a read-only file mounted from the secret at `/mnt/fabric-sp/service-principal.pem`; the private key is never written to the Azure Files share). **Azure OpenAI keeps using the reader managed identity** (`ORQENTIS_LLM_AUTH_MODE=managed_identity`), because the model lives in the Azure tenant, not the Fabric one. If the credential is missing, or both a secret and a certificate are set, the app refuses to start and names the missing variables (never their values).

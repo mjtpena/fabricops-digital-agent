@@ -80,7 +80,7 @@ def _digest(*parts: str, length: int = 8) -> str:
 
 def _reason(exc: FabricError) -> str:
     """Why a read failed, without the service's free text (which is untrusted)."""
-    return exc.error_code or (f"HTTP {exc.status_code}" if exc.status_code else type(exc).__name__)
+    return _clean(exc.error_code or (f"HTTP {exc.status_code}" if exc.status_code else type(exc).__name__), 60)
 
 
 def _edge_type(target: FabricItem) -> DependencyType | None:
@@ -121,7 +121,10 @@ async def scaffold_contracts(
         try:
             listed = sorted(await fabric.items.list_items(workspace.id), key=lambda i: (i.display_name, i.id))
         except FabricError as exc:
-            notes.append(f"workspace {workspace.id}: items not listed ({_reason(exc)}); grant the reader Viewer access")
+            notes.append(
+                f"workspace {_clean(workspace.id, 80)}: items not listed ({_reason(exc)}); "
+                "grant the reader Viewer access"
+            )
             listed = []
         items_by_workspace[workspace.id] = listed
         items.extend(listed)
@@ -146,12 +149,13 @@ async def scaffold_contracts(
                             seen[activity.target_item_id].add(_clean(activity.activity_name, 60))
                             runs_seen[activity.target_item_id].add(run.id)
             except FabricError as exc:
-                notes.append(f"pipeline {pipeline.id}: run history not read ({_reason(exc)})")
+                notes.append(f"pipeline {_clean(pipeline.id, 80)}: run history not read ({_reason(exc)})")
             for target_id, names in sorted(seen.items()):
                 target = catalog.items.get(target_id)
                 if target is None:
                     notes.append(
-                        f"pipeline {pipeline.id}: activity target {target_id} is not in the scanned workspaces"
+                        f"pipeline {_clean(pipeline.id, 80)}: activity target {_clean(target_id, 80)} "
+                        "is not in the scanned workspaces"
                     )
                     continue
                 kind = _edge_type(target)
@@ -194,8 +198,8 @@ async def scaffold_contracts(
     unknown = [w.id for w in workspaces if inferred[w.id] is Environment.UNKNOWN]
     if unknown:
         notes.append(
-            f"{len(unknown)} workspace(s) have no environment in their name; their entries say UNKNOWN: "
-            "declare DEV, TEST or PROD"
+            f"{len(unknown)} workspace(s) have no environment in their name; their entries say UNKNOWN and are not "
+            "enforced until you declare DEV, TEST or PROD"
         )
 
     if not external_sources:

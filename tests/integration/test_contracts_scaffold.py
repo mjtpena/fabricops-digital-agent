@@ -22,7 +22,7 @@ from orqentis.contracts.catalog import CatalogSnapshot
 from orqentis.contracts.scaffold import ScaffoldOptions, ScaffoldResult, scaffold_contracts
 from orqentis.contracts.validate import validate_text
 from orqentis.domain.common import Environment
-from orqentis.fabric.errors import FabricError
+from orqentis.fabric.errors import FabricError, ServicePrincipalConfigError
 from orqentis.fabric.rest.auth import POWERBI_SCOPE, InteractiveTokenProvider
 from orqentis.fabric.rest.client import RestFabricClient
 from orqentis.fabric.rest.http import FabricHttp
@@ -160,6 +160,20 @@ async def test_the_recorded_transport_really_refuses_writes() -> None:
         await client.post(f"{POWERBI}/admin/workspaces/getInfo")
     ).status_code == 405  # scanner POST needs scanner mode
     assert len(transport.rejected) == 5
+    await client.aclose()
+
+
+async def test_the_recorded_transport_lets_only_post_through_to_the_read_only_endpoints() -> None:
+    transport = RecordedTransport(allow_scanner=True)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+    queries = f"{FABRIC}/workspaces/ws-sales/datapipelines/pipelineruns/run-s-2/queryactivityruns"
+    get_info = f"{POWERBI}/admin/workspaces/getInfo"
+    for url in (queries, get_info):
+        for method in ("PUT", "PATCH", "DELETE"):
+            assert (await client.request(method, url)).status_code == 405, (method, url)
+    assert len(transport.rejected) == 6
+    assert (await client.post(queries, json={})).status_code == 200  # the read-only query
+    assert (await client.post(get_info, json={})).status_code == 202  # the Scanner's metadata scan (scanner mode)
     await client.aclose()
 
 
@@ -339,17 +353,116 @@ def test_cli_scanner_mode_is_interactive_only(
     assert all(leaked not in json.dumps(draft) for leaked in LEAKED)
 
 
+# ---------------------------------------------------------------------------- hostile and failing input
+class HostileIds(RecordedTransport):
+    """A tenant whose pipeline activity points at an id that carries terminal escape sequences."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        response = super().__call__(request)
+        if request.url.path.endswith("/run-f-1/queryactivityruns"):
+            text = response.text.replace("nb-ghost", "nb-\\u001b[31mRED\\u001b]0;pwned\\u0007")  # JSON escapes
+            return httpx.Response(200, content=text.encode(), headers={"content-type": "application/json"})
+        return response
+
+
+async def test_ids_returned_by_fabric_are_sanitised_before_they_are_printed() -> None:
+    transport = HostileIds()
+    fabric = read_client(transport)
+    try:
+        result = await scaffold_contracts(fabric, OPTIONS)
+    finally:
+        await fabric.aclose()
+    note = next(n for n in result.notes if "is not in the scanned workspaces" in n)
+    assert "\x1b" not in note and "\x07" not in note and "nb-" in note
+
+
+def test_cli_output_never_carries_terminal_escapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    transport = HostileIds()
+
+    async def build_discovery_client(settings: Settings) -> RestFabricClient:
+        return read_client(transport)
+
+    monkeypatch.setattr(bootstrap, "build_discovery_client", build_discovery_client)
+    args = ["contracts", "scaffold", "--tenant-id", TENANT, "--output", str(tmp_path / "draft.json")]
+    assert main(args) == 0
+    assert "\x1b" not in capsys.readouterr().out
+
+
+def test_cli_closes_the_discovery_client_when_the_scanner_cannot_be_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from orqentis.contracts import commands
+
+    closed: list[bool] = []
+    client = read_client(RecordedTransport())
+    real_close = client.aclose
+
+    async def tracking_close() -> None:
+        closed.append(True)
+        await real_close()
+
+    async def build_discovery_client(settings: Settings) -> RestFabricClient:
+        return client
+
+    async def build_lineage_scanner(settings: Settings, *, client_id: str | None = None) -> PowerBiScanner:
+        raise ServicePrincipalConfigError("service_principal is not configured: AZURE_CLIENT_ID is not set")
+
+    monkeypatch.setattr(client, "aclose", tracking_close)
+    monkeypatch.setattr(bootstrap, "build_discovery_client", build_discovery_client)
+    monkeypatch.setattr(bootstrap, "build_lineage_scanner", build_lineage_scanner)
+    monkeypatch.setattr(commands, "_interactive", lambda: True)
+    args = ["contracts", "scaffold", "--tenant-id", TENANT, "--output", str(tmp_path / "d.json"), "--scanner"]
+    assert main(args) == 2
+    out = capsys.readouterr().out
+    assert closed == [True]  # the client opened first is closed although the second could not be built
+    assert "Cannot sign in to Fabric" in out and "AZURE_CLIENT_ID is not set" in out and "Traceback" not in out
+    assert not (tmp_path / "d.json").exists()
+
+
+def test_cli_explains_a_missing_service_principal_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def build_discovery_client(settings: Settings) -> RestFabricClient:
+        raise ServicePrincipalConfigError("service_principal is not configured: AZURE_TENANT_ID is not set")
+
+    monkeypatch.setattr(bootstrap, "build_discovery_client", build_discovery_client)
+    assert main(["contracts", "scaffold", "--tenant-id", TENANT, "--output", str(tmp_path / "d.json")]) == 2
+    out = capsys.readouterr().out
+    assert "Cannot sign in to Fabric" in out and "AZURE_TENANT_ID is not set" in out and "Traceback" not in out
+
+
 # ---------------------------------------------------- the scanner never reaches the application runtime
+def run_python(code: str) -> subprocess.CompletedProcess[str]:
+    """Run ``code`` in a clean interpreter (no user site, no inherited path) from the repository root."""
+    command = [sys.executable, "-I", "-c", code]
+    return subprocess.run(command, capture_output=True, encoding="utf-8", errors="replace", cwd=REPO, check=False)  # noqa: S603
+
+
 def test_the_application_never_imports_the_scanner() -> None:
     code = (
         "import sys\n"
-        "import orqentis.api.app, orqentis.bootstrap\n"
+        "import orqentis.api.app, orqentis.bootstrap, orqentis.cli\n"
+        'assert orqentis.cli.main(["scenarios"]) == 0\n'
         "tools = ('orqentis.fabric.rest.scanner', 'orqentis.contracts.scaffold', 'orqentis.contracts.commands')\n"
         "bad = [m for m in tools if m in sys.modules]\n"
         "assert not bad, bad\n"
     )
-    command = [sys.executable, "-I", "-c", code]
-    done = subprocess.run(command, capture_output=True, text=True, cwd=REPO, check=False)  # noqa: S603
+    done = run_python(code)
+    assert done.returncode == 0, done.stderr
+
+
+def test_contracts_commands_load_only_when_a_contracts_command_runs() -> None:
+    code = (
+        "import sys\n"
+        "import orqentis.cli\n"
+        "tools = ('orqentis.contracts.commands', 'orqentis.contracts.scaffold', 'orqentis.fabric.rest.scanner')\n"
+        "assert not [m for m in tools if m in sys.modules], 'loaded by importing the CLI'\n"
+        "assert orqentis.cli.main(['contracts', 'schema', '--check', 'schemas/contracts.schema.json']) == 0\n"
+        "assert 'orqentis.contracts.commands' in sys.modules\n"
+    )
+    done = run_python(code)
     assert done.returncode == 0, done.stderr
 
 

@@ -45,8 +45,9 @@ grants and for checking them with `POST /telemetry/collect` (`collector_errors` 
     there). In Azure the secret or the PEM certificate is a **Key Vault reference** that Container Apps
     resolves with the reader managed identity (`infra/bicep`, ADR-0014): it is never a Bicep parameter,
     output or CI variable, and a certificate's private key is mounted as a read-only secret file, not on
-    the data share. The app refuses to start, naming the missing variable names (never values), if the
-    inputs are incomplete or ambiguous. The LLM credential stays a managed identity
+    the data share. The reader identity's Key Vault role is assigned on the referenced secret(s) only. The
+    deployment fails with a readable reason when the inputs are incomplete or ambiguous, and the app refuses to
+    start, naming the missing variable names (never values), if they still are. The LLM credential stays a managed identity
     (`ORQENTIS_LLM_AUTH_MODE=managed_identity`), so the foreign-tenant service principal never signs
     Azure OpenAI calls. Grant that service principal workspace **Viewer** only, like the reader identity.
 * Fabric scope `https://api.fabric.microsoft.com/.default`; Power BI scope
@@ -75,9 +76,13 @@ grants and for checking them with `POST /telemetry/collect` (`collector_errors` 
   sanitises what it reads from Fabric (names, data source descriptions) and drops credentials, user info
   and query strings from data source URLs.
 * **A declared environment is a trust decision.** Declaring a PROD workspace as DEV lowers incident
-  severity and stops production-only policy rules (`POL-002`, `POL-020`) from matching it. Review changes to
-  `environments` like code, and use `orqentis contracts validate --strict` in CI. The code-level invariant is
-  unaffected: no mutation is ever auto-allowed in any environment.
+  severity and stops production-only policy rules (`POL-002`, `POL-020`) from matching it. Therefore: only
+  *reviewed* entries are enforced (a scaffold draft marked `inferred`, or an `UNKNOWN` entry, never overrides the
+  name); every override that changes a classification is logged and written to the hash-chained audit trail
+  with the SHA-256 of the contracts file (`contracts.environment_override`, `contracts.loaded`); and
+  `orqentis contracts validate --strict` flags downgrades and catch-all patterns for CI. Review changes to
+  `environments` like code. The code-level invariant is unaffected: no mutation is ever auto-allowed in any
+  environment.
 
 ## 4. Redaction
 

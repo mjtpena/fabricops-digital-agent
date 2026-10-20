@@ -118,8 +118,8 @@ param entraClientId string
 @description('Microsoft Entra tenant id that issues tokens for the API. Defaults to the deployment tenant.')
 param entraTenantId string = tenant().tenantId
 
-@description('ORQENTIS_TENANT_ID: tenant id of the monitored Fabric estate (required in rest mode; stamped on every record). Defaults to the deployment tenant. Set it to the Fabric tenant when that is a different Entra tenant (see fabricAuthMode).')
-param fabricTenantId string = tenant().tenantId
+@description('ORQENTIS_TENANT_ID: tenant id of the monitored Fabric estate (stamped on every record). Empty (default): the deployment tenant. REQUIRED in service_principal mode: set it to the Fabric tenant, which is a different Entra tenant (see fabricAuthMode); the deployment fails otherwise.')
+param fabricTenantId string = ''
 
 @description('ORQENTIS_DEFAULT_TIMEZONE: IANA time zone used for time-of-day reasoning and report times (for example Europe/London). Validated when the app starts; the default keeps the previous behaviour.')
 @minLength(1)
@@ -218,6 +218,7 @@ var appInsightsSecretName = 'appinsights-connection-string'
 // Service-principal mode for a Fabric tenant other than this deployment's: the credential is a Key Vault
 // reference that Container Apps resolves with the reader identity. Nothing secret is a parameter or an output.
 var servicePrincipalMode = fabricAuthMode == 'service_principal'
+var fabricTenantIdEffective = empty(fabricTenantId) ? tenant().tenantId : fabricTenantId
 var useClientSecret = servicePrincipalMode && !empty(fabricServicePrincipalSecretUri)
 var useClientCertificate = servicePrincipalMode && !empty(fabricServicePrincipalCertificateUri)
 var fabricSpSecretName = 'fabric-sp-client-secret'
@@ -232,6 +233,32 @@ var keyVaultIdSegments = split(
     : keyVaultResourceId,
   '/'
 )
+
+// The secrets (by name) the reader identity must read; the Key Vault role is assigned on these, not on the vault.
+// Names are the segment after /secrets/ in https://<vault>.vault.azure.net/secrets/<name>[/<version>].
+var keyVaultSecretNames = concat(
+  useClientSecret ? [split(fabricServicePrincipalSecretUri, '/')[4]] : [],
+  useClientCertificate ? [split(fabricServicePrincipalCertificateUri, '/')[4]] : []
+)
+
+// service_principal inputs checked when the deployment runs (see modules/input-check.bicep): 'ok', or what is wrong.
+// Nested conditionals are evaluated lazily, so a parse of a URI only happens after the URI is known to be set.
+var credentialUri = empty(fabricServicePrincipalSecretUri)
+  ? fabricServicePrincipalCertificateUri
+  : fabricServicePrincipalSecretUri
+var servicePrincipalCheck = !servicePrincipalMode
+  ? 'ok'
+  : empty(fabricServicePrincipalClientId)
+      ? 'fabricAuthMode is service_principal, so fabricServicePrincipalClientId (the application id of the service principal in the Fabric tenant) must be set'
+      : length(fabricTenantId) != 36
+          ? 'fabricAuthMode is service_principal, so fabricTenantId must be set to the id (a GUID) of the Fabric tenant, not left empty'
+          : empty(fabricServicePrincipalSecretUri) == empty(fabricServicePrincipalCertificateUri)
+              ? 'fabricAuthMode is service_principal, so set exactly one of fabricServicePrincipalSecretUri and fabricServicePrincipalCertificateUri'
+              : !startsWith(credentialUri, 'https://') || !contains(credentialUri, '/secrets/') || length(split(credentialUri, '/')) < 5
+                  ? 'the Key Vault credential URI must look like https://<vault-name>.<key-vault-dns-suffix>/secrets/<secret-name> (the secrets endpoint, not keys or certificates)'
+                  : !empty(keyVaultResourceId) && !startsWith(split(credentialUri, '/')[2], '${keyVaultIdSegments[8]}.')
+                      ? 'the Key Vault credential URI is not in the vault named by keyVaultResourceId'
+                      : 'ok'
 
 var keyVaultSecrets = concat(
   useClientSecret
@@ -257,7 +284,7 @@ var keyVaultSecrets = concat(
 var appEnv = concat(
   [
     { name: 'ORQENTIS_DEPLOYMENT_ENVIRONMENT', value: deploymentEnvironment }
-    { name: 'ORQENTIS_TENANT_ID', value: fabricTenantId }
+    { name: 'ORQENTIS_TENANT_ID', value: fabricTenantIdEffective }
     { name: 'ORQENTIS_API_AUTH_MODE', value: 'easy_auth' }
     { name: 'ORQENTIS_AUTH_MODE', value: fabricAuthMode }
     { name: 'ORQENTIS_MANAGED_IDENTITY_CLIENT_ID', value: readerIdentity.properties.clientId }
@@ -288,7 +315,7 @@ var appEnv = concat(
   // OpenAI lives in this tenant, not in the Fabric one).
   servicePrincipalMode
     ? [
-        { name: 'AZURE_TENANT_ID', value: fabricTenantId }
+        { name: 'AZURE_TENANT_ID', value: fabricTenantIdEffective }
         { name: 'ORQENTIS_LLM_AUTH_MODE', value: 'managed_identity' }
       ]
     : [],
@@ -385,11 +412,20 @@ module readerOpenAiUser 'modules/openai-role.bicep' = if (!empty(azureOpenAiReso
   }
 }
 
-module readerKeyVaultSecretsUser 'modules/keyvault-role.bicep' = if (!empty(keyVaultResourceId)) {
+// Fails the deployment with a readable reason when the service_principal inputs cannot work (always 'ok' otherwise).
+module servicePrincipalInputCheck 'modules/input-check.bicep' = {
+  name: 'orqentis-check-service-principal-inputs'
+  params: {
+    result: any(servicePrincipalCheck) // a literal-typed parameter on purpose: ARM, not the compiler, rejects it
+  }
+}
+
+module readerKeyVaultSecretsUser 'modules/keyvault-role.bicep' = if (!empty(keyVaultResourceId) && !empty(keyVaultSecretNames)) {
   name: 'orqentis-keyvault-role-${uniqueString(keyVaultResourceId, readerIdentityName)}'
   scope: resourceGroup(keyVaultIdSegments[2], keyVaultIdSegments[4])
   params: {
     vaultName: keyVaultIdSegments[8]
+    secretNames: keyVaultSecretNames
     principalId: readerIdentity.properties.principalId
   }
 }
@@ -630,6 +666,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   dependsOn: [
     readerAcrPull
     readerKeyVaultSecretsUser
+    servicePrincipalInputCheck
   ]
 }
 

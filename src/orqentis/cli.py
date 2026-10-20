@@ -19,7 +19,7 @@ from orqentis import __version__
 from orqentis.actions.gateway import ActionBlockedError
 from orqentis.bootstrap import Container, build_container, reset_local_state
 from orqentis.config.settings import FabricMode, Settings
-from orqentis.contracts import commands as contracts_commands
+from orqentis.contracts.parser import add_contracts_parser
 from orqentis.domain.principals import AGENT_PRINCIPAL, Principal, PrincipalKind
 from orqentis.fabric.fixtures import list_scenarios
 from orqentis.observability.logging import configure_logging
@@ -288,7 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("runbooks", help="Validate and list runbooks")
     audit = sub.add_parser("audit", help="Verify the audit trail hash chain")
     audit.add_argument("--data-dir", type=Path, default=None)
-    contracts_commands.add_parser(sub)
+    add_contracts_parser(sub)
     args = parser.parse_args(argv)
     _utf8_stdio()
     console = Console(highlight=False, width=None if sys.stdout.isatty() else 120)
@@ -312,6 +312,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = _settings(**({"data_dir": args.data_dir} if args.data_dir else {}))
         return asyncio.run(_cmd_audit(settings, console))
     if args.command == "contracts":
+        from orqentis.contracts import commands as contracts_commands  # lazy: `orqentis serve` never loads these
+
         return contracts_commands.run(args, console)
     parser.print_help()
     return 2

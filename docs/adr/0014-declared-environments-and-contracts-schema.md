@@ -25,7 +25,7 @@ tenant, from the docs, one parameter file and a contracts file. Five things stoo
 
 * **Environments are declared, then inferred.** The contracts file gets an optional
   `environments` section: entries select a workspace by `workspace_id`, workspaces by
-  `workspace_name_pattern`, or one item by `item_id`, and state its environment. Precedence for a
+  `workspace_name_pattern`, one item by `item_id` or one capacity by `capacity_id`, and state its environment. Precedence for a
   workspace is id, then the first matching pattern in file order, then name inference. Items take
   their workspace's resolved environment unless an `item_id` entry says otherwise. The resolver is
   `topology/environment.py` and the REST adapter calls it where it used to call `infer_environment`,
@@ -33,9 +33,20 @@ tenant, from the docs, one parameter file and a contracts file. Five things stoo
   further change. Patterns are `*`/`?` globs matched by a linear algorithm; `[PROD]` is literal,
   because that is how people name workspaces and a regex or `fnmatch` would read it as a character
   class. A workspace's metadata records `environment_source` when a declaration decided it.
-  Mock fixtures are unchanged (they carry explicit environments). Deployment-pipeline stage
-  environments keep their position-based rule (first stage DEV, last PROD), and capacity environments
-  remain name-inferred; neither is declarable yet.
+  Mock fixtures are unchanged (they carry explicit environments).
+  * **Only reviewed entries are enforced.** An entry marked `inferred: true` (a scaffold draft) or with
+    environment `UNKNOWN` is ignored and the name decides, recorded as `environment_source=draft_ignored`. A
+    stale draft can therefore never pin a workspace that was later renamed `Sales [PROD]` to DEV, and an
+    unfinished `UNKNOWN` entry cannot mask a production name (either would switch `POL-002` off).
+  * **One resolver classifies everything.** `item_id` declarations reach items and the pipeline runs of
+    those items; `capacity_id` declares a capacity; a deployment-pipeline stage takes the declared environment
+    of its workspace (by id, or by pattern on the stage's `workspaceName`) and otherwise keeps its name- and
+    position-based rule (first stage DEV, last PROD).
+  * **Downgrades are visible.** At startup every override that changes a classification is logged (WARNING
+    for a PROD downgrade) and written to the audit trail with the SHA-256 of the contracts file
+    (`contracts.environment_override`, plus one `contracts.loaded` summary). `contracts validate` warns about
+    each PROD downgrade (with a catalog) and about catch-all patterns such as `*`;
+    `accepts_downgrade: true` records that a reviewer confirmed one and silences that warning only.
 * **The contracts file has a committed JSON Schema** (`schemas/contracts.schema.json`) generated from
   the Pydantic model `EstateContracts` (`contracts/model.py`; `extra="forbid"` throughout). A test
   fails when the file drifts from the model, and another proves the schema and the model accept and
@@ -80,7 +91,10 @@ tenant, from the docs, one parameter file and a contracts file. Five things stoo
   of a Key Vault secret (the client secret) or of a Key Vault secret holding a PEM certificate. Container
   Apps resolves it with the reader managed identity and exposes it as `AZURE_CLIENT_SECRET` or as a read-only
   file for `AZURE_CLIENT_CERTIFICATE_PATH`. No secret value is a parameter, an output or a file in the
-  repository. An optional module grants the reader identity `Key Vault Secrets User` on the vault. The
+  repository. An optional module grants the reader identity `Key Vault Secrets User` on the referenced
+  secret(s) only, not on the vault. A small module makes the deployment fail with a readable reason when the
+  inputs cannot work (no client id, no explicit Fabric tenant, not exactly one of secret and certificate, a URI
+  that is not a Key Vault secret or not in the named vault). The
   Azure OpenAI call must not use the foreign-tenant service principal, so `ORQENTIS_LLM_AUTH_MODE` lets the
   LLM credential stay a managed identity (Bicep sets it in this mode). The runtime fails fast, naming
   the missing variables, when `service_principal` mode lacks its inputs or has both a secret and a

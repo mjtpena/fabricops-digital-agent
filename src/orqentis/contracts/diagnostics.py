@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,12 @@ MAX_FILE_BYTES = 8 * 1024 * 1024  # a contracts file is reviewed by humans; anyt
 
 
 def read_text(path: Path) -> str:
-    """UTF-8 text of ``path``.
+    """UTF-8 text of ``path`` (see :func:`read_document`)."""
+    return read_document(path)[0]
+
+
+def read_document(path: Path) -> tuple[str, str]:
+    """``(text, sha256 of the file's bytes)`` for ``path``, read once.
 
     Raises :class:`ContractsFileNotFoundError` when nothing is there, and :class:`ContractsInvalidError` when
     something is there but cannot be a contracts file (a directory, too large, not text, unreadable).
@@ -29,7 +35,9 @@ def read_text(path: Path) -> str:
         elif path.stat().st_size > MAX_FILE_BYTES:
             reason = f"the file is larger than {MAX_FILE_BYTES // (1024 * 1024)} MiB"
         if reason is None:
-            return path.read_text(encoding="utf-8-sig")  # tolerate the BOM some Windows editors add
+            data = path.read_bytes()
+            # utf-8-sig tolerates the BOM some Windows editors add
+            return data.decode("utf-8-sig"), hashlib.sha256(data).hexdigest()
     except UnicodeDecodeError:
         reason = "the file is not valid UTF-8 text"
     except OSError as exc:

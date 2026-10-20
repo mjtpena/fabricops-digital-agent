@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from orqentis.domain.estate import DataProduct, EnvironmentDeclaration, ExternalSource
 from orqentis.domain.sla import SLA
@@ -45,6 +47,17 @@ class EstateContracts(BaseModel):
         default_factory=list, description="Lineage and control-flow edges between estate nodes."
     )
     slas: list[SLA] = Field(default_factory=list, description="Availability deadlines of data products.")
+
+    _source_sha256: str | None = PrivateAttr(default=None)
+
+    @property
+    def source_sha256(self) -> str | None:
+        """SHA-256 of the file these contracts were loaded from (None for contracts built in code)."""
+        return self._source_sha256
+
+    def with_source_sha256(self, digest: str) -> Self:
+        self._source_sha256 = digest
+        return self
 
 
 CONTRACT_SECTIONS: tuple[str, ...] = (

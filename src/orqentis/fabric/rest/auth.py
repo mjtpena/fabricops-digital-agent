@@ -24,7 +24,7 @@ from azure.core.credentials_async import AsyncTokenCredential
 from azure.core.exceptions import ClientAuthenticationError
 
 from orqentis.config.settings import PUBLIC_FABRIC_SCOPE, PUBLIC_POWERBI_SCOPE, AuthMode, Settings
-from orqentis.fabric.errors import FabricAuthError
+from orqentis.fabric.errors import FabricAuthError, ServicePrincipalConfigError
 from orqentis.observability.redaction import redact_text
 
 # The adapter asks for these logical scopes. ORQENTIS_FABRIC_SCOPE / ORQENTIS_POWERBI_SCOPE redirect them to
@@ -107,10 +107,6 @@ def _async_transport_options() -> dict[str, Any]:
 # Key Vault reference in Container Apps (infra/bicep); it is never in this repository.
 _SP_TENANT, _SP_CLIENT = "AZURE_TENANT_ID", "AZURE_CLIENT_ID"
 _SP_SECRET, _SP_CERTIFICATE = "AZURE_CLIENT_SECRET", "AZURE_CLIENT_CERTIFICATE_PATH"
-
-
-class ServicePrincipalConfigError(ValueError):
-    """``ORQENTIS_AUTH_MODE=service_principal`` without the variables azure-identity needs."""
 
 
 def service_principal_problems(environ: Mapping[str, str]) -> list[str]:
