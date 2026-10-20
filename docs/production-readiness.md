@@ -33,11 +33,11 @@ one PR to `main`. Briefs live in [`docs/programme/briefs/`](programme/briefs/).
 | WS | Title | Wave | Depends on | Status | Owner session | PR | Evidence |
 |---|---|---|---|---|---|---|---|
 | WS0 | CI fix (Docker Hub 429; Windows local gates) | 0 | | in progress (blocked on B1) | orchestrator | [#1](https://github.com/mjtpena/fabricops-digital-agent/pull/1) | Local gates green; CI not started (B1) |
-| WS1 | Autonomous runtime | 1 | | not started | | | |
-| WS2 | Portability and contracts | 1 | | not started | | | |
-| WS3 | Identity and API hardening | 1 | | not started | | | |
-| WS4 | Delivery pipeline | 1 | A6 (OIDC) for the push dry run | not started | | | |
-| WS5 | Live sandbox estate and live test harness | 1 | D8, A3–A5 | not started | orchestrator | | |
+| WS1 | Autonomous runtime | 1 | | in progress | `ws1-runtime` (Sonnet) | | |
+| WS2 | Portability and contracts | 1 | | in progress | `ws2-portability` (Sonnet) | | |
+| WS3 | Identity and API hardening | 1 | | in progress | `ws3-identity` (Sonnet) | | |
+| WS4 | Delivery pipeline | 1 | A6 (done) for the push dry run | in progress | `ws4-delivery` (Sonnet) | | |
+| WS5 | Live sandbox estate and live test harness | 1 | D8, A3–A5 | in progress | orchestrator's local subagent (Sonnet, shares the `az` login) | | |
 | WS6 | Durable storage and stateless app | 2 | D1, WS1 | not started | | | |
 | WS7 | Signals and detection breadth | 2 | D2, WS1, WS5 | not started | | | |
 | WS8 | Notifications and web UI | 2 | D3, WS3 (WS6 preferred) | not started | | | |
@@ -95,4 +95,5 @@ Spend to date (programme resources): ≈ USD 0. `RG-FABRICDEMO` month-to-date at
 |---|---|
 | 2026-10-20 | Kickoff: repo verified, live tenant discovered read-only, WS0 opened, ledger created |
 | 2026-10-20 | D8: sandbox uses the existing F4 `fabricdemocap2026`, with resume/pause authorised |
+| 2026-10-20 | Wave 1 started: WS1–WS4 sub-sessions, WS5 live subagent |
 | 2026-10-20 | D0–D7 accepted; ADRs 0008–0012; default branch set to `main`; budget, shared ACR, CI/CD OIDC identity and test service principal created (A4–A6) |
