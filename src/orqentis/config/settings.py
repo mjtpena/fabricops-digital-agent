@@ -84,7 +84,12 @@ def _is_loopback(host: str) -> bool:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ORQENTIS_", env_file=".env", extra="ignore")
+    # hide_input_in_errors: a validation error must never print the raw settings it was given. Without it pydantic shows
+    # ``input_value`` (a truncated copy of every variable read), so a start-up failure would put webhook URLs, the
+    # signing key and the CSRF key into a traceback and from there into the logs.
+    model_config = SettingsConfigDict(
+        env_prefix="ORQENTIS_", env_file=".env", extra="ignore", hide_input_in_errors=True
+    )
 
     deployment_environment: Literal["local", "dev", "test", "prod"] = "local"
     tenant_id: str = "tenant-contoso"

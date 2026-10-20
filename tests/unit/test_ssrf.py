@@ -173,6 +173,16 @@ def test_the_allow_list_is_enforced_when_the_poster_is_built() -> None:
         "2002:c0a8:0101::1",  # 6to4 embedding 192.168.1.1
         "2001:0:4136:e378:8000:63bf:3fff:fdd2",  # Teredo
         "ff02::1",
+        "fec0::1",  # IPv6 site-local (deprecated)
+        "fec0:0:0:1::53",
+        "febf::1",  # link-local edge
+        "192.88.99.1",  # 6to4 relay anycast (deprecated)
+        "192.88.99.255",
+        "100::1",  # discard-only
+        "2001:db8::1",  # documentation
+        "3fff::1",  # documentation
+        "5f00::1",  # SRv6 SIDs
+        "2001:10::1",  # ORCHID (deprecated)
     ],
 )
 def test_non_public_addresses_are_classified(address: str) -> None:
@@ -420,10 +430,34 @@ async def test_the_secret_path_and_query_never_reach_the_log_even_when_the_clien
     """httpx logs ``HTTP Request: POST <url>`` at INFO; raising the level must not put the webhook secret in a log."""
     with caplog.at_level(logging.DEBUG):
         assert await poster().post(b"{}", {}) == 202
-        logging.getLogger("httpx").info("an unrelated record of the client")  # kept: the filter drops only the secret
+        logging.getLogger("httpx").warning("an unrelated warning of the client")  # kept: only the secret is dropped
+        logging.getLogger("httpx").info("an unrelated info record of the client")  # below the pinned level
     text = " ".join(record.getMessage() for record in caplog.records)
     assert "TOPSECRETSIGNATURE" not in text and "/workflows/abc123" not in text
-    assert "an unrelated record of the client" in text
+    assert "an unrelated warning of the client" in text and "an unrelated info record" not in text
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/work flows/a%20b/c%2Fd?sig=SECRET%2FSIG%3D%3D&x=%7Bbrace%7D",  # characters the client re-encodes when it logs
+        "/workflows/a%2fb?sig=sECRET%2bSIG",
+    ],
+)
+async def test_the_client_loggers_are_pinned_so_a_reencoded_url_cannot_be_logged(
+    caplog: pytest.LogCaptureFixture, path: str
+) -> None:
+    """The filter compares strings and the client logs the URL re-encoded, so the filter cannot be the only guard."""
+    logging.getLogger("httpx").setLevel(logging.NOTSET)  # as an operator who raised the log level would
+    logging.getLogger("httpcore").setLevel(logging.NOTSET)
+    webhook = poster(url=f"https://hooks.example.com{path}".replace(" ", "%20"), allowed=())
+    with caplog.at_level(logging.DEBUG):
+        assert await webhook.post(b"{}", {}) == 202
+    assert (
+        logging.getLogger("httpx").level == logging.WARNING and logging.getLogger("httpcore").level == logging.WARNING
+    )
+    shown = " ".join(record.getMessage() for record in caplog.records if record.name.startswith(("httpx", "httpcore")))
+    assert shown == "" and "SECRET" not in shown.upper()
 
 
 async def test_the_url_never_appears_in_an_error() -> None:

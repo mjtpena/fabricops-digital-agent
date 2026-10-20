@@ -651,9 +651,87 @@ def test_the_api_refuses_html_form_bodies_and_still_serves_json_and_scripts(ui: 
     assert ui.client.post(f"/approvals/{more}/reject", headers=ADMIN_SESSION).status_code == 200  # no body, no Origin
 
 
-def test_reads_are_never_blocked_by_the_guard(ui: Ui) -> None:
+def test_plain_api_reads_are_never_blocked_by_the_guard(ui: Ui) -> None:
     assert ui.client.get("/incidents", headers={**OPERATOR, "Origin": "https://evil.example"}).status_code == 200
-    assert ui.client.get("/ui/incidents", headers={**OPERATOR, "Sec-Fetch-Site": "cross-site"}).status_code == 200
+    assert ui.client.get("/incidents", headers={**OPERATOR, "Sec-Fetch-Site": "cross-site"}).status_code == 200
+
+
+def fetch(site: str, mode: str, dest: str) -> Headers:
+    return {"Sec-Fetch-Site": site, "Sec-Fetch-Mode": mode, "Sec-Fetch-Dest": dest}
+
+
+SUBRESOURCE_LOADS = [
+    fetch("cross-site", "no-cors", "image"),  # <img src="https://app/ui/audit">
+    fetch("cross-site", "cors", "empty"),  # fetch(..., {credentials: "include"})
+    fetch("cross-site", "navigate", "iframe"),  # a framed page (also blocked by frame-ancestors)
+    fetch("cross-site", "navigate", "embed"),
+    fetch("cross-site", "no-cors", "script"),
+    fetch("same-site", "no-cors", "image"),  # a sibling sub-domain is not this application
+    fetch("same-site", "cors", "empty"),
+    fetch("bogus", "no-cors", "image"),
+]
+
+
+@pytest.mark.parametrize("headers", SUBRESOURCE_LOADS, ids=lambda h: "-".join(h.values()))
+@pytest.mark.parametrize("path", ["/ui/audit", "/ui/incidents", "/ui/approvals", "/audit/verify"])
+def test_a_page_on_another_site_cannot_load_ui_pages_or_the_verification_in_the_background(
+    ui: Ui, path: str, headers: Headers
+) -> None:
+    response = ui.client.get(path, headers={**OPERATOR, **headers})
+    assert response.status_code == 403
+    if path.startswith("/ui"):
+        assert is_html(response) and "CROSS_SITE_REQUEST" in response.text
+    else:
+        assert response.json()["error"] == "CROSS_SITE_REQUEST"
+
+
+def test_cross_site_reads_cannot_use_up_a_persons_budget_for_investigations(ui: Ui) -> None:
+    """Regression: 8 cross-site ``GET /ui/audit`` drained the shared "expensive" budget (6 a minute) and the
+    person's own ``POST /incidents/{id}/investigate`` then answered 429."""
+    incident_id = ui.client.get("/incidents", headers=OPERATOR).json()[0]["incident_id"]
+    for _ in range(12):
+        for path in ("/ui/audit", "/audit/verify"):
+            assert (
+                ui.client.get(path, headers={**OPERATOR, **fetch("cross-site", "no-cors", "image")}).status_code == 403
+            )
+    queued = ui.client.post(f"/incidents/{incident_id}/investigate", headers=OPERATOR)
+    assert queued.status_code == 202, queued.text  # the budget is untouched: 12 refused reads spent nothing
+    assert ui.client.get("/ui/audit", headers=OPERATOR).status_code == 200
+
+
+@pytest.mark.parametrize("site", ["cross-site", "same-site"])
+@pytest.mark.parametrize("path", ["/ui/audit", "/ui/incidents", "/audit/verify"])
+def test_following_a_link_from_another_site_still_works(ui: Ui, path: str, site: str) -> None:
+    """A link in a Teams card, or the redirect back from Entra ID after sign-in, is a top-level navigation."""
+    response = ui.client.get(path, headers={**OPERATOR, **fetch(site, "navigate", "document")})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},  # curl, a script, an old browser
+        fetch("same-origin", "cors", "empty"),
+        fetch("same-origin", "no-cors", "image"),
+        fetch("same-origin", "navigate", "document"),
+        fetch("none", "navigate", "document"),  # the address typed into the bar
+    ],
+    ids=["no-fetch-metadata", "same-origin-fetch", "same-origin-image", "same-origin-navigation", "typed-address"],
+)
+def test_the_apps_own_requests_and_non_browser_clients_are_not_affected(ui: Ui, headers: Headers) -> None:
+    for path in ("/ui/audit", "/ui/incidents", "/ui/assets/ui.css", "/audit/verify"):
+        assert ui.client.get(path, headers={**OPERATOR, **headers}).status_code == 200, path
+
+
+def test_the_stylesheet_is_refused_to_a_foreign_page_but_the_ui_page_loads_its_own(ui: Ui) -> None:
+    assert (
+        ui.client.get("/ui/assets/ui.css", headers={**OPERATOR, **fetch("cross-site", "no-cors", "style")}).status_code
+        == 403
+    )
+    assert (
+        ui.client.get("/ui/assets/ui.css", headers={**OPERATOR, **fetch("same-origin", "no-cors", "style")}).status_code
+        == 200
+    )
 
 
 def test_behind_the_ingress_the_forwarded_scheme_decides_which_origin_is_own(ui: Ui) -> None:

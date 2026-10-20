@@ -124,14 +124,16 @@ class IncidentService:
         self._notifications.publish(notification_events.incident_opened(incident, occurred_at=now))
         return incident
 
-    def raise_severity(self, incident: Incident, severity: Severity, *, reason: str, actor: str) -> None:
-        """Escalate an incident that is being investigated. The caller saves it with the rest of its changes.
+    async def raise_severity(self, incident: Incident, severity: Severity, *, reason: str, actor: str) -> None:
+        """Escalate an incident that is being investigated: timeline entry, saved, and only then announced.
 
-        Records the change on the timeline and tells people (a notification, once per incident and severity).
+        Announcing before the change is stored could tell people about a severity that a failing investigation then
+        never persists (and the UI they are sent to would show the old one). One notification per incident and severity.
         """
         previous = incident.severity
         incident.severity = severity
         self.add_timeline(incident, TimelineKind.NOTE, f"Severity raised to {severity.value}: {reason}", actor=actor)
+        await self.save(incident)
         self._notifications.publish(
             notification_events.incident_escalated(
                 incident, previous=previous, reason=reason, occurred_at=self._clock.now()

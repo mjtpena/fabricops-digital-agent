@@ -406,7 +406,7 @@ included; on `/ui` one of `Origin` / `Referer` must be present and match; on the
 stays **JSON-only**: a non-JSON body is `415`, so a plain HTML form cannot reach it. (2) Every state-changing UI form carries a *token*
 (`v1.<expiry>.<nonce>.<HMAC-SHA256>`) bound to the signed-in principal's object id, valid four hours and different on every page; a missing, wrong, expired,
 tampered or another person's token is `403 CSRF_TOKEN_INVALID` and is audited against the signed-in person with the same bounded sampling as other refusals.
-The key is `ORQENTIS_UI_CSRF_SECRET` (Key Vault) or a random per-process key (one replica). The cookie's own attributes belong to Easy Auth and are not relied upon.
+The key is `ORQENTIS_UI_CSRF_SECRET` (Key Vault) or a random per-process key (one replica). The cookie's own attributes belong to Easy Auth and are not relied upon. The guard also applies to **reads that spend a rate budget** (`GET /ui/*`, `GET /audit/verify`): a foreign page could load `<img src="/ui/audit">` with the person's cookie and use up the shared "expensive" budget, so the person's own `POST /incidents/{id}/investigate` would answer 429. A request marked `cross-site` or `same-site` is refused unless it is a top-level navigation (`Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`): following a link in a card still works.
 
 **Script injection.** Fabric names, descriptions, error messages, evidence payloads, comments and display names are untrusted. They reach a page only through
 Jinja2 `{{ }}` with autoescape on (a test renders a pipeline whose description is `<script>...`, and every other untrusted field, and finds only escaped text; another test
@@ -417,10 +417,12 @@ refuses `|safe`, inline scripts, inline styles and event-handler attributes in t
 **Sign-in.** Browser sign-in is Easy Auth's authorization code flow with a client secret held only in Key Vault (a managed-identity federated credential is not
 supported for Container Apps; ADR-0018 has the evidence), no token store, an 8 hour session, no redirect to another site, and `Return401` for everything without a session.
 
+**Start-up errors do not print secrets.** `Settings` sets `hide_input_in_errors`; without it a validation error shows `input_value`, a truncated copy of the raw environment, and a failing start would put the end of a signing key, a webhook signature or the CSRF key into a traceback and the logs. All secret settings are `SecretStr`.
+
 **Notifications are an outbound channel.** Content: every string is sanitised, secrets are redacted, fields are length-limited, and in Teams cards Markdown links
 and tags in Fabric names are defused; the card has no buttons and one link built from the configured base URL. Destination: a webhook URL is a secret (Key Vault reference,
 never a parameter, log, audit field or error message), https only, a DNS name on an allow list, resolved by the application, every address public (private, loopback, link-local,
 multicast, reserved, CGNAT, the Azure host and cloud metadata addresses and IPv4-embedding IPv6 are refused), the request goes to the validated address (no DNS-rebinding window),
-redirects are never followed, proxies are ignored. Delivery: bounded outbox, dropped-oldest, retries with back-off, one audit record per attempt. What a notification discloses
+redirects are never followed, proxies are ignored; the HTTP client's loggers are pinned to WARNING so a raised log level cannot write the URL (which holds the secret) into a log. Delivery: bounded outbox, dropped-oldest, retries with back-off, one audit record per attempt. What a notification discloses
 (incident title, item and workspace names, severity, action, target, requester) goes to the chat or endpoint the operator configured: choose a private channel, and prefer
 a webhook receiver you control for anything beyond that.

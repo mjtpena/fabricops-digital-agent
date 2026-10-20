@@ -20,6 +20,9 @@ MAX_HEADLINE = 200
 MAX_LABEL = 40
 MAX_VALUE = 300
 MAX_FACTS = 12
+# Longest text looked at before redaction. Far above any field limit, and cut back to a whole word, so that a secret
+# that starts inside the part that is shown is always seen whole by the redaction patterns.
+_MAX_INPUT = 64_000
 _WHITESPACE = re.compile(r"\s+")
 
 _LINK_LABELS = {
@@ -33,8 +36,17 @@ _LINK_LABELS = {
 
 
 def clean(text: str, limit: int) -> str:
-    """One line of untrusted text: no control characters or tags, secrets redacted, at most ``limit`` characters."""
-    single_line = _WHITESPACE.sub(" ", redact_text(sanitize_text(str(text), max_length=4 * limit))).strip()
+    """One line of untrusted text: no control characters or tags, secrets redacted, at most ``limit`` characters.
+
+    Order matters: secrets are redacted **before** the text is shortened. A long token (a JWT with a large payload)
+    that is cut first no longer matches the patterns, and the part that is left would be sent.
+    """
+    raw = str(text)
+    if len(raw) > _MAX_INPUT:
+        raw = raw[:_MAX_INPUT].rsplit(None, 1)[
+            0
+        ]  # never end inside a word: a cut-off token would not match the patterns
+    single_line = _WHITESPACE.sub(" ", redact_text(sanitize_text(raw, max_length=len(raw) + 1))).strip()
     return single_line if len(single_line) <= limit else single_line[: limit - 1].rstrip() + "…"
 
 

@@ -27,6 +27,15 @@ _EMBEDDING_V6 = tuple(
 )
 
 
+# Deprecated or special-purpose ranges that are not (or no longer) public unicast addresses. ``ipaddress`` does not call
+# every one of them private on every Python version, so they are listed: IPv6 site-local (fec0::/10), the 6to4 relay
+# anycast prefix (192.88.99.0/24), the discard-only prefix, documentation prefixes and the SRv6 SID prefix.
+_NON_PUBLIC_NETWORKS = tuple(
+    ipaddress.ip_network(n)
+    for n in ("fec0::/10", "192.88.99.0/24", "100::/64", "2001:db8::/32", "3fff::/20", "5f00::/16", "2001:10::/28")
+)
+
+
 class UnsafeDestinationError(Exception):
     """The destination is not acceptable. ``code`` is stable; ``reason`` never contains the URL."""
 
@@ -85,6 +94,8 @@ def classify_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> 
         return "multicast"
     if isinstance(address, ipaddress.IPv6Address) and any(address in net for net in _EMBEDDING_V6):
         return "IPv4-embedding IPv6"
+    if any(address in net for net in _NON_PUBLIC_NETWORKS if net.version == address.version):
+        return "deprecated or special-purpose range"
     if address.is_private:
         return "private"
     if address.is_reserved or not address.is_global:

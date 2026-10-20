@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +111,82 @@ def test_an_unacceptable_webhook_url_stops_the_start_without_echoing_the_secret(
     message = str(caught.value)
     assert why in message
     assert SIGNATURE not in message and "sig=" not in message  # the URL is a secret: not in the error either
+
+
+SECRET_ENVIRONMENT = {
+    "ORQENTIS_NOTIFY_TEAMS_WEBHOOK_URL": TEAMS_URL,
+    "ORQENTIS_NOTIFY_WEBHOOK_URL": "https://hooks.example.com/in?sig=WEBHOOKURLSIGNATURE0123456789",
+    "ORQENTIS_NOTIFY_WEBHOOK_SIGNING_SECRET": "SIGNINGKEYHEAD-0123456789abcdef-SIGNINGKEYTAIL",
+    "ORQENTIS_UI_CSRF_SECRET": "CSRFKEYHEAD-fedcba9876543210-CSRFKEYTAIL",
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://x/",
+}
+# What breaks the settings while the secrets above are all present (each one makes a different validator fail).
+BREAKAGES = {
+    "unrelated field": {"ORQENTIS_DEPLOYMENT_ENVIRONMENT": "bogus"},
+    "number out of range": {"ORQENTIS_NOTIFY_MAX_ATTEMPTS": "0"},
+    "backoff window": {"ORQENTIS_NOTIFY_BACKOFF_BASE_SECONDS": "30", "ORQENTIS_NOTIFY_BACKOFF_MAX_SECONDS": "10"},
+    "notifier without a base url": {"ORQENTIS_NOTIFIER": "teams_workflows"},
+    "bad base url": {"ORQENTIS_NOTIFIER": "webhook", "ORQENTIS_PUBLIC_BASE_URL": "http://fabricops.example.com"},
+    "host off the allow list": {
+        "ORQENTIS_NOTIFIER": "teams_workflows",
+        "ORQENTIS_PUBLIC_BASE_URL": BASE,
+        "ORQENTIS_NOTIFY_ALLOWED_HOSTS": "flows.contoso.com",
+    },
+    "missing url": {
+        "ORQENTIS_NOTIFIER": "webhook",
+        "ORQENTIS_PUBLIC_BASE_URL": BASE,
+        "ORQENTIS_NOTIFY_WEBHOOK_URL": " ",
+    },
+}
+
+
+def fragments(secret: str) -> list[str]:
+    """Whole value and pieces of it: what a truncated ``input_value`` would show (the start, the end, the middle)."""
+    pieces = [secret, secret[:12], secret[-12:], secret[len(secret) // 2 - 6 : len(secret) // 2 + 6]]
+    return [piece for piece in pieces if len(piece) >= 8]
+
+
+@pytest.mark.parametrize("order", ["as-deployed", "reversed", "secrets-last", "secrets-first"])
+@pytest.mark.parametrize("breakage", list(BREAKAGES))
+def test_a_settings_error_never_shows_a_secret_in_the_message_the_repr_or_the_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, breakage: str, order: str
+) -> None:
+    """Regression: without ``hide_input_in_errors`` pydantic printed ``input_value`` (a truncated copy of the raw
+    variables), which put the tail of the signing key, the webhook signature and the CSRF key into a start-up traceback.
+    It only showed for some variable orders, so the order of the environment is varied too."""
+    secrets = [(name, value) for name, value in SECRET_ENVIRONMENT.items() if name not in BREAKAGES[breakage]]
+    breaking = list(BREAKAGES[breakage].items())
+    sequences = {
+        "as-deployed": [*breaking, *secrets],
+        "reversed": [*reversed(secrets), *reversed(breaking)],
+        "secrets-last": [*breaking, *secrets],
+        "secrets-first": [*secrets, *breaking],
+    }
+    for name, value in sequences[order]:
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("ORQENTIS_DATA_DIR", str(tmp_path))
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None)  # type: ignore[call-arg]
+    # What a start-up failure prints or logs: the message, the repr and the traceback. (``errors()`` and ``json()``
+    # still carry ``input`` for model-level validators; nothing in the application calls them.)
+    shown = "\n".join([str(caught.value), repr(caught.value), "".join(traceback.format_exception(caught.value))])
+    assert "input_value" not in shown and "input_type" not in shown
+    for secret in SECRET_ENVIRONMENT.values():
+        for piece in fragments(secret):
+            assert piece not in shown, (breakage, order, piece[:6])
+    assert "sig=" not in shown and "InstrumentationKey" not in shown
+
+
+def test_the_cli_fails_with_an_error_that_holds_no_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from orqentis import cli
+
+    for name, value in SECRET_ENVIRONMENT.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("ORQENTIS_NOTIFIER", "teams_workflows")  # needs a base URL that is missing
+    with pytest.raises(ValidationError) as caught:
+        cli.main(["notify-test"])
+    shown = "".join(traceback.format_exception(caught.value)) + str(caught.value)
+    assert not [piece for secret in SECRET_ENVIRONMENT.values() for piece in fragments(secret) if piece in shown]
 
 
 def test_the_allow_list_replaces_the_default(tmp_path: Path) -> None:

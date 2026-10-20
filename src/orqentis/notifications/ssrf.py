@@ -54,6 +54,16 @@ class _KeepSecretOut(logging.Filter):
 
 
 def _keep_secret_out_of_logs(secret: str) -> None:
+    """The HTTP client's loggers stay at WARNING (they log every request URL at INFO and DEBUG), and a filter drops
+    any record that still carries the secret path. The filter alone is not enough: the client re-encodes characters,
+    so the URL it logs is not always the string that was configured.
+    """
+    for name in ("httpx", "httpcore"):
+        client_logger = logging.getLogger(name)
+        if (
+            client_logger.level < logging.WARNING
+        ):  # its own level, so raising the root level later cannot lower it again
+            client_logger.setLevel(logging.WARNING)
     client_logger = logging.getLogger("httpx")
     if not any(isinstance(f, _KeepSecretOut) and f.secret == secret for f in client_logger.filters):
         client_logger.addFilter(_KeepSecretOut(secret))

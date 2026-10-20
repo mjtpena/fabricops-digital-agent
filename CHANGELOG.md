@@ -47,7 +47,11 @@ section does not match.
 
 - Every state-changing request, API and UI, passes a cross-origin guard (`Origin`, `Sec-Fetch-Site`; `Referer` on `/ui`), and the API accepts
   JSON bodies only (415 otherwise). An ID-token browser session is a person, so without this a foreign page could
-  `POST /approvals/{id}/approve` (ledger R6).
+  `POST /approvals/{id}/approve` (ledger R6). Reads that spend a rate budget (`/ui/*`, `/audit/verify`) also refuse cross-site
+  subresource loads, so a foreign page cannot use up a person's budget.
+- Settings validation errors no longer print the raw environment (`hide_input_in_errors`), which showed the end of the webhook
+  signature, signing key and CSRF key in a start-up traceback. Notification text is redacted before it is shortened; the HTTP
+  client's loggers are pinned to WARNING; IPv6 site-local and `192.88.99.0/24` are refused as webhook destinations.
 
 ### Changed
 

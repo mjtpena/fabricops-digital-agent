@@ -15,6 +15,14 @@ request reaches authentication or the body is read:
   On the API a request with none of these headers is a script or ``curl``, which is no CSRF vector, and is let through.
 * The API stays JSON-only: a body that is not ``application/json`` gets 415, so a plain HTML form cannot post to it.
 
+**Reads that spend a budget.** A page on another site can also make the browser *read* with the session cookie, for
+example ``<img src="/ui/audit">``, and ``GET /ui/audit`` and ``GET /audit/verify`` charge the person's shared
+"expensive" rate budget, so a foreign page could use it up and have the person's own
+``POST /incidents/{id}/investigate`` answered 429. For every request under ``/ui`` and for ``/audit/verify`` the guard
+therefore applies the Fetch Metadata resource-isolation policy: a request marked ``cross-site`` or ``same-site`` is
+refused unless it is a top-level navigation (``Sec-Fetch-Mode: navigate`` and ``Sec-Fetch-Dest: document``), which
+is what a person following a link in a notification does.
+
 **Headers.** Every ``/ui`` response gets a strict Content-Security-Policy (no script at all, styles from this origin,
 forms to this origin, no framing), ``X-Frame-Options: DENY``, ``X-Content-Type-Options: nosniff``,
 ``Referrer-Policy: same-origin`` and ``Cache-Control: no-store`` (pages hold incident data and form tokens).
@@ -36,6 +44,9 @@ _log = get_logger(__name__)
 
 MUTATING_METHODS: Final = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _SAME_ORIGIN_FETCH_SITES: Final = frozenset({"same-origin", "none"})
+READ_METHODS: Final = frozenset({"GET", "HEAD"})
+# Reads outside /ui that spend a per-principal budget (see ``authz.require_verify``).
+BUDGETED_READ_PATHS: Final = frozenset({"/audit/verify"})
 _DEFAULT_PORTS: Final = {"http": 80, "https": 443}
 
 CONTENT_SECURITY_POLICY: Final = (
@@ -105,20 +116,42 @@ class CrossOriginGuardMiddleware:
         self._public_base_url = public_base_url
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope["method"] not in MUTATING_METHODS:
+        if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
-        headers = Headers(scope=scope)
-        refusal = self._check(scope, headers)
+        method, path = scope["method"], scope["path"]
+        refusal: tuple[str, str, int] | None = None
+        if method in MUTATING_METHODS:
+            refusal = self._check(scope, Headers(scope=scope))
+        elif method in READ_METHODS and (is_ui_path(path) or path in BUDGETED_READ_PATHS):
+            refusal = self._check_read(Headers(scope=scope))
         if refusal is not None:
             code, message, status = refusal
             _log.warning(
-                "cross-origin or malformed state-changing request refused",
-                extra={"code": code, "method": scope["method"], "path": scope["path"]},
+                "cross-origin or malformed request refused",
+                extra={"code": code, "method": method, "path": path},
             )
             await refusal_response(scope, status, code, message)(scope, receive, send)
             return
         await self._app(scope, receive, send)
+
+    @staticmethod
+    def _check_read(headers: Headers) -> tuple[str, str, int] | None:
+        """Resource isolation for pages and for reads that spend a budget: another site may only navigate here."""
+        site = headers.get("sec-fetch-site")
+        if site is None or site.lower() in _SAME_ORIGIN_FETCH_SITES:
+            return None
+        navigation = (
+            headers.get("sec-fetch-mode", "").lower() == "navigate"
+            and headers.get("sec-fetch-dest", "").lower() == "document"
+        )
+        if navigation:
+            return None
+        return (
+            "CROSS_SITE_REQUEST",
+            "This page can only be opened by following a link, not loaded from another site",
+            403,
+        )
 
     def _check(self, scope: Scope, headers: Headers) -> tuple[str, str, int] | None:
         ui = is_ui_path(scope["path"])
