@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}{{ incident.incident_id }}{% endblock %}
+{% block content %}
+<h1>{{ incident.incident_id }}: {{ incident.title }}</h1>
+<p>
+  <span class="badge sev-{{ incident.severity.value }}">{{ incident.severity.value }}</span>
+  <span class="badge st-{{ incident.status.value }}">{{ incident.status.value }}</span>
+  · <a href="{{ paths.report_path(incident.incident_id) }}">Full report</a>
+</p>
+<dl class="facts">
+  <dt>Category</dt><dd>{{ incident.category }}</dd>
+  <dt>Environment</dt><dd>{{ incident.environment.value }}</dd>
+  <dt>Item</dt><dd>{{ incident.primary_item_name or incident.primary_item_id }} <span class="muted">({{ incident.primary_item_id }})</span></dd>
+  <dt>Workspace</dt><dd>{{ incident.workspace_id }}</dd>
+  <dt>Detected</dt><dd>{{ incident.detected_at|dt }} by {{ incident.metadata.get("detection_rule", "-") }}</dd>
+  <dt>Confidence</dt>
+  <dd>{% if incident.confidence %}{{ incident.confidence.level.value }} ({{ "%.2f"|format(incident.confidence.score) }}), computed in code{% else %}not yet assessed{% endif %}</dd>
+  <dt>Approval state</dt><dd>{{ incident.approval_state.value }}</dd>
+  {% if incident.insufficient_evidence_reason %}<dt>Insufficient evidence</dt><dd>{{ incident.insufficient_evidence_reason }}</dd>{% endif %}
+</dl>
+
+<h2>Probable root cause</h2>
+{% for rc in incident.probable_root_causes %}
+  <p class="statement"><span class="badge kind-INFERENCE">INFERENCE</span>[{{ rc.category }}] {{ rc.statement }}
+    <span class="evidence-ids">evidence: {% for e in rc.evidence_ids %}<code>{{ e }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</span></p>
+{% else %}
+  <p class="muted">None established yet.</p>
+{% endfor %}
+
+<h2>Approvals</h2>
+{% if approvals %}
+<table>
+  <thead><tr><th>Approval</th><th>Action</th><th>Target</th><th>Risk</th><th>Status</th><th>Required role</th><th>Expires</th></tr></thead>
+  <tbody>
+  {% for a in approvals %}
+    <tr>
+      <td><a href="{{ paths.approval_path(a.approval_id) }}">{{ a.approval_id }}</a></td>
+      <td>{{ a.proposed_action.action_type.value }}: {{ a.proposed_action.title }}</td>
+      <td>{{ a.proposed_action.target_display_name or a.proposed_action.target_item_id or "-" }}</td>
+      <td>{{ a.risk.value }}</td>
+      <td><span class="badge st-{{ a.status.value }}">{{ a.status.value }}</span></td>
+      <td>{{ a.required_role or "-" }}</td>
+      <td>{{ a.expires_at|dt }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+  <p class="muted">No approval has been requested.</p>
+{% endif %}
+
+{% if recommendation %}
+<h2>Recommendation</h2>
+<p class="statement"><span class="badge kind-RECOMMENDATION">RECOMMENDATION</span>{{ recommendation.title }}</p>
+<p>{{ recommendation.summary }}</p>
+{% endif %}
+
+<h2>Timeline</h2>
+<table>
+  <thead><tr><th>Time</th><th>Kind</th><th>Actor</th><th>Event</th></tr></thead>
+  <tbody>
+  {% for t in timeline %}
+    <tr><td>{{ t.timestamp|dt }}</td><td>{{ t.kind.value }}</td><td>{{ t.actor }}</td><td>{{ t.summary }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Evidence</h2>
+{% for e in incident.evidence %}
+  <details>
+    <summary><code>{{ e.evidence_id }}</code> · {{ e.evidence_type.value }} · {{ e.source }}{% if e.untrusted_flags %} · <strong>flags: {{ e.untrusted_flags|join(", ") }}</strong>{% endif %}</summary>
+    <p>{{ e.summary }}</p>
+    <pre>{{ e.structured_payload|pretty_json }}</pre>
+  </details>
+{% else %}
+  <p class="muted">No evidence collected yet.</p>
+{% endfor %}
+{% endblock %}

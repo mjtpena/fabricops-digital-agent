@@ -18,6 +18,8 @@
 | Role assignment (optional) | `modules/keyvault-role.bicep` | `Key Vault Secrets User` for the reader identity on **each referenced secret only** (not the vault), in the vault of `keyVaultResourceId` (any RG/subscription) |
 | Deployment check | `modules/input-check.bicep` | Fails the deployment with a readable reason when the `service_principal` inputs cannot work (see *Cross-tenant Fabric access*) |
 | Container App secrets (optional) | `fabric-sp-client-secret` / `fabric-sp-certificate` | Key Vault references (`keyVaultUrl` + the reader identity), only in `service_principal` mode |
+| Container App secrets (optional) | `notify-teams-webhook-url`, `notify-webhook-url`, `notify-webhook-signing-secret`, `ui-csrf-secret`, `microsoft-provider-authentication-secret` | Key Vault references, only for the parameters that are set (see *Notifications and the web UI*) |
+| Deployment check | `modules/input-check.bicep` (second instance) | Fails the deployment with a readable reason for malformed notification / sign-in inputs |
 | Action group | `ag-<prefix>` | `modules/monitoring.bicep` (`monitoringEnabled`): email receivers and an optional Teams Workflows webhook, both supplied at deployment time |
 | Alert rules (6) | `<prefix>-app-down`, `-restart-loop`, `-5xx-rate`, `-collector-errors`, `-collection-heartbeat`, `-audit-verification-failure` | One metric alert and five log alerts, each with severity, window, threshold parameter, the action group and a runbook link (see *Monitoring and alerts*) |
 | Workbook | `Orqentis FabricOps (<prefix>)` | Collections and errors, detection latency, incidents, investigations, approvals, model tokens and cost, scheduler, restarts, 5xx |
@@ -61,6 +63,10 @@ The app runs with these settings (see `src/orqentis/config/settings.py`):
 | `ORQENTIS_API_MAX_BODY_BYTES` | `apiMaxBodyBytes` (default `65536`): larger request bodies get 413 |
 | `ORQENTIS_API_RATE_LIMIT_MUTATING_PER_MINUTE` | `apiRateLimitMutatingPerMinute` (default `30`), per principal and replica |
 | `ORQENTIS_API_RATE_LIMIT_EXPENSIVE_PER_MINUTE` | `apiRateLimitExpensivePerMinute` (default `6`): collection, investigations, audit verification |
+| `ORQENTIS_NOTIFIER` / `ORQENTIS_PUBLIC_BASE_URL` / `ORQENTIS_UI_ENABLED` | `notifierKind` (default `null`) / `publicBaseUrl` (default: derived from the environment) / `uiEnabled` (default `true`) |
+| `ORQENTIS_NOTIFY_ALLOWED_HOSTS` | `notifyAllowedHosts` (only set when non-empty) |
+| `ORQENTIS_NOTIFY_TEAMS_WEBHOOK_URL`, `ORQENTIS_NOTIFY_WEBHOOK_URL`, `ORQENTIS_NOTIFY_WEBHOOK_SIGNING_SECRET`, `ORQENTIS_UI_CSRF_SECRET` | Container App **secret** references to Key Vault, each set only when its `...SecretUri` parameter is |
+| `ORQENTIS_UI_SIGN_IN_PATH` | `/.auth/login/aad`, only when `uiSignInClientSecretUri` is set |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | Container App **secret** reference |
 
 Not set by the template, because the safe default already applies under `easy_auth`: `ORQENTIS_API_REQUIRE_READ_ROLE` (every call needs a FabricOps role; see section 1) and `ORQENTIS_API_RATE_LIMIT_ENABLED` (`true`).
@@ -95,7 +101,7 @@ Prerequisites: Azure CLI with Bicep (`az bicep install`), permission to create r
 
 ### 1. Register the API in Microsoft Entra ID
 
-Container Apps authentication validates bearer tokens issued for this app registration. It never runs an interactive login in this configuration, so no client secret is needed. This registration is documentation for a person with the right Entra permissions to run once. The repository's automation never runs it.
+Container Apps authentication validates bearer tokens issued for this app registration. Unless you turn on browser sign-in for the web UI (*Interactive sign-in for the UI*, which adds a redirect URI and a client secret held in Key Vault), it never runs an interactive login, so no client secret is needed. This registration is documentation for a person with the right Entra permissions to run once. The repository's automation never runs it.
 
 ```bash
 API_APP_ID=$(az ad app create --display-name "Orqentis FabricOps API" \
@@ -272,6 +278,81 @@ Fabric workspace roles **cannot be assigned from ARM/Bicep**. Grant them after d
 
 Set `azureOpenAiEndpoint`, `azureOpenAiDeployment` and `azureOpenAiResourceId`. The template grants the reader identity **Cognitive Services OpenAI User** on that account, which permits inference only (no keys, no deployments). The grant is made through `modules/openai-role.bicep`, scoped to the account's own resource group and subscription. The deploying principal needs permission to create role assignments there. Without endpoint and deployment the app refuses to start with `agent_framework`.
 
+## Notifications and the web UI
+
+The app can tell people when an incident opens or escalates, when an approval is requested and when an action ran
+([docs/teams-notifications.md](../../docs/teams-notifications.md)), and serves a server-rendered UI under `/ui` (incidents, the
+report with FACT / INFERENCE / RECOMMENDATION labels, approvals with approve / reject / execute, audit verification). Both are
+[ADR-0018](../../docs/adr/0018-notifications-and-web-ui.md). With the defaults nothing is sent and the UI is served only to callers who
+hold a token, exactly like the API.
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `notifierKind` | `'null'` | `'null'` (nowhere), `'teams_workflows'` or `'webhook'` (`ORQENTIS_NOTIFIER`) |
+| `notifyTeamsWebhookSecretUri` | `''` | Key Vault **secret URI** of the Teams Workflows webhook URL. Required for `teams_workflows` |
+| `notifyWebhookSecretUri` | `''` | Key Vault secret URI of the generic webhook URL. Required for `webhook` |
+| `notifyWebhookSigningSecretUri` | `''` | Optional Key Vault secret URI of the HMAC-SHA256 key; the receiver verifies `X-Orqentis-Signature` |
+| `notifyAllowedHosts` | `''` | Comma-separated host patterns a webhook URL may use. Empty: the Power Platform hosts for Teams, any public host for the generic webhook |
+| `publicBaseUrl` | `''` | Origin of the app (`https://fabricops.example.com`, no path). Empty: derived from the environment's default domain. Output `publicBaseUrlEffective` shows the result |
+| `uiEnabled` | `true` | Serve `/ui` |
+| `uiSignInClientSecretUri` | `''` | Key Vault secret URI of the client secret of the Entra registration; turns on interactive browser sign-in (below) |
+| `uiCsrfSecretUri` | `''` | Key Vault secret URI of the HMAC key of the UI form tokens. Required before running more than one replica |
+
+**There is deliberately no parameter that takes a webhook URL or a key.** Each `...SecretUri` is a reference to a Key Vault secret
+(a versionless `https://<vault>.<dns-suffix>/secrets/<name>`); Container Apps resolves it with the reader identity into a Container App
+secret, and the app receives it as a `secretRef` environment variable (`ORQENTIS_NOTIFY_TEAMS_WEBHOOK_URL`, `ORQENTIS_NOTIFY_WEBHOOK_URL`,
+`ORQENTIS_NOTIFY_WEBHOOK_SIGNING_SECRET`, `ORQENTIS_UI_CSRF_SECRET`). With `keyVaultResourceId` set, the reader identity gets
+`Key Vault Secrets User` on these secrets and no others (the same module as the cross-tenant credential). The deployment fails with
+the reason for: a malformed or versioned URI, a URI that is not in the vault named by `keyVaultResourceId`, `teams_workflows` without
+`notifyTeamsWebhookSecretUri`, `webhook` without `notifyWebhookSecretUri`, and a `publicBaseUrl` that is not an https origin. A parameter file
+that contains a value instead of a reference is refused by the credential guard test, like any other credential-looking parameter.
+
+### Interactive sign-in for the UI
+
+The API only validates bearer tokens, which a browser cannot send. For people to open `/ui` (and the links in notifications) the
+registration from step 1 also signs them in through Easy Auth's `/.auth/login/aad`, and the browser session carries an ID token:
+the app classifies it as a person (`ADR-0015`, row 8), with the roles assigned to them, and the UI applies the same checks as the API.
+
+**Why a client secret and not a managed-identity federated credential.** Easy Auth can authenticate the app to Entra with a
+federated identity credential that trusts a managed identity, so no secret has to be created or rotated. That is documented for App
+Service (a preview feature: a federated credential on the app registration, the app setting `OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID`, and
+`clientSecretSettingName` pointing at it). **It is not documented for Container Apps**: the Container Apps article on the Microsoft Entra
+provider (updated 2026-02-20) lists only a client secret, and the open issue
+[microsoft/azure-container-apps#1693](https://github.com/microsoft/azure-container-apps/issues/1693) (2026-04-13) reports that the
+Container Apps sidecar treats the sentinel as a literal secret and sign-in fails with `AADSTS7000215`, with an unconfirmed report that a lower-case
+secret name works. The template therefore uses a **client secret that exists only in Key Vault** (`uiSignInClientSecretUri`), with the authorization
+code flow, no token store, an 8 hour session and no redirect to another site. Switch to the federated credential when Container Apps supports it; nothing
+else changes. The secret expires (Entra allows at most 24 months): note the date, rotate it in Key Vault and restart the revision.
+
+1. **Register the redirect URI and allow ID tokens** on the registration from step 1. The redirect URI is the `entraRedirectUri` output of a
+   deployment (`<publicBaseUrl>/.auth/login/aad/callback`), or derive it from `publicBaseUrl`:
+   ```bash
+   az ad app update --id "$API_APP_ID" --web-redirect-uris "https://<app origin>/.auth/login/aad/callback" --enable-id-token-issuance true
+   ```
+2. **Create the client secret and put it straight into Key Vault** (never in a file, parameter or pipeline variable):
+   ```bash
+   SECRET=$(az ad app credential reset --id "$API_APP_ID" --append --display-name "fabricops-ui-signin" --years 1 --query password -o tsv)
+   az keyvault secret set --vault-name <vault> --name fabricops-ui-client-secret --value "$SECRET" --output none
+   unset SECRET
+   ```
+3. **Set** `uiSignInClientSecretUri = 'https://<vault>.vault.azure.net/secrets/fabricops-ui-client-secret'` (and `keyVaultResourceId`) and deploy.
+   If you use `allowedClientApplications`, the template adds the registration's own client id to it, because the browser session is a
+   request from that application.
+4. **Sign in** at `https://<app origin>/.auth/login/aad?post_login_redirect_uri=/ui`. A request without a session still gets `401`, as
+   before (`Return401`): there is no automatic redirect to a login page, because anonymous API calls and the CD smoke test rely on
+   the 401. Notification links already go through the sign-in endpoint. Sign out at `/.auth/logout`.
+5. **Check:** the UI shows your name and your roles at the top. A person with no FabricOps role gets a 403 page, an application token sees the
+   pages but no decision buttons, and a decision from a foreign origin or without the form token is refused (see
+   [docs/security.md](../../docs/security.md), *Web UI and notifications*).
+
+Assign the app roles to people as in step 1 (`FabricOps.Reader` to read, `FabricOps.Operator` / `FabricOps.PlatformAdmin` to decide).
+The roles reach the UI in the ID token's `roles` claim; if they do not, the registration's app roles are not assigned to the person or the
+group (**Enterprise applications > Users and groups**).
+
+**Several replicas.** The form tokens are signed with a per-process random key unless `uiCsrfSecretUri` is set. Set it (any long random value in
+Key Vault) before `maxReplicas` is raised, or a form rendered by one replica is refused by another. Also note that the notification outbox is in
+memory and the rate limits are per replica ([ADR-0018](../../docs/adr/0018-notifications-and-web-ui.md)).
+
 ## Cross-tenant Fabric access (service principal + Key Vault)
 
 Use this when the Fabric tenant is a **different Entra tenant** from the one that hosts this deployment. A managed identity exists only in the tenant that hosts it and cannot be granted access to another tenant's Fabric, so FabricOps signs in as a **service principal registered in the Fabric tenant** (`ORQENTIS_AUTH_MODE=service_principal`). Its secret or certificate is a **Key Vault reference** that Container Apps resolves with the reader managed identity. No credential value is ever a Bicep parameter, an output, a CI variable or a file in the repository. An example parameter file is [`examples/cross-tenant.bicepparam`](examples/cross-tenant.bicepparam).
@@ -432,4 +513,4 @@ done
 bash scripts/validate-bicep.sh      # main.bicep, main.bicepparam, examples and env/*.bicepparam, plus the prod write-switch check
 ```
 
-The `env/*.bicepparam` files read the image, registry and API client id from environment variables (`CONTAINER_IMAGE`, `ACR_LOGIN_SERVER`, `ACR_RESOURCE_ID`, `ENTRA_API_CLIENT_ID`, and optionally `FABRIC_MODE`) with no defaults; `scripts/validate-bicep.sh` supplies placeholders. CI (`.github/workflows/ci.yml`) runs the build steps and `scripts/validate-bicep.sh` on every push and pull request, and `.github/workflows/whatif.yml` shows the what-if for `dev` on pull requests.
+The `env/*.bicepparam` files read the image, registry and API client id from environment variables (`CONTAINER_IMAGE`, `ACR_LOGIN_SERVER`, `ACR_RESOURCE_ID`, `ENTRA_API_CLIENT_ID`, and optionally `FABRIC_MODE`) with no defaults; `scripts/validate-bicep.sh` supplies placeholders. CI (`.github/workflows/ci.yml`) runs the build steps and `scripts/validate-bicep.sh` on every push and pull request, and `.github/workflows/bicep-diff.yml` posts an offline diff of what each environment would deploy (`bicep snapshot`, no Azure access) on pull requests. The deploy job records the real `az deployment group what-if` with the environment's own deploy identity just before it deploys.

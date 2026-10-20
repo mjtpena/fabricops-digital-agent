@@ -16,6 +16,8 @@ from orqentis.domain.common import new_id
 from orqentis.domain.incidents import ApprovalState, Incident, IncidentStatus, TimelineKind
 from orqentis.domain.principals import Principal, PrincipalKind
 from orqentis.incidents.service import IncidentService
+from orqentis.notifications import events as notification_events
+from orqentis.notifications.sink import NOOP_SINK, NotificationSink
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
 from orqentis.observability.metrics import DISABLED, Metrics
@@ -74,6 +76,7 @@ class ApprovalService:
         clock: Clock,
         *,
         ttl: timedelta,
+        notifications: NotificationSink = NOOP_SINK,
         metrics: Metrics = DISABLED,
     ) -> None:
         self._provider = provider
@@ -82,6 +85,7 @@ class ApprovalService:
         self._clock = clock
         self._ttl = ttl
         self._metrics = metrics
+        self._notifications = notifications
         self._locks: dict[str, tuple[asyncio.Lock, int]] = {}
 
     @property
@@ -165,6 +169,7 @@ class ApprovalService:
                 "fingerprint": approval.action_fingerprint,
             },
         )
+        self._notifications.publish(notification_events.approval_requested(approval, incident_title=incident.title))
         return approval
 
     async def decide(

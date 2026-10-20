@@ -23,6 +23,8 @@ from orqentis.domain.principals import Principal, PrincipalKind
 from orqentis.fabric.errors import FabricError
 from orqentis.fabric.ports import FabricWriteClient
 from orqentis.incidents.service import IncidentService
+from orqentis.notifications import events as notification_events
+from orqentis.notifications.sink import NOOP_SINK, NotificationSink
 from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
 from orqentis.policies.engine import PolicyEngine
@@ -66,7 +68,9 @@ class ActionGateway:
         clock: Clock,
         *,
         write_enabled: bool,
+        notifications: NotificationSink = NOOP_SINK,
     ) -> None:
+        self._notifications = notifications
         self._policy = policy
         self._approvals = approvals
         self._write = write_client
@@ -243,6 +247,16 @@ class ActionGateway:
                 incident_id=incident.incident_id,
                 details={"approval_id": approval_id, "action_type": action.action_type.value},
             )
+            self._notifications.publish(
+                notification_events.action_outcome(
+                    claimed,
+                    action,
+                    executed_by=principal,
+                    occurred_at=self._clock.now(),
+                    succeeded=False,
+                    detail="UNKNOWN: the write may or may not have happened; a person must reconcile it",
+                )
+            )
             raise
         else:
             action = action.model_copy(
@@ -264,6 +278,16 @@ class ActionGateway:
                 "target_item_id": action.target_item_id,
                 "result": action.result,
             },
+        )
+        self._notifications.publish(
+            notification_events.action_outcome(
+                approval,
+                action,
+                executed_by=principal,
+                occurred_at=self._clock.now(),
+                succeeded=status is GatewayStatus.EXECUTED,
+                detail=message,
+            )
         )
         incident = await self._incidents.get(approval.incident_id)
         update_action_in_incident(incident, action)

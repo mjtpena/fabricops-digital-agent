@@ -88,6 +88,7 @@ class Runtime:
             return
         await container.scheduler.stop()
         await container.investigation_jobs.shutdown()
+        await container.notifications.stop()  # last: the jobs above may still publish while they wind down
         if self._injected is None:
             await container.aclose()
 
@@ -109,6 +110,7 @@ class Runtime:
 
     async def _become_ready(self, container: Container) -> None:
         self._container = container
+        await container.notifications.start()
         if self._settings.scheduler_enabled:
             await container.scheduler.start()
         else:

@@ -32,3 +32,6 @@ var/
 scripts/live-estate/contracts.sandbox.json
 scripts/live-estate/config.env
 scripts/live-estate/*.generated.json
+
+# Offline Bicep snapshots (scripts/bicep-snapshot.sh writes them elsewhere; never commit one)
+infra/bicep/**/*.snapshot.json

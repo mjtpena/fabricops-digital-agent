@@ -447,12 +447,28 @@ def router_module_routes() -> list[APIRoute]:
     return routes
 
 
+def app_api_routes(app: FastAPI) -> list[APIRoute]:
+    """Every API route of a live app: placed on it directly or reached through an included router.
+
+    Newer FastAPI versions keep an included router as one wrapper object instead of copying its routes onto the app,
+    so a router that lives outside ``orqentis.api.routers`` (the web UI's) would otherwise never be looked at.
+    """
+    routes: list[APIRoute] = []
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            routes.append(route)
+        for nested in getattr(getattr(route, "original_router", None), "routes", []):
+            if isinstance(nested, APIRoute):
+                routes.append(nested)
+    return routes
+
+
 def route_violations(app: FastAPI) -> list[str]:
     """Everything wrong with the routes of a live app: unauthenticated, no role guard, loose mutations."""
     violations: list[str] = []
     reviewed = router_module_routes()
-    direct = [r for r in app.routes if isinstance(r, APIRoute)]  # an @app.post() placed on the app itself
-    for route in [*reviewed, *direct]:
+    direct = app_api_routes(app)  # an @app.post() on the app itself, and the routes of every included router
+    for route in {id(r): r for r in [*reviewed, *direct]}.values():
         calls = dependency_calls(route)
         label = f"{sorted(route.methods)} {route.path}"
         if route.path in PUBLIC_PATHS:

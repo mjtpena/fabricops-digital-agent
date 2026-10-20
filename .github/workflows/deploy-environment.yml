@@ -103,6 +103,45 @@ jobs:
             exit 1
           fi
 
+      # What this deployment would change in the live resource group, recorded in the job summary and as an artifact. It
+      # runs here, with this environment's own deploy identity, because ARM what-if performs the same authorization checks
+      # as the deployment: an identity that can preview a deployment can effectively write, which is why no pull-request
+      # identity runs it (the pull request shows an offline Bicep diff instead, bicep-diff.yml). The environment's approval
+      # happens before any step of this job runs, so this is a record of the change, not a review gate. A failing preview
+      # is reported but does not stop the deployment: the deployment validates the template itself.
+      # Only paths and change types are published, never values: the template reads keys with listKeys() and a what-if
+      # payload can contain them. The raw payload stays on the runner and is deleted.
+      - name: What-if (record of the change)
+        id: whatif
+        continue-on-error: true
+        run: |
+          mkdir -p whatif-out
+          raw="$RUNNER_TEMP/whatif-raw.json"
+          trap 'rm -f "$raw"' EXIT
+          az deployment group what-if \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "fabricops-whatif-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --parameters "infra/bicep/env/${DEPLOY_ENVIRONMENT}.bicepparam" \
+            --result-format FullResourcePayloads \
+            --no-pretty-print \
+            --output json > "$raw"
+          python3 -I scripts/whatif_summary.py "$raw" "$DEPLOY_ENVIRONMENT" > "whatif-out/whatif-summary-${DEPLOY_ENVIRONMENT}.md"
+          cat "whatif-out/whatif-summary-${DEPLOY_ENVIRONMENT}.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: What-if did not complete
+        if: steps.whatif.outcome == 'failure'
+        run: |
+          echo "::warning::The what-if preview for ${DEPLOY_ENVIRONMENT} failed (see the step log). The deployment continues; it validates the template itself."
+          echo "### What-if for ${DEPLOY_ENVIRONMENT} did not complete (see the step log); deploying anyway" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the what-if summary
+        if: steps.whatif.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bicep-whatif-${{ inputs.environment }}
+          path: whatif-out/whatif-summary-${{ inputs.environment }}.md
+          retention-days: 30
+
       - name: Deploy (az deployment group create)
         id: deploy
         run: |

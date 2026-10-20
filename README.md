@@ -170,6 +170,20 @@ deploy are only made safe by the PostgreSQL system of record, until then deploy 
 (see [infra/bicep/README.md](infra/bicep/README.md)). See [ADR-0013](docs/adr/0013-scheduler-lease-and-async-investigation-jobs.md) and
 [docs/architecture.md](docs/architecture.md#13-autonomous-runtime).
 
+### Notifications and the web UI
+
+A person learns about an incident within about a minute of its detection and can act on it from a browser. With a notifier
+configured (`ORQENTIS_NOTIFIER=teams_workflows` or `webhook`) the app posts a card or a JSON message when an incident
+**opens** or is **escalated**, when an **approval is requested** and when an approved action **ran or failed**, each with a
+link into the **web UI** under `/ui`: incident list, incident detail, the report (every statement labelled
+FACT / INFERENCE / RECOMMENDATION with its evidence ids), approvals with approve / reject / execute and a comment, and audit
+verification. The UI is server-rendered (no script), uses the API's authorisation guards and services (so the same role,
+requester, expiry, fingerprint and policy checks apply) and is protected against cross-site requests and injected markup.
+Sending is in the background: a webhook that is down never slows detection or an investigation. Webhook URLs are Key Vault
+references and are called only after an SSRF check. Nothing is sent by default and `make demo` stays offline.
+See [docs/teams-notifications.md](docs/teams-notifications.md) to set up Teams,
+[ADR-0018](docs/adr/0018-notifications-and-web-ui.md) and [docs/security.md](docs/security.md#12-web-ui-and-notifications).
+
 ### Using the LLM investigator
 
 The deterministic reasoner is the default, so the demo and the tests run offline. To reason with
@@ -221,7 +235,7 @@ through the event store; in mock mode they are replayed from fixtures.
 | 7. REST API | Done |
 | 8. Real Fabric read-only adapter | Done. Mocked-transport tests, tests replaying recorded live responses, and a live suite against the sandbox estate (`docs/live-environment.md`, `tests/live`); Viewer cannot read semantic model refresh history (`docs/security.md` section 11) |
 | 9. Eventhouse persistence | Next. `EventStore` port is defined; `LocalEventStore` (SQLite) implemented |
-| 10. Teams integration | Planned. `ApprovalProvider` port is defined; `LocalApprovalProvider` implemented |
+| 10. Notifications and web UI | Done. Teams Workflows and generic webhook notifications, and a server-rendered UI under `/ui` (ADR-0018). Teams Adaptive Card approvals stay deferred (ADR-0010) |
 
 Definition of done (spec §32):
 
@@ -254,6 +268,8 @@ src/orqentis/
   storage/        SQLite event store, incident repository, evidence store, dependency store
   reports/        incident report model, builder and Markdown renderer
   api/            FastAPI application
+  notifications/  Notifier port, Teams / webhook / null adapters, SSRF guard, bounded outbox
+  ui/             server-rendered web UI under /ui (Jinja2 templates, CSRF tokens, security headers)
   config/         settings and clock
   observability/  structured logging, OpenTelemetry, redaction, audit trail
 runbooks/         version-controlled Markdown/YAML runbooks
@@ -275,6 +291,7 @@ schemas/          JSON Schema of the contracts file (generated from the model)
 * [Delivery](docs/delivery.md): CI/CD pipeline, OIDC setup, environments, releases, rollback
 * [Operations](docs/operations.md): on-call guide, what each alert means, restore, secret rotation, upgrade and rollback, pausing the scheduler
 * [Cost](docs/cost.md): every billable resource, its default size and list price, and how to keep a sandbox cheap
+* [Teams notifications](docs/teams-notifications.md): create the Workflows webhook, store it in Key Vault, check and troubleshoot
 * [ADRs](docs/adr): recorded architecture decisions
 
 ## Licence

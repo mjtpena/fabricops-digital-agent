@@ -92,7 +92,7 @@ Attribute values are bounded: enum members and our own collector, job and tool n
 | `orqentis.scheduler.job.duration` (s) | histogram | `job`, `outcome` | Job run time |
 | `orqentis.scheduler.lease.changes` | counter | `event` = `acquired`/`lost` | This replica gained or lost the leader lease |
 | `orqentis.scheduler.leader` | gauge | none | `1` while this replica holds the lease |
-| `orqentis.notifications` | counter | `channel`, `outcome` | Hook for the notifier (WS8); nothing emits it yet |
+| `orqentis.notifications` | counter | `channel` = `teams_workflows`/`webhook`, `outcome` = `sent`/`failed`/`dropped`/`abandoned` | How each notification ended (retries are attempts, not outcomes): `failed` is a refusal or exhausted attempts, `dropped` an outbox that was full, `abandoned` a shutdown |
 | `orqentis.audit.verifications` | counter | `result` = `valid`/`invalid`/`error` | Scheduled audit verifications |
 
 **What a collection outcome means.** `success`: every collector and scope worked. `degraded`: some failed, at least one

@@ -188,7 +188,14 @@ def test_the_webhook_is_secure_and_receivers_are_never_in_a_parameter_file() -> 
                 continue
             if "alertTeamsWebhookUri" in line:
                 assert "readEnvironmentVariable('ALERT_TEAMS_WEBHOOK_URI', '')" in line, f"{path.name}: {line}"
-        assert not re.search(r"https?://\S*(webhook|logic\.azure|office\.com)", body, re.I), path.name
+        # A webhook endpoint is a secret; a Key Vault secret URI (a reference the credential guard checks) is not.
+        for url in re.findall(r"https?://[^\s'\"]+", body):
+            if ".vault." in url:
+                continue
+            assert not re.search(r"webhook|logic\.azure|office\.com|powerplatform|powerautomate", url, re.I), (
+                path.name,
+                url,
+            )
         emails = re.findall(r"[\w.+-]+@([\w-]+\.[\w.-]+)", body)
         assert all(domain in {"example.com", "example.org", "contoso.com"} for domain in emails), (path.name, emails)
         if "alertEmailReceivers" in body and path.parent.name == "env":

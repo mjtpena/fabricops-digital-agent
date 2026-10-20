@@ -39,7 +39,7 @@ name                                  kind       attributes
 ``scheduler.job.duration`` (s)        histogram  job, outcome
 ``scheduler.lease.changes``           counter    event = acquired | lost
 ``scheduler.leader``                  gauge      1 while this replica holds the leader lease, else 0
-``notifications``                     counter    channel, outcome (hook for the notifier; nothing emits it yet)
+``notifications``                     counter    channel, outcome = sent | failed | dropped | abandoned (see below)
 ``audit.verifications``               counter    result = valid | invalid | error
 ====================================  =========  ===========================================================
 
@@ -49,6 +49,11 @@ by a run in which every collector failed (for example an expired credential), by
 A run where only some collectors failed is ``degraded``: the heartbeat advances (FabricOps is not blind) and
 ``collector.runs{outcome=error}`` is what alerts. Alerts use the ``collection.runs`` counter for "no successful
 collection in N minutes" because a counter that is absent is easy to detect; the gauge is for dashboards and people.
+
+**Notifications.** The dispatcher (``notifications/dispatcher.py``) records one outcome per message when it ends;
+retries are attempts, not outcomes. ``sent``: delivered. ``failed``: refused for good, or the attempts ran out.
+``dropped``: the bounded outbox was full and the oldest message made room. ``abandoned``: the process stopped first.
+The channel is the adapter's own name (``teams_workflows``, ``webhook``), never a URL.
 """
 
 from __future__ import annotations
@@ -156,9 +161,9 @@ class Metrics:
             callbacks=[self._observe_leader],
             description="1 while this replica holds the scheduler leader lease",
         )
-        # notifications (hook) and audit
+        # notifications and audit
         self._notifications = meter.create_counter(
-            "orqentis.notifications", description="Notifications sent or failed, by channel"
+            "orqentis.notifications", description="Notifications by how they ended (sent, failed, dropped, abandoned)"
         )
         self._audit_verifications = meter.create_counter(
             "orqentis.audit.verifications", description="Audit chain verifications by result"
@@ -257,7 +262,7 @@ class Metrics:
 
     # ------------------------------------------------------------------------------------------ hooks
     def notification(self, channel: str, outcome: str) -> None:
-        """Hook for the notifier: call with ``outcome`` = ``sent`` or ``failed``."""
+        """A notification ended: ``sent``, ``failed``, ``dropped`` (outbox full) or ``abandoned`` (shutdown)."""
         self._notifications.add(1, {"channel": label(channel), "outcome": label(outcome)})
 
     def audit_verification(self, result: str) -> None:

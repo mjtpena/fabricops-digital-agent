@@ -111,6 +111,17 @@ The instruments and their attributes are listed in `docs/operations.md` and in `
 tests read them back from an in-memory reader (`tests/support/metrics.py`). `ORQENTIS_LLM_INPUT_COST_PER_MILLION_TOKENS` /
 `ORQENTIS_LLM_OUTPUT_COST_PER_MILLION_TOKENS` turn the token counts into the estimated-cost metric.
 
+### Running the web UI and notifications locally
+
+`make serve` serves the UI at `http://127.0.0.1:8000/ui`. A browser cannot send the `X-Orqentis-User` / `X-Orqentis-Roles` development
+headers, so use a header-injecting browser extension, or `curl -H 'X-Orqentis-User: you@contoso.com' -H 'X-Orqentis-Roles: FabricOps.Operator'
+http://127.0.0.1:8000/ui/incidents`. A decision form posts with an `Origin` header, which browsers add; the CSRF token comes from the page.
+
+Notifications are off (`ORQENTIS_NOTIFIER=null`). The SSRF guard refuses loopback and private addresses on purpose, so a local receiver cannot be the
+target; use a public request-inspection endpoint for the generic webhook (`ORQENTIS_NOTIFIER=webhook`, `ORQENTIS_NOTIFY_WEBHOOK_URL`,
+`ORQENTIS_PUBLIC_BASE_URL=http://localhost:8000`), or a Teams Workflows webhook ([docs/teams-notifications.md](teams-notifications.md)), and check the setup
+with `orqentis notify-test`. The tests use fakes and `httpx.MockTransport`; nothing in them touches the network.
+
 ### Running the investigator on an LLM
 
 ```bash

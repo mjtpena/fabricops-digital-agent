@@ -18,12 +18,14 @@ from orqentis.bootstrap import Container, build_container
 from orqentis.config.clock import FixedClock
 from orqentis.domain.agent import ModelUsage
 from orqentis.domain.principals import AGENT_PRINCIPAL
+from orqentis.notifications.dispatcher import NotificationDispatcher
 from orqentis.runtime.investigations import InvestigationTrigger
 from orqentis.runtime.service import Runtime
 from orqentis.tools.models import ToolStatus
 from orqentis.tools.registry import ToolContext
 from tests.conftest import ADMIN, OPERATOR, detect, detect_and_investigate, make_settings
 from tests.support.metrics import MetricsHarness
+from tests.support.notifications import RecordingNotifier
 
 MINUTE = timedelta(minutes=1)
 
@@ -308,3 +310,26 @@ async def test_every_process_start_logs_the_line_the_restart_loop_alert_counts(
         assert started[0].__dict__["environment"] == "local" and "version" in started[0].__dict__
     finally:
         await runtime.stop()
+
+
+# ------------------------------------------------------------------------------------------ notifications
+async def test_a_notification_delivered_by_the_real_composition_is_counted_by_channel(
+    tmp_path: Path, harness: MetricsHarness
+) -> None:
+    notifier = RecordingNotifier()
+    c = await build_container(
+        make_settings(tmp_path, public_base_url="https://fabricops.example.com"),
+        reset=True,
+        metrics=harness.metrics,
+        notifier=notifier,
+    )
+    try:
+        await c.notifications.start()
+        await detect(c)  # opening an incident announces it
+        assert isinstance(c.notifications, NotificationDispatcher)
+        await c.notifications.wait_idle()
+        assert len(notifier.sent) == 1
+        assert harness.total("orqentis.notifications", channel="recording", outcome="sent") == 1
+    finally:
+        await c.notifications.stop()
+        await c.aclose()

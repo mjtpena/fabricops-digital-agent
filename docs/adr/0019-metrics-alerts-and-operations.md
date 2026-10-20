@@ -101,8 +101,12 @@ conditions, and they have a guide for running it.
    things to check, restore, key and secret rotation, upgrade and rollback by digest, retention, scaling and the lease, and
    pausing the scheduler. The cost guide lists every billable resource, its default SKU, the list-price source and the levers
    that keep a sandbox cheap.
-7. **A hook for the notifier.** `Metrics.notification(channel, outcome)` and the instrument `orqentis.notifications` exist; WS8
-   calls it from the notifier. Nothing in this change emits it.
+7. **Notifications are counted when they end.** WS8's dispatcher (ADR-0018) calls `Metrics.notification(channel, outcome)` once per
+   message: `sent`, `failed` (refused for good, or the attempts ran out), `dropped` (the bounded outbox was full) or `abandoned`
+   (the process stopped first), with the adapter's name as the channel. Retries are attempts and are not counted. The call comes
+   before the audit write, so a failing audit trail cannot hide a failed delivery. There is no alert on it yet: a webhook that
+   stays down shows in the workbook and in the audit trail, and an alert on `failed` is a follow-up once the owner has seen the
+   real rate.
 8. **Estimated model cost** needs prices, which differ per model, region and agreement and go stale, so they are settings
    (`ORQENTIS_LLM_INPUT_COST_PER_MILLION_TOKENS`, `..._OUTPUT_...`) and default to 0 (not configured): tokens are always
    counted, `orqentis.llm.cost` is emitted only when a price is set.
