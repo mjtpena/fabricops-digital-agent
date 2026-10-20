@@ -30,9 +30,17 @@ ADMIN = Principal(
 VIEWER = Principal(id="victor.viewer@contoso.com", display_name="Victor", kind=PrincipalKind.HUMAN)
 
 
+# What tells the *test harness* where its services are and whether they are required. These are not application
+# settings, and the service fixtures read them lazily (a session fixture first requested from inside a test is created
+# after this autouse fixture has run), so clearing them would turn "fail: Docker is required" into a silent skip.
+_HARNESS_VARIABLES = ("ORQENTIS_REQUIRE_SERVICES", "ORQENTIS_TEST_")
+
+
 @pytest.fixture(autouse=True)
 def _isolate_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in list(os.environ):
+        if key.startswith(_HARNESS_VARIABLES):
+            continue
         if key.startswith("ORQENTIS_") or key == "APPLICATIONINSIGHTS_CONNECTION_STRING":
             monkeypatch.delenv(key, raising=False)
 
@@ -72,3 +80,18 @@ async def detect_and_investigate(c: Container) -> Incident:
     incident = await detect(c)
     investigated, _ = await c.investigations.investigate(incident.incident_id, actor=OPERATOR)
     return investigated
+
+
+# Service fixtures (PostgreSQL, Azurite, the application on them). Imported last: they use ``make_settings`` above.
+from tests.support.app_fixtures import app_storage  # noqa: E402, F401
+from tests.support.service_fixtures import (  # noqa: E402, F401
+    azurite_server,
+    blob_anchors,
+    blob_contracts_container,
+    blob_epochs,
+    blob_evidence,
+    blob_service,
+    pg,
+    pg_config,
+    postgres_server,
+)

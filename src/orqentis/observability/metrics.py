@@ -41,6 +41,8 @@ name                                  kind       attributes
 ``scheduler.leader``                  gauge      1 while this replica holds the leader lease, else 0
 ``notifications``                     counter    channel, outcome = sent | failed | dropped | abandoned (see below)
 ``audit.verifications``               counter    result = valid | invalid | error
+``audit.anchor.age`` (s)              gauge      age of the newest immutable audit anchor (PostgreSQL backend)
+``contracts.reload.failures``         counter    error_type (a refused or missing contracts file on a reload)
 ====================================  =========  ===========================================================
 
 **Heartbeat.** ``collection.heartbeat`` is the time of the last collection that did not fail outright: the run
@@ -88,6 +90,7 @@ class Metrics:
         self._last_collection_success: float | None = None
         self._approvals_pending: int | None = None
         self._leader = False
+        self._anchor_age: float | None = None
 
         # collection
         self._collector_duration = meter.create_histogram(
@@ -168,6 +171,16 @@ class Metrics:
         self._audit_verifications = meter.create_counter(
             "orqentis.audit.verifications", description="Audit chain verifications by result"
         )
+        meter.create_observable_gauge(
+            "orqentis.audit.anchor.age",
+            callbacks=[self._observe_anchor_age],
+            unit="s",
+            description="Age of the newest immutable audit anchor; absent when none was seen (alert above 2x interval)",
+        )
+        self._contracts_reload_failures = meter.create_counter(
+            "orqentis.contracts.reload.failures",
+            description="Reloads of the estate contracts file that were refused (the previous contracts stay in force)",
+        )
 
     # ------------------------------------------------------------------------------------------ observers
     def _observe_heartbeat(self, options: CallbackOptions) -> Iterable[Observation]:
@@ -180,6 +193,10 @@ class Metrics:
 
     def _observe_leader(self, options: CallbackOptions) -> Iterable[Observation]:
         yield Observation(1 if self._leader else 0)
+
+    def _observe_anchor_age(self, options: CallbackOptions) -> Iterable[Observation]:
+        if self._anchor_age is not None:
+            yield Observation(self._anchor_age)
 
     # ------------------------------------------------------------------------------------------ collection
     def collector_run(self, collector: str, *, seconds: float, errors: int, new_events: int) -> None:
@@ -267,6 +284,13 @@ class Metrics:
 
     def audit_verification(self, result: str) -> None:
         self._audit_verifications.add(1, {"result": label(result)})
+
+    def audit_anchor_age(self, seconds: float | None) -> None:
+        """The age of the newest anchor as the last verification saw it; ``None`` (no anchor) clears the reading."""
+        self._anchor_age = max(seconds, 0.0) if seconds is not None else None
+
+    def contracts_reload_failed(self, error_type: str) -> None:
+        self._contracts_reload_failures.add(1, {"error_type": label(error_type)})
 
 
 DISABLED: Final = Metrics(NoOpMeterProvider().get_meter(METER_NAME))

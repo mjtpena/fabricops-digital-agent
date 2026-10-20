@@ -2,3 +2,7 @@
 # Windows checkouts (core.autocrlf); never check them out with CRLF.
 *.sh text eol=lf
 scripts/live-estate/** text eol=lf
+
+# Migrations are checksummed: the bytes must be the same on every checkout.
+src/orqentis/storage/postgres/migrations/*.sql text eol=lf
+scripts/*.sql text eol=lf

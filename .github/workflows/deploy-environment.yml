@@ -11,6 +11,19 @@ name: Deploy environment
 #   AZURE_RESOURCE_GROUP resource group to deploy into (rg-fabricops-<environment>)
 #   ENTRA_API_CLIENT_ID  client id of this environment's "Orqentis FabricOps API" app registration
 #   FABRIC_MODE          optional: overrides fabricMode for this environment ('mock' or 'rest')
+#   POSTGRES_ENTRA_ADMIN_OBJECT_ID  object id of the Entra group (or user or service principal) that administers this
+#                        environment's PostgreSQL server (identifier, not a secret)
+#   POSTGRES_ENTRA_ADMIN_NAME       its name (for a group, the display name)
+#   POSTGRES_ENTRA_ADMIN_TYPE       optional: Group (default), User or ServicePrincipal
+#   POSTGRES_EXISTING_SERVER_NAME   optional: use this existing server (for example a restore) instead of creating one
+#   EVIDENCE_IMMUTABILITY_LOCKED    'true' or 'false': whether the evidence immutability policy is Locked. REQUIRED in prod
+#                        (an explicit decision: Locked is irreversible for the retention period and needs the owner's
+#                        sign-off; the first deployment says 'false'), optional elsewhere (default 'false')
+#   AUDIT_OPERATORS_OBJECT_ID       optional: object id of the Entra group of operators who may open an audit epoch after a
+#                        restore (Storage Blob Data Contributor on the audit-epochs container only)
+#   CONTAINER_APPS_SUBNET_ID, POSTGRES_DELEGATED_SUBNET_ID, POSTGRES_PRIVATE_DNS_ZONE_ID   test and prod only (required there):
+#                        resource ids of the subnet that VNet-integrates the Container Apps environment, of the subnet delegated
+#                        to PostgreSQL, and of the PostgreSQL private DNS zone (docs/delivery.md, "Private networking")
 #   ALERT_ACTION_GROUP_ID optional: resource id of the action group the alerts notify, managed outside the pipeline
 #                        (an identifier only; addresses and webhooks never go through a variable, see docs/operations.md)
 #   SMOKE_HEALTH_AUTHENTICATED  optional: 'true' only if /health is NOT excluded from Container Apps authentication
@@ -52,6 +65,15 @@ jobs:
       ACR_RESOURCE_ID: ${{ vars.ACR_RESOURCE_ID }}
       ENTRA_API_CLIENT_ID: ${{ vars.ENTRA_API_CLIENT_ID }}
       RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      # Read by the .bicepparam file. Identifiers come from GitHub variables, never from secrets.
+      POSTGRES_ENTRA_ADMIN_OBJECT_ID: ${{ vars.POSTGRES_ENTRA_ADMIN_OBJECT_ID }}
+      POSTGRES_ENTRA_ADMIN_NAME: ${{ vars.POSTGRES_ENTRA_ADMIN_NAME }}
+      POSTGRES_EXISTING_SERVER_NAME: ${{ vars.POSTGRES_EXISTING_SERVER_NAME }}
+      AUDIT_OPERATORS_OBJECT_ID: ${{ vars.AUDIT_OPERATORS_OBJECT_ID }}
+      # Resource ids of the private network (identifiers, not secrets); test and prod read them, dev does not.
+      CONTAINER_APPS_SUBNET_ID: ${{ vars.CONTAINER_APPS_SUBNET_ID }}
+      POSTGRES_DELEGATED_SUBNET_ID: ${{ vars.POSTGRES_DELEGATED_SUBNET_ID }}
+      POSTGRES_PRIVATE_DNS_ZONE_ID: ${{ vars.POSTGRES_PRIVATE_DNS_ZONE_ID }}
       # Read by infra/bicep/env/*.bicepparam. An identifier, not a receiver: empty means the template manages its own group.
       ALERT_ACTION_GROUP_ID: ${{ vars.ALERT_ACTION_GROUP_ID }}
     steps:
@@ -60,10 +82,13 @@ jobs:
         with:
           persist-credentials: false
 
-      # FABRIC_MODE is read by the .bicepparam files only when set; an empty value must not shadow their default.
+      # FABRIC_MODE and POSTGRES_ENTRA_ADMIN_TYPE are read by the .bicepparam files only when set; an empty value must
+      # not shadow their default.
       - name: Check inputs and configuration
         env:
           FABRIC_MODE_VAR: ${{ vars.FABRIC_MODE }}
+          POSTGRES_ENTRA_ADMIN_TYPE_VAR: ${{ vars.POSTGRES_ENTRA_ADMIN_TYPE }}
+          EVIDENCE_IMMUTABILITY_LOCKED_VAR: ${{ vars.EVIDENCE_IMMUTABILITY_LOCKED }}
           AZURE_CLIENT_ID_VAR: ${{ vars.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID_VAR: ${{ vars.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID_VAR: ${{ vars.AZURE_SUBSCRIPTION_ID }}
@@ -75,7 +100,7 @@ jobs:
           [[ -f "infra/bicep/env/${DEPLOY_ENVIRONMENT}.bicepparam" ]] || { echo "::error::infra/bicep/env/${DEPLOY_ENVIRONMENT}.bicepparam is missing"; exit 1; }
 
           missing=()
-          for name in AZURE_CLIENT_ID_VAR AZURE_TENANT_ID_VAR AZURE_SUBSCRIPTION_ID_VAR ACR_LOGIN_SERVER ACR_RESOURCE_ID ENTRA_API_CLIENT_ID RESOURCE_GROUP; do
+          for name in AZURE_CLIENT_ID_VAR AZURE_TENANT_ID_VAR AZURE_SUBSCRIPTION_ID_VAR ACR_LOGIN_SERVER ACR_RESOURCE_ID ENTRA_API_CLIENT_ID RESOURCE_GROUP POSTGRES_ENTRA_ADMIN_OBJECT_ID POSTGRES_ENTRA_ADMIN_NAME; do
             [[ -n "${!name:-}" ]] || missing+=("${name%_VAR}")
           done
           if ((${#missing[@]} > 0)); then
@@ -89,8 +114,55 @@ jobs:
             exit 1
           fi
 
+          # Outside dev the network is private (the template refuses a public PostgreSQL server there): the ids of the two
+          # subnets and of the private DNS zone must be set, and must be resource ids.
+          if [[ "$DEPLOY_ENVIRONMENT" != "dev" ]]; then
+            for name in CONTAINER_APPS_SUBNET_ID POSTGRES_DELEGATED_SUBNET_ID POSTGRES_PRIVATE_DNS_ZONE_ID; do
+              if [[ -z "${!name:-}" ]]; then
+                echo "::error::Missing GitHub variable for environment '${DEPLOY_ENVIRONMENT}': ${name} (private networking is required outside dev, docs/delivery.md)"
+                exit 1
+              fi
+              if [[ ! "${!name}" =~ ^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.Network/ ]]; then
+                echo "::error::${name} must be an Azure resource id under Microsoft.Network, got '${!name}'"
+                exit 1
+              fi
+            done
+          fi
+
+          # The optional audit operators group is an Entra object id (a GUID) when it is set.
+          if [[ -n "$AUDIT_OPERATORS_OBJECT_ID" && ! "$AUDIT_OPERATORS_OBJECT_ID" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::AUDIT_OPERATORS_OBJECT_ID must be empty or the object id (a GUID) of the Entra group of audit operators"
+            exit 1
+          fi
+
+          # The PostgreSQL administrator is an Entra object id (a GUID) and a name, never a credential.
+          if [[ ! "$POSTGRES_ENTRA_ADMIN_OBJECT_ID" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::POSTGRES_ENTRA_ADMIN_OBJECT_ID must be the object id (a GUID) of the Entra group, user or service principal that administers PostgreSQL"
+            exit 1
+          fi
+
+          # Whether the evidence immutability policy is Locked: an explicit decision in prod (no default, because Locked is
+          # irreversible for the retention period), optional elsewhere. Exported only when set, so an empty variable never
+          # shadows the .bicepparam default; anything but true or false is refused.
+          case "$EVIDENCE_IMMUTABILITY_LOCKED_VAR" in
+            true | false) echo "EVIDENCE_IMMUTABILITY_LOCKED=${EVIDENCE_IMMUTABILITY_LOCKED_VAR}" >> "$GITHUB_ENV" ;;
+            "")
+              if [[ "$DEPLOY_ENVIRONMENT" == "prod" ]]; then
+                echo "::error::EVIDENCE_IMMUTABILITY_LOCKED must be set to true or false on the prod environment: whether the evidence immutability policy is Locked is an explicit decision (docs/delivery.md, section 7)"
+                exit 1
+              fi
+              ;;
+            *) echo "::error::EVIDENCE_IMMUTABILITY_LOCKED must be true or false, got '${EVIDENCE_IMMUTABILITY_LOCKED_VAR}'"; exit 1 ;;
+          esac
+
           if [[ -n "$FABRIC_MODE_VAR" ]]; then
             echo "FABRIC_MODE=${FABRIC_MODE_VAR}" >> "$GITHUB_ENV"
+          fi
+          if [[ -n "$POSTGRES_ENTRA_ADMIN_TYPE_VAR" ]]; then
+            case "$POSTGRES_ENTRA_ADMIN_TYPE_VAR" in
+              Group | User | ServicePrincipal) echo "POSTGRES_ENTRA_ADMIN_TYPE=${POSTGRES_ENTRA_ADMIN_TYPE_VAR}" >> "$GITHUB_ENV" ;;
+              *) echo "::error::POSTGRES_ENTRA_ADMIN_TYPE must be Group, User or ServicePrincipal, got '${POSTGRES_ENTRA_ADMIN_TYPE_VAR}'"; exit 1 ;;
+            esac
           fi
 
       - name: Azure login (OIDC)
@@ -157,6 +229,7 @@ jobs:
             --output json)"
           fqdn="$(printf '%s' "$outputs" | python3 -c 'import json, sys; print(json.load(sys.stdin)["containerAppFqdn"]["value"])')"
           app="$(printf '%s' "$outputs" | python3 -c 'import json, sys; print(json.load(sys.stdin)["containerAppName"]["value"])')"
+          pg="$(printf '%s' "$outputs" | python3 -c 'import json, sys; print(json.load(sys.stdin)["postgresServerFqdn"]["value"])')"
           echo "fqdn=${fqdn}" >> "$GITHUB_OUTPUT"
           echo "app=${app}" >> "$GITHUB_OUTPUT"
           {
@@ -165,6 +238,7 @@ jobs:
             echo "* Commit: \`${GITHUB_SHA}\`"
             echo "* Image: \`${CONTAINER_IMAGE}\`"
             echo "* Endpoint: https://${fqdn}"
+            echo "* PostgreSQL: \`${pg}\` (first deployment of an environment: run the bootstrap step, infra/bicep/README.md section 3a)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The federated token from the first login is short-lived and the deployment can take several minutes, so sign

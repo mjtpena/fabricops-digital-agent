@@ -45,6 +45,13 @@ class AuditVerification(BaseModel):
     records: int
     first_invalid_sequence: int | None = None
     reason: str | None = None
+    # How fresh the immutable side is (PostgreSQL backend with anchors; None where nothing is anchored by design). A
+    # chain can be "valid" because there is nothing to contradict it: a missing storage role or a stopped anchor job
+    # looks exactly like that, so the age of the newest anchor is part of the answer. Alert when it exceeds twice the
+    # anchor interval (the scheduled verification reads these).
+    has_anchor: bool | None = None
+    last_anchor_sequence: int | None = None
+    last_anchor_age_seconds: float | None = None
 
 
 class AuditTrail(Protocol):
@@ -71,6 +78,11 @@ def _digest(prev_hash: str, body: dict[str, Any]) -> str:
 
 def _body(record: AuditRecord) -> dict[str, Any]:
     return record.model_dump(mode="json", exclude={"hash"})
+
+
+def record_digest(prev_hash: str, record: AuditRecord) -> str:
+    """The hash that links ``record`` to its predecessor: the one definition every audit adapter uses."""
+    return _digest(prev_hash, _body(record))
 
 
 class LocalAuditLog:

@@ -100,6 +100,8 @@ class AuditVerificationTask:
                         "reason": redact_text(outcome.reason or "")[:_MAX_REASON],
                     },
                 )
+        if anchor is not None:
+            self._metrics.audit_anchor_age(anchor.last_anchor_age_seconds)  # None (no anchor yet) clears the reading
         result = AuditCheck("invalid" if failures else "valid", chain.records, failures)
         self._metrics.audit_verification(result.result)
         if result.valid:

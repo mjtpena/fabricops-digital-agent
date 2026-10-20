@@ -251,6 +251,8 @@ def emitted_attributes() -> dict[str, set[str]]:
     m.set_leader(True)
     m.notification("c", "sent")
     m.audit_verification("valid")
+    m.audit_anchor_age(1.0)
+    m.contracts_reload_failed("ContractsInvalidError")
     return {name: h.attribute_keys(name) for name in h.names()}
 
 

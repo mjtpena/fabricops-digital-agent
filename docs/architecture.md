@@ -56,15 +56,19 @@ sequenceDiagram
 | `FabricWriteClient` | `fabric.ports` | `DisabledFabricWriteClient` (default), `MockFabricWriteClient` | REST write adapter | Write adapter deliberately not built (MVP is read-only) |
 | `TokenProvider` | `fabric.rest.auth` | `AzureIdentityTokenProvider` over `DefaultAzureCredential` / managed / workload identity / environment, with the configured authority host and scopes (sovereign clouds) | same | Implemented |
 | `LineageScanner` | `contracts.lineage` | none in the runtime | `PowerBiScanner` (Power BI admin Scanner API), used only by `orqentis contracts scaffold --scanner` under an interactive administrator sign-in | Implemented (CLI only) |
-| `EventStore` | `storage.event_store` | `LocalEventStore` (SQLite) | PostgreSQL (the system of record, ADR-0008). Its `read_after` must return a gap-free, committed prefix (see ADR-0013 §7) | Local implemented; the PostgreSQL adapter arrives with the system of record |
-| `EvidenceStore` | `storage.evidence_store` | `LocalEvidenceStore` (filesystem, immutable) | OneLake (ADLS Gen2 API) | Local implemented |
-| `IncidentRepository` | `storage.incidents` | `SqliteIncidentRepository` | Eventhouse / Azure SQL (decision open, ADR-0003) | Local implemented |
-| `DependencyStore` | `topology.graph` | `SqliteDependencyStore`, `InMemoryDependencyStore` | relational tables | Implemented |
-| `ApprovalProvider` | `approvals.provider` | `LocalApprovalProvider` (SQLite, API-driven) | `TeamsApprovalProvider` (Adaptive Cards) | Local implemented; Teams card approvals are deferred (ADR-0010) |
+| `EventStore` | `storage.event_store` | `LocalEventStore` (SQLite) | `PostgresEventStore` (the system of record, ADR-0008/0017). Appends are serialised with an advisory lock so `read_after` returns a gap-free, committed prefix (ADR-0013 §7) | Both implemented |
+| `EvidenceStore` | `storage.evidence_store` | `LocalEvidenceStore` (filesystem, immutable) | `BlobEvidenceStore` (Blob API, Entra auth, write-once, version-level immutability; OneLake by URL) | Both implemented |
+| `IncidentRepository` | `storage.incidents` | `SqliteIncidentRepository` | `PostgresIncidentRepository` (incident numbers from a counter row) | Both implemented |
+| `DependencyStore` | `topology.graph` | `SqliteDependencyStore`, `InMemoryDependencyStore` | `PostgresDependencyStore` | Implemented |
+| `ApprovalProvider` | `approvals.provider` | `LocalApprovalProvider` (SQLite, API-driven) | `PostgresApprovalProvider` (compare-and-set on `revision`); `TeamsApprovalProvider` (Adaptive Cards) later | Both implemented; Teams is milestone 10 |
 | `Notifier` (behind `NotificationSink` and the dispatcher) | `notifications.port` | `TeamsWorkflowsNotifier`, `GenericWebhookNotifier`, `NullNotifier` | the same, plus a durable outbox on the PostgreSQL storage | Implemented (ADR-0018) |
-| `AuditTrail` | `observability.audit` | `LocalAuditLog` (hash-chained JSONL) | append-only Eventhouse table / immutable storage | Local implemented |
+| `AuditTrail` | `observability.audit` | `LocalAuditLog` (hash-chained JSONL) | `PostgresAuditTrail` (chain head row `FOR UPDATE`; head anchored to immutable blobs through `AuditAnchorStore`) | Both implemented |
 | `Reasoner` | `agents.reasoning` | `RuleBasedReasoner` | `AgentFrameworkReasoner` (Azure OpenAI or Foundry via Microsoft Agent Framework) | Both implemented |
-| `LeaderLease` | `runtime.lease` | `InProcessLeaderLease` (single replica) | database-backed lease (PostgreSQL system of record) | In-process implemented |
+| `LeaderLease` | `runtime.lease` | `InProcessLeaderLease` (single process) | `PostgresLeaderLease` (database clock, fencing generation; fenced writes in `runtime.fencing`) | Both implemented |
+| `JobStore` | `runtime.job_store` | `InMemoryJobStore` | `PostgresJobStore` (unique active job per incident, `FOR UPDATE SKIP LOCKED` claims, heartbeats) | Both implemented |
+| `Mutex` | `runtime.mutex` | `InProcessMutex` | `PostgresMutex` (advisory lock on a dedicated connection) | Both implemented |
+| `AuditAnchorStore` | `observability.anchors` | `LocalAuditAnchorStore` | `BlobAuditAnchorStore` (write-once blobs in an immutable container; the name carries the full hash) | Both implemented |
+| `EpochMarkerStore` | `observability.epochs` | `LocalEpochMarkerStore` | `BlobEpochMarkerStore` (write-once markers in `audit-epochs`; the application's identity can only read it, an operator group writes it) | Both implemented |
 | `Collector` | `telemetry.collectors` | pipeline runs, refreshes, capacity, static replay | Eventhouse-backed capacity / schema collectors | Implemented for REST-available data |
 | `DetectionRule` | `incidents.detection` | `PipelineFailureRule` | more rules per secondary scenario | Implemented for the primary scenario |
 | `InvestigationWorkflow` | `incidents.workflows.base` | `PipelineFailureWorkflow` | refresh failure, SLA, drift workflows | Implemented for the primary scenario |
@@ -80,6 +84,14 @@ that, an inference from its name (`topology/environment.py`); items inherit it u
 adapter resolves it once, so detection severity and the policy engine see the same value. Scaffold drafts a
 contracts file through the read-only `FabricClient` port; the draft is reviewed and never applied
 automatically.
+
+Where the file comes from depends on the storage backend (ADR-0017 section 12): `ORQENTIS_CONTRACTS_PATH` (a file) for
+local and mock runs, otherwise, in a deployed environment, the `contracts/estate.json` **blob** that a person uploads and
+the app can only read (`ContractsSource` in `contracts/source.py`; the Blob implementation is in the Blob adapter
+package). The catalog refresh re-reads it on every replica: an unchanged SHA-256 is a no-op, a changed one is validated,
+applied in place and audited (`contracts.loaded` with the SHA-256 and blob version), and an invalid or missing one raises
+the typed error while the last good contracts stay in force. At start-up a missing or invalid blob leaves the app not
+ready (`/health/ready` 503, `build_failed`), retried with backoff, never a crash loop.
 
 ## 4. Domain model
 
@@ -371,3 +383,35 @@ router, wraps the existing exception handlers so a `/ui` error is an HTML page w
 
 The structural route test (`tests/integration/test_api_identity.py`) walks every route of the live app, including routers that are not
 under `orqentis.api.routers`, and fails for a route without authentication, a role guard, or (for a mutation) the human-only guard.
+
+## 15. Storage and replicas
+
+`ORQENTIS_STORAGE_BACKEND` selects one of two compositions of the storage ports (`bootstrap.py`):
+
+| | `local` (development, tests, mock mode, `make demo`) | `postgres` (required in `dev`, `test`, `prod`) |
+|---|---|---|
+| Events, incidents, dependencies, approvals | SQLite files under `ORQENTIS_DATA_DIR` | PostgreSQL tables (`orqentis.storage.postgres`) |
+| Audit trail | hash-chained JSONL file | hash chain in PostgreSQL, head anchored to immutable blobs |
+| Evidence and reports | files | Blob storage (`orqentis.storage.blob`), OneLake by URL |
+| Leader lease, investigation jobs, mutex | in process | PostgreSQL (database clock, fencing, `SKIP LOCKED`) |
+| Replicas | 1 | 2 or more; revisions may overlap during a deploy |
+
+What makes two or more replicas safe ([ADR-0017](adr/0017-postgresql-system-of-record.md)):
+
+* **Event cursor.** Appends take an advisory lock, so the sequence is commit order and `read_after` is a gap-free
+  committed prefix. A bare identity column would let a late commit be skipped for good.
+* **Approvals.** A decision, an expiry and the execution claim are `UPDATE ... WHERE revision = $n`: one winner.
+* **Audit chain.** An append locks the one head row, so no two records share a predecessor. Verification re-derives
+  the hashes and checks every anchor in immutable storage plus the operator-written epoch marker; the anchor job refuses
+  to anchor a head that contradicts the previous anchor.
+* **Leader.** The lease compares the database clock; every scheduled job runs under a fence, and each write transaction
+  checks it against the lease row (share-locked until commit): a deposed leader's late write is refused.
+* **Detection** is check-then-act, so it runs under a mutex across replicas.
+* **Investigation jobs** are rows: one active job per incident, claimed with `FOR UPDATE SKIP LOCKED` by any replica,
+  kept alive by heartbeats, re-claimed when a worker dies, handed back on a graceful stop.
+* **Schema.** Versioned migrations run as the application's role behind an advisory lock at start-up; they stay
+  compatible with the previous release because the old revision serves while the new one migrates.
+
+Authentication to PostgreSQL and Blob is Microsoft Entra only (the managed identity's token is the database password);
+there is no storage key and no password setting. Backups, point-in-time restore and what happens to evidence and
+audit anchors are in [operations/restore.md](operations/restore.md).

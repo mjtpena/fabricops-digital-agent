@@ -26,6 +26,8 @@ dependencies = [
   "jinja2>=3.1",  # server-rendered web UI (ADR-0018)
   "pyyaml>=6.0",
   "azure-identity>=1.19",
+  "azure-storage-blob>=12.23,<13",  # evidence, reports and audit anchors (adapter package orqentis.storage.blob)
+  "asyncpg>=0.30,<1",  # PostgreSQL system of record (adapter package orqentis.storage.postgres)
   "aiohttp>=3.9",  # async transport for azure-identity credentials
   "agent-framework-core>=1.21,<2",
   "opentelemetry-api>=1.27",
@@ -45,6 +47,7 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.11",
   "types-PyYAML>=6.0",
+  "asyncpg-stubs>=0.30",
   "jsonschema>=4.23",  # tests: the committed contracts schema accepts and rejects what the model does
 ]
 
@@ -81,6 +84,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106", "S108"]
+# Test harness that starts throwaway Docker containers (PostgreSQL, Azurite) and subprocess instances.
+"tests/support/services.py" = ["S603", "S607", "S104"]
 "src/orqentis/api/routers/**" = ["B008"]  # FastAPI Query()/Depends() defaults
 # Fabric notebook definitions run inside the Fabric Spark runtime, which injects the `spark` session global.
 "scripts/live-estate/definitions/*.ipynb" = ["F821"]

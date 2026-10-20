@@ -133,10 +133,18 @@ not served under Easy Auth (they would answer callers with no role).
   `.env.example` contains no secrets.
 * The Application Insights connection string is a Container App secret.
 * The LLM uses Entra ID, not API keys.
+* PostgreSQL accepts an Entra access token only (`passwordAuth` is disabled on the server and no password setting
+  exists in the app); Blob storage has shared-key access disabled. The settings that `auth=none` / `ssl=disable`
+  would open for a local test container are rejected outside `deployment_environment=local`.
 * The contracts file holds declarations, not credentials. Its validation and loading errors name
   paths, ids and positions and never echo values from the file. `contracts scaffold` redacts and
   sanitises what it reads from Fabric (names, data source descriptions) and drops credentials, user info
   and query strings from data source URLs.
+* In a deployed environment the contracts file is a blob in a versioned, soft-deleted container that the app can only
+  read. The SHA-256 and blob version of the contracts in force are written to the audit trail on every (re)load
+  (`contracts.loaded`), so a change to the declared environments is attributable to an upload. A missing, unreadable
+  or invalid blob is a typed error that names the blob's address and the violations, never its content; at start-up it
+  leaves the app not ready, and on a reload it keeps the last good contracts.
 * **A declared environment is a trust decision.** Declaring a PROD workspace as DEV lowers incident
   severity and stops production-only policy rules (`POL-002`, `POL-020`) from matching it. Therefore: only
   *reviewed* entries are enforced (a scaffold draft marked `inferred`, or an `UNKNOWN` entry, never overrides the
@@ -171,10 +179,27 @@ records. The following are audited:
 * agent decisions (reasoner, model, prompt version, token usage, rejected outputs);
 * execution attempts, including every blocked attempt and its reason.
 
-A scheduled job (`audit-verify`, hourly) runs the same verification and, when the storage layer provides one, checks the chain head
-against the latest immutable anchor. A failure is a metric (`orqentis.audit.verifications{result=invalid}`) and an ERROR log line, and
-raises the severity-0 *audit verification failure* alert ([docs/operations.md](operations.md)). The job audits only a change of
-health, never every run, and never repairs the log.
+With the PostgreSQL backend (deployed environments) the chain lives in the database, serialised across replicas by a
+row lock on the chain head, and `audit_records` rejects `UPDATE`, `DELETE` and `TRUNCATE` with triggers (defence in
+depth against bugs). The tamper evidence is the chain plus **anchors**: every 15 minutes the head
+(epoch, sequence, hash) is written once to a blob in a container with version-level immutability, and `orqentis
+audit` / `GET /audit/verify` check that the database still holds the anchored record with the anchored hash. An
+edited record, a removed record, a removed tail, a row slipped in beyond the head, columns edited apart from the
+hashed body, a table rewritten with every hash recomputed (also with the epoch counter moved, also followed by a new
+record and the next scheduled anchor) and a chain cut back and regrown past its anchor are each detected
+(`tests/concurrency/test_audit_chain.py`, `test_audit_anchors.py`). Verification checks **every** anchor, not only the
+latest, and the anchor job refuses to anchor a head that contradicts the previous anchor (ERROR log
+`audit chain verification failed`, scheduled job reported as failed). **Tampering is detectable up to the last anchor**;
+the records after it, at most one anchoring interval, are protected by the chain alone. An audit epoch (opened after a
+restore) needs a marker in a container the application's identity can only read; the operator group that writes it is a
+parameter (`auditOperatorsPrincipalId`).
+After a restore the database can be behind its anchor; that is reported until an operator records the loss with
+`orqentis audit start-epoch` ([ADR-0017](adr/0017-postgresql-system-of-record.md),
+[operations/restore.md](operations/restore.md)).
+A scheduled job (`audit-verify`, hourly) runs the same verification and, with the PostgreSQL backend, `verify_anchor()` (every anchor and epoch
+marker against the stored records, and the age of the newest anchor). A failure is a metric (`orqentis.audit.verifications{result=invalid}`)
+and an ERROR log line, and raises the severity-0 *audit verification failure* alert ([docs/operations.md](operations.md)). The job audits only a
+change of health, never every run, and never repairs the log.
 
 The target architecture ships audit records to an append-only Eventhouse table or immutable
 storage.
@@ -239,8 +264,10 @@ to keep these defences under test.
 
 ## 9. Known gaps (MVP)
 
-* The local stores (SQLite, filesystem) are single-node, and their encryption at rest depends on
-  the host volume. The target is Eventhouse plus OneLake, with Entra ID RBAC.
+* The local stores (SQLite, filesystem) are single-node and for development only: deployed environments refuse to
+  start on them. The PostgreSQL and Blob stores are encrypted at rest by the platform (Microsoft-managed keys;
+  customer-managed keys are a possible follow-up) and reached over TLS 1.2+ (`verify-full`; the Entra access token is the
+  database password, so `require`, which does not verify the server, and `disable` are refused outside `local`).
 * `easy_auth` trusts the front end's header. Do not expose the container without the built-in
   authentication layer.
 * **The app trusts `X-MS-CLIENT-PRINCIPAL` and does not validate bearer tokens itself.** If an externally reachable
@@ -283,20 +310,18 @@ boundaries above:
   bounded and never carry Fabric text or a model-chosen name. The alert action group's receivers (email addresses, a Teams Workflows
   webhook URL, which is a secret) are deployment-time inputs and never appear in the repository, a parameter file or an output.
 
-**Deploys and two writers.** Container Apps (single-revision mode) runs the old and the new revision
-side by side during an update, on the same Azure Files volume, each with its own in-process lease.
-The SQLite stores and the hash-chained audit file are single-writer, so interleaved writes could
-fork the audit chain or contend on the databases. WS1 reduces this (a start delay so the new
-revision does not take the lease while the old one drains, a shutdown that stops the scheduler and
-releases the lease, and an audit log that re-reads its chain head before appending when the file
-grew) but cannot remove it: SMB has no locks, and real multi-writer safety needs the PostgreSQL lease
-and a database-serialised audit chain. **Until then, deploy with the scheduler off
-(`schedulerEnabled = false`) or accept this risk; nothing is deployed before the PostgreSQL work.**
+**Deploys and several writers.** Container Apps (single-revision mode) runs the old and the new revision
+side by side during an update, and test/prod run two replicas. With the PostgreSQL system of record
+([ADR-0017](adr/0017-postgresql-system-of-record.md)) that is safe: the audit chain is serialised by the database
+(one valid chain from any number of writers), approvals are decided and executed with compare-and-set (at most one
+execution per approval), the leader lease uses the database clock and every scheduled write is fenced by the lease
+generation (a deposed leader's late write is refused), detection runs under a cross-replica mutex, and investigation
+jobs are durable rows that any replica claims. The start delay (`schedulerStartupDelaySeconds`) is now only a
+courtesy. Tested with two instances, two OS processes, a killed process and a graceful stop
+(`tests/concurrency`).
 
-Limits: the scheduler's leader lease and the investigation jobs are in-process, which is correct for
-the single replica this deployment runs and not for several. Jobs are lost on restart (their
-incidents are recovered and re-investigated). Durable jobs and a database-backed lease arrive with
-the PostgreSQL system of record.
+Limits: the incident aggregate is still a last-writer-wins upsert (a row version is the follow-up), and rate limits
+are per replica (section 2.3). Detection and manual collection wait for each other for up to two minutes.
 
 ## 11. Least-privilege findings from the live sandbox
 
@@ -434,3 +459,18 @@ multicast, reserved, CGNAT, the Azure host and cloud metadata addresses and IPv4
 redirects are never followed, proxies are ignored; the HTTP client's loggers are pinned to WARNING so a raised log level cannot write the URL (which holds the secret) into a log. Delivery: bounded outbox, dropped-oldest, retries with back-off, one audit record per attempt. What a notification discloses
 (incident title, item and workspace names, severity, action, target, requester) goes to the chat or endpoint the operator configured: choose a private channel, and prefer
 a webhook receiver you control for anything beyond that.
+
+## 13. Storage identities, encryption and network
+
+| Resource | Who can do what | Notes |
+|---|---|---|
+| PostgreSQL Flexible Server | Authentication is Microsoft Entra only (`passwordAuth` disabled). The Entra administrator **group** (parameter) can administer and run `scripts/postgres-bootstrap.sql`; the **reader managed identity** is a database role that owns one schema and may connect, with no superuser, no `CREATE` on the database and nothing in other schemas | The actor (write) identity has no access. In `test` and `prod` the server has **no public endpoint**: VNet integration with a delegated subnet and a private DNS zone, and no "Allow Azure services" firewall rule (the template refuses both); `dev` keeps public access with explicit firewall rules. TLS is required and the app verifies the certificate chain and host name (`verify-full`; `require` is refused outside `local`) |
+| Evidence storage account | Shared-key access disabled, Entra only. The reader identity has **Storage Blob Data Contributor on the `evidence` and `audit-anchors` containers only** and **Storage Blob Data Reader on the `contracts` container only**, never a role on the account. Whoever uploads the contracts file needs Contributor on the `contracts` container alone | Versioning, soft delete and account-level version-level immutability (retention parameter; `Unlocked` until the owner chooses `Locked`, which is irreversible). Blob public access off, TLS 1.2+, no cross-tenant replication |
+| Epoch markers (`audit-epochs`) | The application's identity has `Storage Blob Data Reader` only; a group of operators (`auditOperatorsPrincipalId`) has `Contributor`. Opening an audit epoch after a restore is therefore not something the application, or someone who only holds the database, can do | Immutable like the other containers. Only the deploy identity has management-plane rights on the account, so nobody who runs the application can change an immutability policy |
+| Container App | Has no volume and no storage key. The estate contracts file is read from the `contracts` blob (read-only for the app) | Rate limiting and in-memory caches are per replica |
+
+Encryption at rest is the platform default for both services (Microsoft-managed keys); in transit is TLS. The audit
+anchors make the audit trail verifiable even against someone with full rights on the database, but not against someone
+who can change the immutability policy of the storage account before it is locked: keep the account's own RBAC small and
+lock the policy in production (`EVIDENCE_IMMUTABILITY_LOCKED`, which `prod` must set explicitly: locking is irreversible). Credentials for these services never appear in the repository, in settings or in
+CI: the only secrets in the picture are Container App secrets that Bicep fills from Key Vault references.

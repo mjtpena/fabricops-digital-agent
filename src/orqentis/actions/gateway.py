@@ -57,6 +57,17 @@ class ActionBlockedError(Exception):
         self.message = message
 
 
+class AuditUnavailableError(ActionBlockedError):
+    """The intent to write could not be put on the audit trail, so nothing was written (fail closed)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "AUDIT_UNAVAILABLE",
+            "The audit trail is unavailable, so the action was not executed (no write was attempted). The approval is "
+            "used up; request a new one when the audit trail is back.",
+        )
+
+
 class ActionGateway:
     def __init__(
         self,
@@ -124,10 +135,11 @@ class ActionGateway:
                 decision=decision,
                 message="Read-only action; no approval or mutation required",
             )
-        existing = await self._approvals.find_pending(incident.incident_id, action.fingerprint())
+        existing = await self._approvals.find_open(incident.incident_id, action.fingerprint())
         if existing is not None:
+            # Already asked for, or already granted and not used: that approval stands, nothing new is requested.
             action.approval_id = existing.approval_id
-            action.status = ActionStatus.AWAITING_APPROVAL
+            action.status = existing.proposed_action.status
             approval = existing
         else:
             approval = await self._approvals.request(action, decision, incident=incident, requested_by=principal)
@@ -136,9 +148,67 @@ class ActionGateway:
             action=action,
             decision=decision,
             approval=approval,
-            message=f"ACTION_REQUIRES_APPROVAL: approval {approval.approval_id} must be granted by "
-            f"{approval.required_role} before execution",
+            message=(
+                f"ACTION_REQUIRES_APPROVAL: approval {approval.approval_id} is already granted and not yet used"
+                if approval.status is ApprovalStatus.APPROVED
+                else f"ACTION_REQUIRES_APPROVAL: approval {approval.approval_id} must be granted by "
+                f"{approval.required_role} before execution"
+            ),
         )
+
+    async def _release_unwritten_claim(self, claimed: ApprovalRequest, action: Action) -> Action:
+        """The claim was taken but nothing was written: end it as failed, so it does not look like a write in flight."""
+        failed = action.model_copy(
+            update={
+                "status": ActionStatus.FAILED,
+                "result": {
+                    "code": "AUDIT_UNAVAILABLE",
+                    "message": "the audit trail was unavailable; no write was attempted",
+                },
+                "executed_at": self._clock.now(),
+            }
+        )
+        try:
+            await self._approvals.transition(
+                claimed.model_copy(update={"proposed_action": failed}), expected_revision=claimed.revision
+            )
+        except Exception:
+            _log.error(
+                "could not end the claim of an action that was not written; reconcile it by hand",
+                extra={"approval_id": claimed.approval_id},
+                exc_info=True,
+            )
+        return failed
+
+    async def _return_incident_after_unwritten_claim(
+        self, claimed: ApprovalRequest, failed: Action, principal: Principal
+    ) -> None:
+        """Put the incident back where a failed write leaves it, so it does not stay REMEDIATING with nothing running.
+
+        Best effort: the audit trail is what is unavailable, and recording the transition needs it. The incident's own
+        timeline says what happened either way, and the status change is stored before it is audited.
+        """
+        reason = "The audit trail was unavailable, so the approved action was not executed"
+        try:
+            incident = await self._incidents.get(claimed.incident_id)
+            update_action_in_incident(incident, failed)
+            self._incidents.add_timeline(
+                incident,
+                TimelineKind.ACTION,
+                f"{failed.action_type.value}: {reason}",
+                actor=principal.id,
+                metadata={"approval_id": claimed.approval_id},
+            )
+            if incident.status is IncidentStatus.REMEDIATING:
+                await self._incidents.transition(incident, IncidentStatus.DIAGNOSED, actor=principal.id, reason=reason)
+            else:
+                await self._incidents.save(incident)
+        except Exception:
+            _log.error(
+                "could not return the incident to DIAGNOSED after an action that was not written",
+                extra={"approval_id": claimed.approval_id, "incident_id": claimed.incident_id},
+                exc_info=True,
+            )
 
     async def _block(self, approval: ApprovalRequest, principal: Principal, code: str, message: str) -> None:
         await self._audit.record(
@@ -224,11 +294,42 @@ class ActionGateway:
                 )
             action = action.model_copy(update={"status": ActionStatus.EXECUTING})
             claimed = await self._approvals.transition(
-                approval.model_copy(update={"proposed_action": action}), expected_revision=approval.revision
+                approval.model_copy(update={"proposed_action": action}),
+                expected_revision=approval.revision,
+                enforce_expiry=True,  # judged where the approval is stored, inside the claiming statement itself
             )
             if claimed is None:
+                current = await self._approvals.get(approval_id)
+                if current.revision == approval.revision and current.status is ApprovalStatus.APPROVED:
+                    await self._block(approval, principal, "APPROVAL_EXPIRED", f"Approval {approval_id} has expired")
                 await self._block(approval, principal, "ALREADY_EXECUTED", "This approval has already been used")
             assert claimed is not None  # _block raises
+
+        # Fail closed: the intent to write is on the audit chain BEFORE the write is attempted. If it cannot be
+        # appended (the head row is locked by a stalled writer, the pool is exhausted, the database blips) nothing
+        # reaches Fabric; a write with no record at all is the one thing the approval boundary must not allow.
+        try:
+            await self._audit.record(
+                actor=principal.id,
+                action="action.execute.intent",
+                outcome="RECORDED",
+                incident_id=incident.incident_id,
+                details={
+                    "approval_id": approval_id,
+                    "fingerprint": claimed.action_fingerprint,
+                    "claim_revision": claimed.revision,
+                    "action_type": action.action_type.value,
+                    "target_item_id": action.target_item_id,
+                },
+            )
+        except Exception as exc:
+            _log.error(
+                "audit trail unavailable; the approved write was not attempted",
+                extra={"approval_id": approval_id, "error": type(exc).__name__},
+            )
+            failed = await self._release_unwritten_claim(claimed, action)
+            await self._return_incident_after_unwritten_claim(claimed, failed, principal)
+            raise AuditUnavailableError from exc
 
         try:
             result = await self._write.execute(action, approval=claimed)
@@ -239,14 +340,19 @@ class ActionGateway:
             status, message = GatewayStatus.EXECUTION_FAILED, f"Execution failed: {exc.message}"
         except Exception:
             # The outcome is unknown, so the claim stays EXECUTING: a retry must not repeat a write that may
-            # have happened. A person reconciles it.
-            await self._audit.record(
-                actor=principal.id,
-                action="action.execute",
-                outcome="UNKNOWN",
-                incident_id=incident.incident_id,
-                details={"approval_id": approval_id, "action_type": action.action_type.value},
-            )
+            # have happened. A person reconciles it. (The intent record already says a write was attempted.)
+            try:
+                await self._audit.record(
+                    actor=principal.id,
+                    action="action.execute",
+                    outcome="UNKNOWN",
+                    incident_id=incident.incident_id,
+                    details={"approval_id": approval_id, "action_type": action.action_type.value},
+                )
+            except Exception:
+                _log.error(
+                    "could not audit an unknown write outcome", extra={"approval_id": approval_id}, exc_info=True
+                )
             self._notifications.publish(
                 notification_events.action_outcome(
                     claimed,
@@ -267,18 +373,27 @@ class ActionGateway:
             claimed.model_copy(update={"proposed_action": action}), expected_revision=claimed.revision
         )
         approval = finished or claimed.model_copy(update={"proposed_action": action})
-        await self._audit.record(
-            actor=principal.id,
-            action="action.execute",
-            outcome=action.status.value,
-            incident_id=incident.incident_id,
-            details={
-                "approval_id": approval_id,
-                "action_type": action.action_type.value,
-                "target_item_id": action.target_item_id,
-                "result": action.result,
-            },
-        )
+        try:
+            await self._audit.record(
+                actor=principal.id,
+                action="action.execute",
+                outcome=action.status.value,
+                incident_id=incident.incident_id,
+                details={
+                    "approval_id": approval_id,
+                    "action_type": action.action_type.value,
+                    "target_item_id": action.target_item_id,
+                    "result": action.result,
+                },
+            )
+        except Exception:
+            # The write has happened and the approval says so; the chain has the intent record that names it. Failing
+            # the request now would only hide that from the caller, so say so loudly and let a person reconcile it.
+            _log.error(
+                "audit record of an executed action could not be written; the intent record stands",
+                extra={"approval_id": approval_id, "outcome": action.status.value},
+                exc_info=True,
+            )
         self._notifications.publish(
             notification_events.action_outcome(
                 approval,

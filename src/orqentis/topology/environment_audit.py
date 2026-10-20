@@ -39,9 +39,12 @@ def _drafts_ignored(catalog: EstateCatalog) -> int:
 class EnvironmentChangeRecorder:
     """Logs and audits each environment override once, with the SHA-256 of the contracts file that declared it."""
 
-    def __init__(self, *, contracts_sha256: str, contracts_path: Path | None) -> None:
+    def __init__(
+        self, *, contracts_sha256: str, contracts_path: Path | str | None, contracts_version: str | None = None
+    ) -> None:
         self._sha256 = contracts_sha256
         self._path = contracts_path
+        self._version = contracts_version
         self._audit: AuditTrail | None = None
         self._seen: dict[tuple[str, str], EnvironmentChange] = {}
         self._pending: list[EnvironmentChange] = []
@@ -49,6 +52,14 @@ class EnvironmentChangeRecorder:
     @property
     def changes(self) -> list[EnvironmentChange]:
         return list(self._seen.values())
+
+    def reset(self, *, contracts_sha256: str, contracts_path: Path | str | None, contracts_version: str | None) -> None:
+        """A new version of the contracts is in force: its overrides are reported afresh, tied to its SHA-256."""
+        self._sha256 = contracts_sha256
+        self._path = contracts_path
+        self._version = contracts_version
+        self._seen.clear()
+        self._pending.clear()
 
     async def bind(self, audit: AuditTrail) -> None:
         """Attach the audit trail and write whatever was observed before it existed."""
@@ -97,6 +108,7 @@ class EnvironmentChangeRecorder:
             details={
                 "contracts_sha256": self._sha256,
                 "contracts_path": str(self._path) if self._path is not None else None,
+                "contracts_version": self._version,
                 "environment_overrides": len(changes),
                 "environment_downgrades": sum(1 for c in changes if c.downgrade),
                 "unreviewed_environment_entries_ignored": _drafts_ignored(catalog),

@@ -165,9 +165,11 @@ watermarks), investigates new incidents as background jobs, records SLA state ch
 reloads the estate catalog hourly, applying and auditing what changed. All Fabric calls share one
 concurrency and rate budget. Locally it is off unless you set `ORQENTIS_SCHEDULER_ENABLED=true`.
 Automation stops at the approval boundary: it can investigate and *request* approval, never approve
-or execute. Scheduler and leader lease are in-process, so run **one replica**; two revisions writing the same files during a
-deploy are only made safe by the PostgreSQL system of record, until then deploy with the scheduler off or accept that risk
-(see [infra/bicep/README.md](infra/bicep/README.md)). See [ADR-0013](docs/adr/0013-scheduler-lease-and-async-investigation-jobs.md) and
+or execute. Deployed environments keep their state in the PostgreSQL system of record and Blob storage
+(`ORQENTIS_STORAGE_BACKEND=postgres`, [ADR-0017](docs/adr/0017-postgresql-system-of-record.md)), so the app is stateless: it
+runs as two or more replicas, revisions may overlap during a deploy, one replica holds the scheduler lease, and there is
+one valid audit chain. Locally and in `make demo` the SQLite/filesystem/JSONL adapters are used and nothing needs
+Azure. See [ADR-0013](docs/adr/0013-scheduler-lease-and-async-investigation-jobs.md) and
 [docs/architecture.md](docs/architecture.md#13-autonomous-runtime).
 
 ### Notifications and the web UI
@@ -215,8 +217,9 @@ for review, `TRIGGERS` edges from observed pipeline runs, placeholders for owner
 `schemas/contracts.schema.json` gives editors completion. A workspace's **environment** can be declared by id
 or name pattern and then overrides the name-based guess, which drives incident severity and policy. A Fabric
 tenant in another Entra tenant is reached with a service principal whose secret is a Key Vault reference,
-and sovereign clouds are configuration (`ORQENTIS_AUTHORITY_HOST` and the token scopes). See
-[Development](docs/development.md#contracts-workflow) and the [Bicep guide](infra/bicep/README.md).
+and sovereign clouds are configuration (`ORQENTIS_AUTHORITY_HOST` and the token scopes). In a deployed environment the
+file is a blob that a person uploads and the app only reads, and a running app reloads it without a restart (Bicep
+guide, step 4). See [Development](docs/development.md#contracts-workflow) and the [Bicep guide](infra/bicep/README.md).
 
 The operating identity needs read permissions only (see [docs/security.md](docs/security.md)).
 Fabric has no public API for capacity utilisation or Delta schema history, so those signals arrive
@@ -234,7 +237,7 @@ through the event store; in mock mode they are replayed from fixtures.
 | 6. Policy and approval boundary | Done |
 | 7. REST API | Done |
 | 8. Real Fabric read-only adapter | Done. Mocked-transport tests, tests replaying recorded live responses, and a live suite against the sandbox estate (`docs/live-environment.md`, `tests/live`); Viewer cannot read semantic model refresh history (`docs/security.md` section 11) |
-| 9. Eventhouse persistence | Next. `EventStore` port is defined; `LocalEventStore` (SQLite) implemented |
+| 9. Durable storage | Done (ADR-0008, ADR-0017): PostgreSQL system of record + immutable Blob evidence behind the storage ports, safe at two or more replicas; Eventhouse stays an optional analytics sink |
 | 10. Notifications and web UI | Done. Teams Workflows and generic webhook notifications, and a server-rendered UI under `/ui` (ADR-0018). Teams Adaptive Card approvals stay deferred (ADR-0010) |
 
 Definition of done (spec §32):
@@ -265,7 +268,7 @@ src/orqentis/
   policies/       policy engine and default policy (YAML)
   approvals/      approval provider port, local provider, approval rules
   actions/        action gateway (the only path to a mutation)
-  storage/        SQLite event store, incident repository, evidence store, dependency store
+  storage/        storage ports with local adapters (SQLite, files); postgres/ and blob/ hold the PostgreSQL and Blob adapters
   reports/        incident report model, builder and Markdown renderer
   api/            FastAPI application
   notifications/  Notifier port, Teams / webhook / null adapters, SSRF guard, bounded outbox

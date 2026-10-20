@@ -16,9 +16,18 @@ param containerImage = 'crfabricops.azurecr.io/orqentis-fabricops:0.1.0'
 param containerRegistryName = 'crfabricops'
 param entraClientId = '00000000-0000-0000-0000-000000000000'
 
+// PostgreSQL (Microsoft Entra authentication only): the Entra administrator is required. Placeholders.
+param postgresEntraAdminObjectId = '00000000-0000-0000-0000-000000000000'
+param postgresEntraAdminName = 'sg-fabricops-postgres-admins'
+// A prod deployment: private networking, as in main.bicepparam (a VNet-integrated environment and a private PostgreSQL server).
+param infrastructureSubnetId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-fabricops/subnets/snet-aca'
+param postgresDelegatedSubnetId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-fabricops/subnets/snet-postgres'
+param postgresPrivateDnsZoneId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/privateDnsZones/fabricops.private.postgres.database.azure.com'
+
 param deploymentEnvironment = 'prod'
 param fabricMode = 'rest'
-param contractsPath = '/var/lib/orqentis/contracts/estate.json'
+// The estate contracts file is uploaded to the 'contracts' blob container of the evidence storage account after the
+// deployment (infra/bicep/README.md, Estate contracts).
 
 // The Fabric estate's tenant (ORQENTIS_TENANT_ID and AZURE_TENANT_ID). NOT this deployment's tenant.
 param fabricTenantId = '11111111-1111-1111-1111-111111111111'

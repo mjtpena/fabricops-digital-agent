@@ -1,4 +1,4 @@
-"""Command line entry point: ``orqentis demo | serve | scenarios | runbooks | audit | contracts``."""
+"""Command line entry point: ``orqentis demo | serve | scenarios | runbooks | audit | db | contracts``."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from rich.table import Table
 from orqentis import __version__
 from orqentis.actions.gateway import ActionBlockedError
 from orqentis.bootstrap import Container, build_container, reset_local_state
-from orqentis.config.settings import FabricMode, Settings
+from orqentis.config.settings import FabricMode, Settings, StorageBackend
 from orqentis.contracts.parser import add_contracts_parser
 from orqentis.domain.principals import AGENT_PRINCIPAL, Principal, PrincipalKind
 from orqentis.fabric.fixtures import list_scenarios
@@ -299,9 +299,32 @@ def _cmd_runbooks(settings: Settings, console: Console) -> int:
     return 0
 
 
-async def _cmd_audit(settings: Settings, console: Console) -> int:
+async def _cmd_audit(
+    settings: Settings,
+    console: Console,
+    *,
+    start_epoch_reason: str | None = None,
+    override_verification: str | None = None,
+    disregard_anchors: tuple[str, ...] = (),
+) -> int:
     from orqentis.config.clock import SystemClock
     from orqentis.observability.audit import LocalAuditLog
+
+    if settings.storage_backend is StorageBackend.POSTGRES:
+        from orqentis.db_commands import run_audit_postgres
+
+        return await run_audit_postgres(
+            settings,
+            console,
+            start_epoch_reason=start_epoch_reason,
+            override_verification=override_verification,
+            disregard_anchors=disregard_anchors,
+        )
+    if start_epoch_reason is not None:
+        console.print(
+            "[red]start-epoch applies to the PostgreSQL audit chain only (ORQENTIS_STORAGE_BACKEND=postgres).[/]"
+        )
+        return 2
 
     result = await LocalAuditLog(settings.audit_log_path, SystemClock()).verify()
     console.print(result.model_dump())
@@ -324,8 +347,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("notify-test", help="Send one test notification through the configured notifier")
     sub.add_parser("scenarios", help="List synthetic scenarios")
     sub.add_parser("runbooks", help="Validate and list runbooks")
-    audit = sub.add_parser("audit", help="Verify the audit trail hash chain")
+    audit = sub.add_parser(
+        "audit", help="Verify the audit trail hash chain (and every anchor and epoch marker with PostgreSQL)"
+    )
     audit.add_argument("--data-dir", type=Path, default=None)
+    audit_sub = audit.add_subparsers(dest="audit_command")
+    epoch = audit_sub.add_parser(
+        "start-epoch",
+        help="After a restore: record the loss in the chain and start a new anchor epoch (docs/operations/restore.md)",
+    )
+    epoch.add_argument("--reason", required=True, help="Why: the restore time and the source server")
+    epoch.add_argument(
+        "--override-verification",
+        metavar="WHY",
+        default=None,
+        help="Open the epoch although the chain failed verification beyond being behind its anchors (audited)",
+    )
+    epoch.add_argument(
+        "--disregard-anchor",
+        metavar="NAME",
+        action="append",
+        default=[],
+        help="Object name of a junk anchor (epoch-NNNN/<sequence>-<hash>.json) that verification should stop "
+        "holding against the chain; repeatable; needs --override-verification; recorded in the marker",
+    )
+    db = sub.add_parser("db", help="PostgreSQL system of record: migrate, status, reseed-counters")
+    db.add_argument("db_command", choices=["migrate", "status", "reseed-counters"])
     add_contracts_parser(sub)
     args = parser.parse_args(argv)
     _utf8_stdio()
@@ -344,6 +391,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        try:
+            settings.check_storage_for_environment()
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         _observability(settings, stream_logs=True)
         uvicorn.run(create_app(settings), host=args.host, port=args.port, log_config=None)
         return 0
@@ -355,7 +407,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_runbooks(_settings(), console)
     if args.command == "audit":
         settings = _settings(**({"data_dir": args.data_dir} if args.data_dir else {}))
-        return asyncio.run(_cmd_audit(settings, console))
+        reason = args.reason if args.audit_command == "start-epoch" else None
+        override = getattr(args, "override_verification", None) if reason is not None else None
+        disregard = tuple(getattr(args, "disregard_anchor", ()) or ()) if reason is not None else ()
+        return asyncio.run(
+            _cmd_audit(
+                settings,
+                console,
+                start_epoch_reason=reason,
+                override_verification=override,
+                disregard_anchors=disregard,
+            )
+        )
+    if args.command == "db":
+        from orqentis.db_commands import run_db
+
+        return asyncio.run(run_db(_settings(), args.db_command, console))
     if args.command == "contracts":
         from orqentis.contracts import commands as contracts_commands  # lazy: `orqentis serve` never loads these
 

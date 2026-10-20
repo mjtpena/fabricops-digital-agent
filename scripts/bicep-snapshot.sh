@@ -46,7 +46,17 @@ export CONTAINER_IMAGE="registry.invalid/orqentis-fabricops@sha256:0000000000000
 export ACR_LOGIN_SERVER="registry.invalid"
 export ACR_RESOURCE_ID="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.ContainerRegistry/registries/crexample"
 export ENTRA_API_CLIENT_ID="00000000-0000-0000-0000-000000000001"
+# The PostgreSQL administrator group (an object id and a name, no secrets), required by every env file.
+export POSTGRES_ENTRA_ADMIN_OBJECT_ID="00000000-0000-0000-0000-000000000003"
+export POSTGRES_ENTRA_ADMIN_NAME="grp-fabricops-example-postgres-admins"
+# Whether the evidence immutability policy is Locked (prod has no default). Never Locked in a snapshot.
+export EVIDENCE_IMMUTABILITY_LOCKED="false"
+# The private network of test and prod: resource ids of the two subnets and the private DNS zone (fake).
+export CONTAINER_APPS_SUBNET_ID="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/virtualNetworks/vnet-example/subnets/snet-example-apps"
+export POSTGRES_DELEGATED_SUBNET_ID="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/virtualNetworks/vnet-example/subnets/snet-example-postgres"
+export POSTGRES_PRIVATE_DNS_ZONE_ID="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-network/providers/Microsoft.Network/privateDnsZones/example.private.postgres.database.azure.com"
 unset FABRIC_MODE ALERT_EMAIL_RECEIVERS ALERT_TEAMS_WEBHOOK_URI ALERT_ACTION_GROUP_ID
+unset POSTGRES_ENTRA_ADMIN_TYPE POSTGRES_EXISTING_SERVER_NAME AUDIT_OPERATORS_OBJECT_ID
 # One opt-in, for the check that the alerts use a separately managed action group (scripts/check_action_group_snapshots.py).
 if [[ -n "${SNAPSHOT_ALERT_ACTION_GROUP_ID:-}" ]]; then
   export ALERT_ACTION_GROUP_ID="$SNAPSHOT_ALERT_ACTION_GROUP_ID"

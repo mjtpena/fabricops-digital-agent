@@ -25,7 +25,10 @@ param entraClientId = '00000000-0000-0000-0000-000000000000'
 
 param deploymentEnvironment = 'prod'
 param fabricMode = 'rest'
-param contractsPath = '/var/lib/orqentis/contracts/estate.json'
+// The estate contracts file (rest mode) is a blob in the evidence storage account, uploaded after the deployment
+// (infra/bicep/README.md, Estate contracts); until it is there a rest-mode app stays not ready. These are the defaults.
+param contractsContainerName = 'contracts'
+param contractsBlobName = 'estate.json'
 
 // The WRITE capability boundary stays closed: the actor identity is created but not attached.
 param enableWriteActions = false
@@ -43,8 +46,9 @@ param azureOpenAiResourceId = ''
 // Autonomous runtime: the app collects, detects, investigates, sweeps SLAs and refreshes its catalog by itself.
 // Every value below is the default; set schedulerEnabled = false to run the app API-driven only.
 param schedulerEnabled = true
-// Seconds before the scheduler takes the lease after start, so the previous revision can drain during a deploy.
-param schedulerStartupDelaySeconds = 120
+// Seconds before the scheduler takes the lease after start. A courtesy only: the database lease already allows a single
+// holder, this just keeps a starting revision from competing for it while it warms up during a deploy.
+param schedulerStartupDelaySeconds = 30
 param schedulerTickSeconds = 5
 param schedulerLeaseTtlSeconds = 60       // at least 3x the tick
 param schedulerJobTimeoutMinutes = 30
@@ -60,6 +64,11 @@ param catalogRefreshEnabled = true
 param catalogRefreshIntervalMinutes = 60
 param investigationMaxConcurrency = 2
 param investigationTimeoutSeconds = 600
+// Audit chain anchors (immutable blobs) and durable investigation jobs shared by all replicas.
+param auditAnchorEnabled = true
+param auditAnchorIntervalMinutes = 15
+param investigationPollIntervalSeconds = 2
+param investigationClaimTtlSeconds = 120   // at least 3x the poll interval
 // Global budget for Fabric / Power BI calls (shared by every job) and incremental-collection windows.
 param fabricMaxConcurrency = 4
 param fabricRatePerSecond = 5
@@ -76,7 +85,9 @@ param buildRetryMaxSeconds = 60
 // 'vnet' (internal environment, needs infrastructureSubnetId) or 'internal' (environment-internal only).
 // See infra/bicep/README.md "Network exposure" and the examples in infra/bicep/examples/.
 param ingressMode = 'externalAuthenticated'
-param infrastructureSubnetId = ''
+// Outside dev the Container Apps environment is VNet-integrated (a subnet delegated to Microsoft.App/environments), which
+// is how the app reaches PostgreSQL privately. The API keeps its public, authenticated endpoint with this mode.
+param infrastructureSubnetId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-fabricops/subnets/snet-aca'
 // param allowedIpRanges = ['203.0.113.0/24']   // optional address allow list in front of authentication
 param anonymousHealthEndpoints = true           // /health and /health/ready answer without a token
 
@@ -91,8 +102,36 @@ param uiEnabled = true
 // param uiSignInClientSecretUri = 'https://<vault>.vault.azure.net/secrets/fabricops-ui-client-secret'   // browser sign-in
 
 param logRetentionInDays = 30
+
+// Scale: the app is stateless (the database serialises the audit chain, the lease and approvals), so two replicas
+// are the default. Keep 2 x maxReplicas x postgresPoolMax + 20 below the server's max_connections.
+param minReplicas = 2
+param maxReplicas = 2
+param postgresPoolMax = 6
+
+// Evidence storage account (evidence, reports, audit anchors): Blob, Entra only, version-level immutability.
 param storageSkuName = 'Standard_LRS'
-param fileShareQuotaGiB = 32
+param evidenceRetentionDays = 30
+// Unlocked: an account owner can still change the policy. 'Locked' is IRREVERSIBLE for the retention period and needs the
+// owner's sign-off (infra/bicep/README.md, Storage); the env/*.bicepparam files take the decision from a pipeline variable.
+param evidenceImmutabilityState = 'Unlocked'
+
+// PostgreSQL Flexible Server (Microsoft Entra authentication only). The Entra administrator is REQUIRED: a group whose
+// members run the bootstrap step (infra/bicep/README.md, "PostgreSQL bootstrap"). Placeholders below.
+param postgresEntraAdminObjectId = '00000000-0000-0000-0000-000000000000'
+param postgresEntraAdminName = 'sg-fabricops-postgres-admins'
+param postgresEntraAdminType = 'Group'
+param postgresSkuName = 'Standard_B1ms'
+param postgresStorageSizeGiB = 32
+param postgresBackupRetentionDays = 7
+// Private networking (required outside dev): the server has no public endpoint. A subnet delegated to
+// Microsoft.DBforPostgreSQL/flexibleServers (not the Container Apps subnet) and a private DNS zone linked to the VNet.
+// Dev can use public access instead: postgresAllowAzureServices = true (the template refuses it anywhere else).
+param postgresDelegatedSubnetId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-fabricops/subnets/snet-postgres'
+param postgresPrivateDnsZoneId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/privateDnsZones/fabricops.private.postgres.database.azure.com'
+
+// Optional: the Entra group of operators who may open an audit epoch after a restore (empty assigns nothing).
+// param auditOperatorsPrincipalId = '<object id of the group>'
 
 // Time zone for time-of-day reasoning and report times (validated at startup).
 param defaultTimezone = 'Australia/Sydney'

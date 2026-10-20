@@ -1,6 +1,6 @@
 # Orqentis FabricOps: Azure deployment (Bicep)
 
-`main.bicep` deploys the FabricOps MVP into **one resource group** on Azure Container Apps. The template contains no credentials. Identities are managed, the Application Insights connection string is stored as a Container App secret, and the storage key is read at deployment time only to mount the Azure Files share.
+`main.bicep` deploys FabricOps into **one resource group** on Azure Container Apps. The app is stateless: its system of record is an Azure Database for PostgreSQL Flexible Server, and its evidence is in Blob storage with version-level immutability ([ADR-0008](../../docs/adr/0008-production-storage.md); implementation choices in ADR-0017). The template contains no credentials. Identities are managed, PostgreSQL accepts Microsoft Entra tokens only (password authentication is disabled), storage Shared Key access is off, and the Application Insights connection string is stored as a Container App secret.
 
 | Resource | Name | Purpose |
 |---|---|---|
@@ -8,15 +8,17 @@
 | Application Insights (workspace-based) | `appi-<prefix>` | OpenTelemetry traces, logs and metrics from the app (`azure-monitor` extra) |
 | User-assigned managed identity | `id-<prefix>-reader` | **READ** capability boundary. The app's operating identity (Fabric/Power BI read, Azure OpenAI) |
 | User-assigned managed identity | `id-<prefix>-actor` | **WRITE** capability boundary. Created, but attached to the app **only** when `enableWriteActions = true` |
-| Storage account + Azure Files share | `st<prefix><hash>` / `orqentis-data` | Mounted at `/var/lib/orqentis`: MVP SQLite stores, evidence, audit log, contracts file |
+| PostgreSQL Flexible Server | `psql-<prefix>-<hash>` (`modules/postgres.bicep`) | The system of record: incidents, approvals, events, scheduler leases, investigation jobs, the audit trail. Microsoft Entra authentication only (`passwordAuth` disabled), an Entra administrator (`postgresEntraAdminObjectId`), database `orqentis`, point-in-time restore. See *Storage* |
+| Storage account | `stev<prefix><hash>` (`modules/evidence-storage.bicep`) | Evidence, reports, audit anchors, audit epoch markers and the estate contracts file in Blob containers `evidence`, `audit-anchors`, `audit-epochs` and `contracts`. Entra only (Shared Key off), versioning, soft delete, version-level immutability |
+| Role assignments | `modules/evidence-storage.bicep` | On the containers only, never on the account. **Reader** identity: `Storage Blob Data Contributor` on `evidence` and `audit-anchors`, `Storage Blob Data Reader` (read-only) on `audit-epochs` and `contracts`. Optional audit operators group (`auditOperatorsPrincipalId`): `Storage Blob Data Contributor` on `audit-epochs` only. The actor identity gets nothing on storage, and the template grants nobody the right to upload contracts (see *Storage*, who may write where) |
 | Container Apps environment | `cae-<prefix>` | Workload-profiles environment (Consumption), logs to Log Analytics, optional VNet |
-| Container App | `ca-<prefix>` | The API (`orqentis serve`), port 8000, 1 replica, Entra ID authentication, exposure per `ingressMode` |
+| Container App | `ca-<prefix>` | The API (`orqentis serve`), port 8000, `minReplicas` to `maxReplicas` replicas (2 by default; dev uses 1), Entra ID authentication, exposure per `ingressMode` |
 | Container App auth config | `current` | Built-in authentication (Easy Auth) with Microsoft Entra ID, `Return401`; `/health` and `/health/ready` excluded by default (`anonymousHealthEndpoints`) |
 | Role assignment (optional) | n/a | `AcrPull` for the reader identity on an ACR in the same RG (`containerRegistryName`) |
 | Role assignment (optional) | `modules/acr-pull.bicep` | `AcrPull` for the reader identity on an ACR in any resource group (`containerRegistryResourceId`), such as the shared registry used by every environment |
 | Role assignment (optional) | `modules/openai-role.bicep` | `Cognitive Services OpenAI User` for the reader identity on `azureOpenAiResourceId` (any RG/subscription) |
 | Role assignment (optional) | `modules/keyvault-role.bicep` | `Key Vault Secrets User` for the reader identity on **each referenced secret only** (not the vault), in the vault of `keyVaultResourceId` (any RG/subscription) |
-| Deployment check | `modules/input-check.bicep` | Fails the deployment with a readable reason when the `service_principal` inputs cannot work (see *Cross-tenant Fabric access*) |
+| Deployment check | `modules/input-check.bicep` | Fails the deployment with a readable reason when the `service_principal` inputs cannot work (see *Cross-tenant Fabric access*), and when the PostgreSQL administrator, the estate contracts (`rest` mode), the replica counts, the connection budget or the network options cannot work (see *Storage*) |
 | Container App secrets (optional) | `fabric-sp-client-secret` / `fabric-sp-certificate` | Key Vault references (`keyVaultUrl` + the reader identity), only in `service_principal` mode |
 | Container App secrets (optional) | `notify-teams-webhook-url`, `notify-webhook-url`, `notify-webhook-signing-secret`, `ui-csrf-secret`, `microsoft-provider-authentication-secret` | Key Vault references, only for the parameters that are set (see *Notifications and the web UI*) |
 | Deployment check | `modules/input-check.bicep` (second instance) | Fails the deployment with a readable reason for malformed notification / sign-in inputs |
@@ -39,15 +41,15 @@ The app runs with these settings (see `src/orqentis/config/settings.py`):
 | `ORQENTIS_DEFAULT_TIMEZONE` | `defaultTimezone` (default `Australia/Sydney`) |
 | `ORQENTIS_AUTHORITY_HOST`, `ORQENTIS_FABRIC_API_BASE_URL`, `ORQENTIS_POWERBI_API_BASE_URL`, `ORQENTIS_FABRIC_SCOPE`, `ORQENTIS_POWERBI_SCOPE` | `authorityHost`, `fabricApiBaseUrl`, `powerbiApiBaseUrl`, `fabricScope`, `powerbiScope` (only set when non-empty; empty keeps the public cloud) |
 | `ORQENTIS_FABRIC_MODE` | `fabricMode` (default `rest`) |
-| `ORQENTIS_CONTRACTS_PATH` | `contractsPath` (default `/var/lib/orqentis/contracts/estate.json`) |
+| `ORQENTIS_CONTRACTS_CONTAINER` / `ORQENTIS_CONTRACTS_BLOB_NAME` | `contractsContainerName` / `contractsBlobName` (default `contracts` / `estate.json`): where the estate contracts file is read from, in the evidence account (`ORQENTIS_EVIDENCE_BLOB_URL`). No path and no volume; see *Estate contracts* |
 | `ORQENTIS_ENABLE_WRITE_ACTIONS` | `enableWriteActions` (default `false`) |
 | `ORQENTIS_REASONER` | `reasoner` (default `rule_based`) |
 | `ORQENTIS_AZURE_OPENAI_ENDPOINT` / `_DEPLOYMENT` | `azureOpenAiEndpoint` / `azureOpenAiDeployment` (only set when non-empty) |
 | `ORQENTIS_LLM_INPUT_COST_PER_MILLION_TOKENS` / `ORQENTIS_LLM_OUTPUT_COST_PER_MILLION_TOKENS` | `llmInputCostPerMillionTokens` / `llmOutputCostPerMillionTokens` (USD, decimal text; only set when non-empty; they only feed the estimated-cost metric) |
-| `ORQENTIS_DATA_DIR` | `/var/lib/orqentis` (Azure Files mount) |
+| `ORQENTIS_DATA_DIR` | `/var/lib/orqentis`: the container's own writable disk, ephemeral and per replica (no volume; nothing durable is kept there) |
 | `ORQENTIS_LOG_FORMAT` | `json` |
 | `ORQENTIS_SCHEDULER_ENABLED` | `schedulerEnabled` (default `true`) |
-| `ORQENTIS_SCHEDULER_STARTUP_DELAY_SECONDS` | `schedulerStartupDelaySeconds` (default `120`) |
+| `ORQENTIS_SCHEDULER_STARTUP_DELAY_SECONDS` | `schedulerStartupDelaySeconds` (default `30`; was `120`). A courtesy only: the database lease is what guarantees a single scheduler |
 | `ORQENTIS_SCHEDULER_TICK_SECONDS` / `_LEASE_TTL_SECONDS` / `_JOB_TIMEOUT_MINUTES` | `schedulerTickSeconds` / `schedulerLeaseTtlSeconds` / `schedulerJobTimeoutMinutes` (default `5` / `60` / `30`; the TTL must be at least three times the tick) |
 | `ORQENTIS_SCHEDULER_COLLECT_ENABLED` / `_INTERVAL_MINUTES` | `collectEnabled` / `collectIntervalMinutes` (default `true` / `5`) |
 | `ORQENTIS_SCHEDULER_AUTO_INVESTIGATE_ENABLED` / `_INTERVAL_MINUTES` | `autoInvestigateEnabled` / `autoInvestigateIntervalMinutes` (default `true` / `1`) |
@@ -56,6 +58,14 @@ The app runs with these settings (see `src/orqentis/config/settings.py`):
 | `ORQENTIS_SCHEDULER_CATALOG_REFRESH_ENABLED` / `_INTERVAL_MINUTES` | `catalogRefreshEnabled` / `catalogRefreshIntervalMinutes` (default `true` / `60`) |
 | `ORQENTIS_SCHEDULER_AUDIT_VERIFY_ENABLED` / `_INTERVAL_MINUTES` | `auditVerifyEnabled` / `auditVerifyIntervalMinutes` (default `true` / `60`): the audit chain is verified on a schedule; failure raises the audit-verification alert |
 | `ORQENTIS_INVESTIGATION_MAX_CONCURRENCY` / `_TIMEOUT_SECONDS` | `investigationMaxConcurrency` / `investigationTimeoutSeconds` (default `2` / `600`) |
+| `ORQENTIS_INVESTIGATION_POLL_INTERVAL_SECONDS` / `ORQENTIS_INVESTIGATION_CLAIM_TTL_SECONDS` | `investigationPollIntervalSeconds` / `investigationClaimTtlSeconds` (default `2` / `120`; the TTL must be at least three times the poll interval). Every replica polls for queued durable investigation jobs; a claim that is not renewed within the TTL is released to another replica |
+| `ORQENTIS_SCHEDULER_AUDIT_ANCHOR_ENABLED` / `ORQENTIS_SCHEDULER_AUDIT_ANCHOR_INTERVAL_MINUTES` | `auditAnchorEnabled` / `auditAnchorIntervalMinutes` (default `true` / `15`): the audit chain head is written to an immutable blob on this schedule |
+| `ORQENTIS_STORAGE_BACKEND` | `postgres`, always. `local` (SQLite and files) is for development and tests only, and the app refuses it outside `local` |
+| `ORQENTIS_POSTGRES_HOST` / `ORQENTIS_POSTGRES_DATABASE` | the server's FQDN (output `postgresServerFqdn`) / `postgresDatabaseName` (default `orqentis`) |
+| `ORQENTIS_POSTGRES_USER` | the reader identity's **name**, `id-<prefix>-reader`: the PostgreSQL role the bootstrap step creates for the managed identity. The identity's Entra token is the password; there is no other credential |
+| `ORQENTIS_POSTGRES_POOL_MAX` | `postgresPoolMax` (default `6`, at least `2`): connections per replica; see the connection budget under *Storage* |
+| `ORQENTIS_EVIDENCE_BLOB_URL` / `ORQENTIS_EVIDENCE_CONTAINER` / `ORQENTIS_AUDIT_ANCHOR_CONTAINER` | the evidence account's blob endpoint (output `evidenceBlobEndpoint`) / `evidenceContainerName` (default `evidence`) / `auditAnchorContainerName` (default `audit-anchors`) |
+| `ORQENTIS_AUDIT_EPOCH_CONTAINER` | `auditEpochContainerName` (default `audit-epochs`): the epoch-start markers an operator writes after a restore. The app can only **read** it |
 | `ORQENTIS_FABRIC_MAX_CONCURRENCY` / `_RATE_PER_SECOND` / `_RATE_BURST` | `fabricMaxConcurrency` / `fabricRatePerSecond` / `fabricRateBurst` (default `4` / `5` / `10`) |
 | `ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES` | `fabricJobInstancesMaxPages` (default `10`) |
 | `ORQENTIS_STARTUP_GRACE_SECONDS` / `ORQENTIS_BUILD_RETRY_INITIAL_SECONDS` / `_MAX_SECONDS` | `startupGraceSeconds` / `buildRetryInitialSeconds` / `buildRetryMaxSeconds` (default `10` / `2` / `60`) |
@@ -69,7 +79,7 @@ The app runs with these settings (see `src/orqentis/config/settings.py`):
 | `ORQENTIS_UI_SIGN_IN_PATH` | `/.auth/login/aad`, only when `uiSignInClientSecretUri` is set |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | Container App **secret** reference |
 
-Not set by the template, because the safe default already applies under `easy_auth`: `ORQENTIS_API_REQUIRE_READ_ROLE` (every call needs a FabricOps role; see section 1) and `ORQENTIS_API_RATE_LIMIT_ENABLED` (`true`).
+Not set by the template, because the safe default already applies under `easy_auth`: `ORQENTIS_API_REQUIRE_READ_ROLE` (every call needs a FabricOps role; see section 1) and `ORQENTIS_API_RATE_LIMIT_ENABLED` (`true`). Also left at their defaults: `ORQENTIS_POSTGRES_SCHEMA` (`orqentis`), `ORQENTIS_POSTGRES_AUTH` (`entra`), `ORQENTIS_POSTGRES_SSL_MODE` (`verify-full`), `ORQENTIS_POSTGRES_MIGRATE_ON_START` (`true`: the app applies pending schema migrations itself when it starts, behind a database advisory lock) and `ORQENTIS_EVIDENCE_PATH_PREFIX` / `ORQENTIS_AUDIT_ANCHOR_PATH_PREFIX` (empty).
 
 ### Health probes and autonomous operation
 
@@ -81,15 +91,19 @@ The Container App has three probes (see the `probes` block of `main.bicep`):
 | Liveness | `/health` | The process is alive. It is dependency-free and answers `200` while the container is still being built and while a failed build is being retried, so a bad contracts file or a Fabric outage never causes a restart loop. |
 | Readiness | `/health/ready` | `503` (a fixed reason code and the exception type, never its message) until the container is built and the first catalog load finished, `200` afterwards. A failing build is retried with exponential backoff (`ORQENTIS_BUILD_RETRY_*`). |
 
-With `schedulerEnabled = true` (the default) the app runs a small in-process scheduler: collect + detect every `collectIntervalMinutes`, automatic investigation of new incidents (as background jobs, at most `investigationMaxConcurrency` at a time), an SLA sweep, and a catalog refresh that applies workspace / item / dependency changes without a restart. Only the holder of an in-process leader lease runs the jobs. That is correct for the single replica this template deploys; the lease moves to the database with the PostgreSQL system of record, which is what allows more than one replica. All Fabric and Power BI calls share one concurrency and rate budget (`fabricMaxConcurrency`, `fabricRatePerSecond`, `fabricRateBurst`), and a `429` / `Retry-After` pauses every caller. Defaults are deliberately conservative; the real Fabric throttling quotas are not published per endpoint, so tune them from the `fabric http request` log lines (`status_code: 429`).
+With `schedulerEnabled = true` (the default) the app runs a small in-process scheduler: collect + detect every `collectIntervalMinutes`, automatic investigation of new incidents (as background jobs, at most `investigationMaxConcurrency` at a time), an SLA sweep, and a catalog refresh that applies workspace / item / dependency changes without a restart. Only the holder of the leader lease runs the jobs. The lease is a row in the PostgreSQL database: its expiry is measured on the database clock and every acquisition increases a fencing generation that renewals and fenced writes check, so exactly one replica schedules work however many run, and a replica that lost the lease cannot complete a write made under it. Investigations are durable jobs in the same database: `POST /incidents/{id}/investigate` can land on any replica, any replica claims queued jobs (every `investigationPollIntervalSeconds`), and a claim that its replica stops renewing for `investigationClaimTtlSeconds` is released to another replica. The audit chain head is anchored to an immutable blob every `auditAnchorIntervalMinutes`. All Fabric and Power BI calls share one concurrency and rate budget (`fabricMaxConcurrency`, `fabricRatePerSecond`, `fabricRateBurst`), and a `429` / `Retry-After` pauses every caller. Defaults are deliberately conservative; the real Fabric throttling quotas are not published per endpoint, so tune them from the `fabric http request` log lines (`status_code: 429`).
 
-### Deploying an update: two revisions share the volume
+### Deploying an update: two revisions run side by side
 
-Container Apps in `Single` revision mode runs the **old and the new revision side by side** while an update rolls out. They mount the same Azure Files share, each with its own in-process scheduler lease, and the local stores (SQLite, the hash-chained audit file) are single-writer. The template and the app reduce the risk, they cannot remove it:
+Container Apps in `Single` revision mode runs the **old and the new revision side by side** while an update rolls out, and each runs two or more replicas (`minReplicas` / `maxReplicas`, 2 by default in `test` and `prod`, 1 in `dev`). That is safe because no replica keeps state of its own: the database makes every decision that more than one process could make.
 
-* `schedulerStartupDelaySeconds` (default `120`) makes a new process wait before it takes the lease or runs any job, so the old revision drains first. The revision being replaced stops its scheduler and releases the lease when it receives the shutdown signal.
-* The audit log re-reads its chain head before appending whenever the file grew since it last wrote, so appends from both revisions chain instead of forking. This is best effort (SMB has no byte-range locks).
-* **Real multi-writer safety needs the PostgreSQL system of record** (database-backed lease, database-serialised audit chain). Until it exists, deploy with `schedulerEnabled = false`, or accept the risk and verify the chain afterwards with `GET /audit/verify` / `orqentis audit`. Nothing is deployed before that work.
+* **One audit chain.** An append locks the single chain-head row (`SELECT ... FOR UPDATE`), reads the last sequence and hash, inserts the record and moves the head in one transaction, so appends from any number of replicas, old revision and new revision included, form one linear chain. `GET /audit/verify` / `orqentis audit` verify it, and check it against every anchor and epoch marker.
+* **One scheduler.** The leader lease is a database row with a fencing generation. The revision being replaced releases it when it receives the shutdown signal, the new one takes it over, and a replica that was paused and wakes up after losing the lease cannot write under it.
+* **Approvals execute at most once.** A state change is stored only when the approval's revision is still the one the caller read (`UPDATE ... WHERE revision = $n`), so of N concurrent executes across replicas exactly one wins and exactly one write happens.
+* **Jobs survive a replica.** Investigation jobs are rows: one active job per incident, claimed by any replica. A job that the stopping revision was running is claimed again after `investigationClaimTtlSeconds`, so a deploy loses no job.
+* **Schema changes are expand-only.** Migrations are forward-only and each is backward compatible with the previous release (expand now, contract in a later release), and the app applies them at start behind an advisory lock, so the old revision keeps working while the new one migrates.
+
+`schedulerStartupDelaySeconds` (default `30`; it was `120` while the stores were single-writer files) is now only a courtesy: a starting revision does not compete for the lease while it warms up. The safety comes from the lease, not from this delay. The old and the new revision hold database connections at the same time, which is what the connection budget under *Storage* accounts for. If the new revision never becomes ready (`/health/ready`), the old one keeps serving. Verify the chain after a deployment if you want to see it: `orqentis audit` or `GET /audit/verify`.
 
 Settings that fail validation (for example a missing `ORQENTIS_TENANT_ID` in rest mode, or a lease TTL shorter than three scheduler ticks) stop the app at start by design: that is deploy-time misconfiguration, and the first failed startup probe is the signal, not something to retry.
 
@@ -214,7 +228,7 @@ az acr build -r crfabricops -t orqentis-fabricops:0.1.0 .   # builds the reposit
 
 ### 3. Deploy the template
 
-Copy `main.bicepparam` and set `entraClientId` to `$API_APP_ID`, along with `containerImage`, `containerRegistryName` and the other values you need.
+Copy `main.bicepparam` and set `entraClientId` to `$API_APP_ID`, along with `containerImage`, `containerRegistryName` and the other values you need. The PostgreSQL Entra administrator is **required** (`postgresEntraAdminObjectId` and `postgresEntraAdminName`: the object id and name of an Entra group whose members will run the bootstrap step below; the deployment fails with a readable reason when they are empty). In `rest` mode the estate contracts file is uploaded after the deployment (step 4). The subscription needs the `Microsoft.DBforPostgreSQL` resource provider registered once (`az provider register --namespace Microsoft.DBforPostgreSQL`).
 
 ```bash
 az deployment group what-if -g "$RG" -f infra/bicep/main.bicep -p infra/bicep/main.bicepparam
@@ -224,9 +238,71 @@ az deployment group show -g "$RG" -n fabricops --query properties.outputs
 
 When `containerRegistryName` names an ACR in the same resource group, the template grants the reader identity `AcrPull` and pulls with it. For a registry in another resource group (the shared registry the pipeline uses), set `containerRegistryServer` to its login server and `containerRegistryResourceId` to its resource id: the template then grants the reader identity `AcrPull` on it through `modules/acr-pull.bicep` before it creates the app, so the deploying principal needs a role assignment right on that registry and the right to create deployments in the registry's resource group, because the module is a nested deployment there (docs/delivery.md, section 5). If you set only `containerRegistryServer`, grant `AcrPull` to the `readerIdentityPrincipalId` output yourself; the first revision fails to pull until that grant exists. After granting, restart the revision.
 
-### 4. Upload the estate contracts (rest mode)
+### 3a. PostgreSQL bootstrap (once per environment)
 
-In `rest` mode the app needs the declared environments, topology, data products and SLAs at `contractsPath`. If that file is missing or invalid the app does not start; the container log carries one error that names the path and lists every violation as `file:line:column: error: /json/pointer: message`, for example `Contracts file is invalid: /var/lib/orqentis/contracts/estate.json` followed by `... error: /slas/0/timezone: not a valid IANA time zone`. Container Apps keeps restarting the container until the file is fixed, so check the file **before** uploading it:
+The template creates the server and its Entra administrator, but a template cannot create database roles. Until the app's managed identity exists **inside** PostgreSQL the app cannot connect, and `/health/ready` answers `503` (`/health` stays `200`). A member of the Entra administrator group (`postgresEntraAdminName`) creates the role once per environment:
+
+* `az login` as that person, `psql` 16 or later (for `sslrootcert=system`; see the TLS note below), and network access to the server. In `test` and `prod` the server is private (*Private networking*): run this from a host inside the network, or one that reaches it through a peered network or VPN. In `dev` (public access) the server's firewall must allow your address: add it to `postgresAllowedIpRanges` and redeploy, or create a temporary rule (`az postgres flexible-server firewall-rule create -g "$RG" -s "$SERVER" -n bootstrap-me --start-ip-address <your address> --end-ip-address <your address>`) and delete it afterwards (`firewall-rule delete`).
+* No password exists to type: the Entra access token is the password.
+
+```bash
+RG=rg-fabricops-dev                  # the environment's resource group
+DEPLOYMENT=<deployment name>         # az deployment group list -g "$RG" --query "[].name" -o tsv   (the pipeline names it fabricops-<run id>-<attempt>)
+out() { az deployment group show -g "$RG" -n "$DEPLOYMENT" --query "properties.outputs.$1.value" -o tsv; }
+SERVER=$(out postgresServerName)
+FQDN=$(out postgresServerFqdn)
+DB=$(out postgresDatabaseName)                                      # orqentis
+READER_OID=$(out readerIdentityPrincipalId)                         # the managed identity's object id
+READER_ROLE=$(out readerIdentityResourceId | awk -F/ '{print $NF}')  # id-<prefix>-reader: the database role to create
+ADMIN="<postgresEntraAdminName>"     # the admin group's display name (or the user's UPN); members use the group name as the user
+
+# (a) The template is deployed (step 3). (b) Sign in with your own Entra token and run the bootstrap script from the repository root.
+export PGPASSWORD="$(az account get-access-token --resource-type oss-rdbms --query accessToken -o tsv)"
+psql "host=$FQDN port=5432 dbname=postgres user=$ADMIN sslmode=verify-full sslrootcert=system" -v ON_ERROR_STOP=1 \
+  -f scripts/postgres-bootstrap.sql \
+  -v app_role="$READER_ROLE" -v app_oid="$READER_OID" -v app_db="$DB" -v app_schema=orqentis
+unset PGPASSWORD
+```
+
+`scripts/postgres-bootstrap.sql` does this, and only this, and is safe to run again:
+
+1. creates the Entra principal for the managed identity with `pgaadauth_create_principal_with_oid` (so that identity's token maps to the role `id-<prefix>-reader`). If a role of that name already exists but is **not** that Entra principal (it compares the role name and the object id against `pgaadauth_list_principals(false)`), it stops with an error instead of treating the name as enough;
+2. creates the schema `orqentis`, owned by that role;
+3. removes what `PUBLIC` would otherwise hold (`CONNECT` and `TEMPORARY` on the database, `USAGE` on the `public` schema), then lets the application role, the administrators (`azure_pg_admin`) and the person running it connect, and nothing more. A `REVOKE` the person lacks the right to make becomes a warning, and the `privileges` column printed at the end shows what `PUBLIC` still holds;
+4. optionally (below), lets an operators group act as the application role.
+
+It contains no secret. The token lasts about an hour; if `psql` reports an expired token, run `az account get-access-token` again.
+
+**TLS.** The commands use `sslmode=verify-full`, which checks the server certificate and its host name, and `sslrootcert=system`, which takes the roots from the operating system's trust store (libpq 16 or later). Azure Database for PostgreSQL certificates chain to DigiCert Global Root G2 or Microsoft RSA Root CA 2017 (Microsoft's SSL/TLS page for the service lists the current roots and any rotation; check it, I could not verify it offline); most trust stores hold both. With an older `psql`, or a trust store that lacks them, save the root certificates as PEM in one file and use `sslrootcert=<that file>`. The app uses `verify-full` too (`ORQENTIS_POSTGRES_SSL_ROOT_CERT` names an extra bundle if the image's store is missing a root).
+
+**Optional: operators who open an audit epoch after a restore.** The Entra administrator group has **no rights on the application's tables** (the application role owns them), so it cannot run `orqentis audit start-epoch` ([docs/operations/restore.md](../../docs/operations/restore.md)) as itself. Pass `-v operator_role="<the group's database role>"` (the administrator group's own name, or another Entra group created with `pgaadauth_create_principal_with_oid`) and the script runs `GRANT "<app role>" TO "<operator role>" WITH INHERIT FALSE, SET TRUE` and lets the group connect: its members cannot touch the tables by accident, but can deliberately switch to the application role. They then sign in (as the group, which is how Entra administrators normally connect, or as themselves when they are members of it) with `ORQENTIS_POSTGRES_SET_ROLE=<app role>`. To create the schema the person running the script needs the right to `SET ROLE` to the application role, which PostgreSQL 16 and later do not give the creator of a role; the script grants it to them for the duration of the run and takes it back before the operators grant, so the outcome is the same whether the group itself runs the script or one of its members does: the group holds `SET TRUE, INHERIT FALSE`, and an individual who ran it keeps no right of their own beyond the group's. It needs PostgreSQL 16 or later (the template's default is 17) and is skipped when `operator_role` is not given. The same people also need write access to the `audit-epochs` container (*Storage*, who may write where).
+
+**(c) Schema.** The app applies pending migrations itself when it starts (`ORQENTIS_POSTGRES_MIGRATE_ON_START`, default `true`), as its own database role and behind a database advisory lock, so several replicas starting together are safe. Because the schema belongs to the app's role, a person cannot run `orqentis db migrate` (it refuses any role but the schema owner: tables an administrator created would be invisible to the app). To look at the state, with your own token (any role that can read the schema):
+
+```bash
+export ORQENTIS_STORAGE_BACKEND=postgres ORQENTIS_POSTGRES_HOST="$FQDN" ORQENTIS_POSTGRES_DATABASE="$DB"   ORQENTIS_POSTGRES_USER="$ADMIN" ORQENTIS_EVIDENCE_BLOB_URL="$(out evidenceBlobEndpoint)"
+orqentis db status      # applied and pending migrations
+```
+
+Set `ORQENTIS_POSTGRES_MIGRATE_ON_START=false` only if a release step runs `orqentis db migrate` **as the reader identity** (for example a one-off Container Apps job that uses the app image and the reader identity) before the rollout; the app then refuses to start on an older schema.
+
+**(d) Verify.** Restart the revision so it connects without waiting for its retry, then check readiness:
+
+```bash
+APP=$(out containerAppName)
+az containerapp revision restart -g "$RG" -n "$APP" \
+  --revision "$(az containerapp revision list -g "$RG" -n "$APP" --query "[?properties.active].name | [0]" -o tsv)"
+curl -fsS "https://$(out containerAppFqdn)/health/ready"       # 200 once the app is connected and the catalog is loaded
+```
+
+If `/health/ready` stays `503`, read the replica log (`az containerapp logs show -g "$RG" -n "$APP" --follow`): `role "id-..." does not exist` means the bootstrap did not run against this server and database; a connection timeout means the firewall or the network (in `dev`, public access needs `postgresAllowAzureServices` or a rule for the environment's outbound addresses; in `test` and `prod`, the private network: the Container Apps subnet must reach the PostgreSQL subnet, and the private DNS zone must be linked to the VNet); an Entra token error points at `ORQENTIS_MANAGED_IDENTITY_CLIENT_ID` or at the role being created for another identity.
+
+
+### 4. Estate contracts (rest mode)
+
+In `rest` mode the app needs the declared environments, topology, data products and SLAs: the **estate contracts file**. There is no shared disk and no secret for it. It is a **blob** in the evidence storage account (container `contracts`, blob `estate.json` by default: the parameters `contractsContainerName` and `contractsBlobName`, the settings `ORQENTIS_CONTRACTS_CONTAINER` and `ORQENTIS_CONTRACTS_BLOB_NAME`), and the account is the one in `ORQENTIS_EVIDENCE_BLOB_URL`. The template creates the container (versioned, soft delete, version-level immutability, like the other two) and gives the reader identity read-only access to it: **Storage Blob Data Reader**, scoped to that container, so a compromised app identity cannot rewrite the declared estate. You upload the file after the deployment. `mock` mode does not read it.
+
+The file format is described by `schemas/contracts.schema.json`; a full estate file (`fixtures/fabric/estate.json`) is also accepted, and only its contract sections are used. Check it **before** uploading:
 
 ```bash
 orqentis contracts scaffold --output contracts/estate.json --catalog-output contracts/catalog.json   # draft from a read-only listing
@@ -234,17 +310,38 @@ orqentis contracts scaffold --output contracts/estate.json --catalog-output cont
 orqentis contracts validate contracts/estate.json --catalog contracts/catalog.json --strict
 ```
 
-The file format is described by `schemas/contracts.schema.json`. A full estate file (`fixtures/fabric/estate.json`) is also accepted; only its contract sections are used.
+**Who may upload.** The template assigns **no one** the right to write to the contracts container, and the pipeline's deploy identities cannot. The owner grants `Storage Blob Data Contributor` on **that container only** to each person, group or identity that uploads (this needs Owner or User Access Administrator; the deploy identity cannot):
 
 ```bash
-SA=$(az deployment group show -g "$RG" -n fabricops --query properties.outputs.storageAccountName.value -o tsv)
-# Entra auth for Azure Files needs "Storage File Data Privileged Contributor" on the account for the uploader.
-az storage directory create --account-name "$SA" --share-name orqentis-data --name contracts \
-  --auth-mode login --enable-file-backup-request-intent
-az storage file upload --account-name "$SA" --share-name orqentis-data \
-  --source ./contracts/estate.json --path contracts/estate.json \
-  --auth-mode login --enable-file-backup-request-intent
+RG=rg-fabricops-dev                  # the environment's resource group
+DEPLOYMENT=<deployment name>         # az deployment group list -g "$RG" --query "[].name" -o tsv
+out() { az deployment group show -g "$RG" -n "$DEPLOYMENT" --query "properties.outputs.$1.value" -o tsv; }
+ACCOUNT=$(out evidenceStorageAccountName)
+CONTAINER=$(out contractsContainerName)                                                    # contracts
+SCOPE="$(az storage account show -g "$RG" -n "$ACCOUNT" --query id -o tsv)/blobServices/default/containers/$CONTAINER"
+
+# In Git Bash on Windows prefix the next command with MSYS_NO_PATHCONV=1, or the scope path is rewritten.
+az role assignment create --assignee-object-id <object id of the person, group or service principal> \
+  --assignee-principal-type <User|Group|ServicePrincipal> \
+  --role "Storage Blob Data Contributor" --scope "$SCOPE"
 ```
+
+**Upload** (and every later update; the uploader signs in with Entra, no key or SAS exists):
+
+```bash
+az storage blob upload --account-name "$(out evidenceStorageAccountName)" --container-name contracts --name estate.json \
+  --file contracts/estate.json --auth-mode login --overwrite
+```
+
+`--overwrite` replaces the current blob by creating a **new version**; the previous version stays readable (`az storage blob list ... --include v`, then `az storage blob download ... --version-id <id>`), so a bad upload is undone by uploading the previous version's content again. Use another `--name` only together with `contractsBlobName`.
+
+**What the app does with it:**
+
+* **At start-up.** A missing or invalid blob leaves the app **not ready**: `/health/ready` answers `503` with the reason `build_failed` and the exception *type* only (for example `ContractsFileNotFoundError` or `ContractsInvalidError`; never its message), and the redacted container log lists every violation as `file:line:column: error: /json/pointer: message`. The build is retried with exponential backoff (`buildRetryInitialSeconds` up to `buildRetryMaxSeconds`); `/health` stays `200`, so there is **no crash loop**. A `rest` deployment therefore succeeds without the file, and the app becomes ready by itself, without a redeployment, within one retry after a valid file is uploaded. That is intended; it also means the smoke test of a first `rest` deployment fails until the upload (docs/delivery.md, section 9, has the `mock`-first route for `prod`).
+* **While running.** On every catalog refresh (`catalogRefreshIntervalMinutes`, default `60`: lower it to pick changes up sooner) each replica re-reads the blob, compares its SHA-256 with the contracts in force and, when it changed, validates and applies the new file and writes a `contracts.loaded` audit record with the SHA-256 and the blob version.
+* **A bad blob after start.** If the blob becomes missing or invalid, the contracts that were last good **stay in force**. The refresh job reports `FAILED` once (audited when its health changes, not on every attempt) and recovers on its own when a valid blob is uploaded.
+
+The file holds identifiers, names and SLAs, not credentials. Because the account has version-level immutability, every uploaded version is protected for `evidenceRetentionDays` and cannot be deleted before then, so check the file before uploading it. *Verify on the first deployment:* that overwriting `estate.json` while the previous version is under retention creates a new version rather than being refused; the template and this procedure depend on it (if the service refuses, the file needs a new `contractsBlobName` per release).
 
 For a smoke test before Fabric access is in place, deploy once with `fabricMode = 'mock'`. The app then serves the synthetic estate that is baked into the image.
 
@@ -391,7 +488,7 @@ Use this when the Fabric tenant is a **different Entra tenant** from the one tha
    The template checks these inputs when the deployment runs and fails with the reason instead of deploying a container that crash-loops: no client id, no explicit `fabricTenantId` (a GUID), not exactly one of the two URIs, a URI that is not a Key Vault secret (`https://<vault>.<dns-suffix>/secrets/<name>`), or a URI in a different vault from `keyVaultResourceId`. The Key Vault role is assigned on those secrets only.
 
    Container Apps resolves the Key Vault reference when a revision starts, so a Key Vault role assignment made in the same deployment can take a few minutes to take effect. If the first deployment fails with a Key Vault access error, wait and re-run it.
-5. **What the app receives.** `ORQENTIS_AUTH_MODE=service_principal`, `ORQENTIS_TENANT_ID` and `AZURE_TENANT_ID` (Fabric tenant), `AZURE_CLIENT_ID` (service principal), and either `AZURE_CLIENT_SECRET` (a secret reference) or `AZURE_CLIENT_CERTIFICATE_PATH` (a read-only file mounted from the secret at `/mnt/fabric-sp/service-principal.pem`; the private key is never written to the Azure Files share). **Azure OpenAI keeps using the reader managed identity** (`ORQENTIS_LLM_AUTH_MODE=managed_identity`), because the model lives in the Azure tenant, not the Fabric one. If the credential is missing, or both a secret and a certificate are set, the app refuses to start and names the missing variables (never their values).
+5. **What the app receives.** `ORQENTIS_AUTH_MODE=service_principal`, `ORQENTIS_TENANT_ID` and `AZURE_TENANT_ID` (Fabric tenant), `AZURE_CLIENT_ID` (service principal), and either `AZURE_CLIENT_SECRET` (a secret reference) or `AZURE_CLIENT_CERTIFICATE_PATH` (a read-only file mounted from the secret at `/mnt/fabric-sp/service-principal.pem`; the private key is never written to a disk). **Azure OpenAI keeps using the reader managed identity** (`ORQENTIS_LLM_AUTH_MODE=managed_identity`), because the model lives in the Azure tenant, not the Fabric one. If the credential is missing, or both a secret and a certificate are set, the app refuses to start and names the missing variables (never their values).
 6. **Rotate.** Add a new version of the Key Vault secret (or certificate), then restart the revision (`az containerapp revision restart`): environment variables are read when the container starts. Remove the old credential from the app registration afterwards.
 
 A keyless alternative, a *federated identity credential* on the app registration that trusts the reader managed identity, would remove the secret and its rotation. It needs a different credential type in the app and is tracked as a follow-up in ADR-0014.
@@ -422,11 +519,11 @@ Sources: Microsoft Learn, [Power BI for US Government customers](https://learn.m
 
 | `ingressMode` | `infrastructureSubnetId` | Container App `ingress.external` | Who can reach the API |
 |---|---|---|---|
-| `externalAuthenticated` (default) | must be empty | `true` | Anyone on the internet **who presents a valid token**. Add `allowedIpRanges` to limit by address before authentication. |
+| `externalAuthenticated` (default) | optional | `true` | Anyone on the internet **who presents a valid token**. Add `allowedIpRanges` to limit by address before authentication. With a subnet the environment is VNet-integrated (its outbound traffic leaves through the VNet, which is how the app reaches a private PostgreSQL server) but keeps this public endpoint. `test` and `prod` use it this way. |
 | `vnet` | required | `true` in an internal environment | Only the VNet (no public IP): peered networks, VPN, ExpressRoute. Front it with Application Gateway/APIM or create a private DNS zone for the environment's default domain. |
 | `internal` | optional | `false` | Only other apps in the same Container Apps environment. People cannot reach it. |
 
-The subnet must be delegated to `Microsoft.App/environments` and be at least `/27`, because the environment uses workload profiles. A mismatch (`vnet` without a subnet, or `externalAuthenticated` with one) feeds an invalid subnet id into the environment, so the deployment **fails** instead of silently exposing the API differently from what was asked. Ready-made parameter files are in [`examples/`](examples/), one per mode (plus the deprecated `externalIngress` override). Build them with the loop under *Validate locally*; CI currently builds `main.bicepparam` only.
+The subnet must be delegated to `Microsoft.App/environments` and be at least `/27`, because the environment uses workload profiles. `vnet` without a subnet feeds an invalid subnet id into the environment, so the deployment **fails** instead of silently exposing the API differently from what was asked. (`externalAuthenticated` with a subnet used to fail too; it is valid now: the environment is VNet-integrated and the endpoint stays public and authenticated.) Ready-made parameter files are in [`examples/`](examples/), one per mode (plus the deprecated `externalIngress` override). Build them with the loop under *Validate locally*; CI currently builds `main.bicepparam` only.
 
 **Why external and authenticated is the default.** The previous default (`externalIngress = false`) left the API reachable only from inside the environment, so people could not use it and the approval workflow was unusable out of the box. Exposure is defence in depth, not the access control: the access control is the Entra ID token (audience, issuer and lifetime validated by Container Apps, only users and applications assigned to the app can obtain one, `appRoleAssignmentRequired=true`) plus the role checks and human-only approval in the app. A public address that answers 401 to everyone else is acceptable for that control set. Tighten it where the threat model needs more: `allowedIpRanges` for a known office or runner range, `vnet` for private-only access. **This changes the default for deployments that never set `externalIngress`**: on the next deployment they become externally reachable (authenticated). Deployments that set it explicitly keep their behaviour, see below.
 
@@ -441,7 +538,7 @@ The subnet must be delegated to `Microsoft.App/environments` and be at least `/2
 
 **First deployment and the Easy Auth window.** The app trusts the `X-MS-CLIENT-PRINCIPAL` header and does not validate bearer tokens itself; Container Apps authentication is the only thing that does. While an externally reachable app has no active authentication, anyone can send a forged header that names a `FabricOps.PlatformAdmin` and the app will believe it. That can happen in the first deployment (the container app exists before its child `authConfigs` resource is applied), after someone disables authentication (`az containerapp auth update --enabled false`), or after a platform fault. So deploy safely:
 
-1. **First deployment with `ingressMode = 'internal'`** (nothing outside the environment can connect), `fabricMode = 'mock'` if you have not uploaded the contracts file yet.
+1. **First deployment with `ingressMode = 'internal'`** (nothing outside the environment can connect), `fabricMode = 'mock'` if you have no contracts file yet. Also complete the PostgreSQL bootstrap (section 3a) before expecting the app to become ready.
 2. **Verify authentication is on:** `az containerapp auth show -g "$RG" -n ca-<prefix>` must show `platform.enabled: true` and `globalValidation.unauthenticatedClientAction: Return401`.
 3. **Then switch** to `externalAuthenticated` (or `vnet`) and redeploy. Check from outside: `curl -i https://<fqdn>/incidents` must answer **401**, and so must the same request with a forged header, for example `-H "X-MS-CLIENT-PRINCIPAL: $(echo -n '{"claims":[]}' | base64)"` (Container Apps strips client-supplied copies). Make these two checks part of every deployment pipeline.
 4. Restrict who can disable authentication (RBAC on the container app), and alert on `Microsoft.App/containerApps/authConfigs` writes in the Activity Log.
@@ -454,27 +551,105 @@ Residual risk, recorded in ADR-0015 and the threat model: the app does not valid
 
 **Trust boundary.** With `ORQENTIS_API_AUTH_MODE=easy_auth` the app trusts the `X-MS-CLIENT-PRINCIPAL` header. Container Apps authentication sets that header and strips any client-supplied copy, so the app must only be reached through Container Apps ingress. Do not expose additional ports. Keep the environment dedicated to FabricOps, without other or untrusted workloads. Health probes target the container port directly and are not subject to authentication.
 
-**Request limits.** The app rejects bodies over `apiMaxBodyBytes` with 413 and rate-limits each **authenticated** principal with 429 and `Retry-After`: approve, reject and execute (`apiRateLimitMutatingPerMinute`) and the expensive calls, telemetry collection, investigations and audit verification (`apiRateLimitExpensivePerMinute`). The budget is charged after authentication on the validated principal id, so a forged header on `/health` cannot spend anyone's budget. The limits live in memory **per replica**; with `maxReplicas = 1` they are exact. Reads are not limited by the app. Put Azure Front Door or API Management in front if the API needs a global limit, WAF rules or request logging at the edge.
+**Request limits.** The app rejects bodies over `apiMaxBodyBytes` with 413 and rate-limits each **authenticated** principal with 429 and `Retry-After`: approve, reject and execute (`apiRateLimitMutatingPerMinute`) and the expensive calls, telemetry collection, investigations and audit verification (`apiRateLimitExpensivePerMinute`). The budget is charged after authentication on the validated principal id, so a forged header on `/health` cannot spend anyone's budget. The limits live in memory **per replica**, so with N replicas one principal can make up to N times the configured number of calls per minute (`test` and `prod` run 2). Reads are not limited by the app. Put Azure Front Door or API Management in front if the API needs a global limit, WAF rules or request logging at the edge.
 
-## MVP storage and its limits
+## Private networking (test and prod)
 
-The MVP keeps its stores on the Azure Files share mounted at `/var/lib/orqentis`:
+Outside `dev` the template **refuses to deploy** (a readable failure) unless the database is private: `test` and `prod` must set `infrastructureSubnetId`, `postgresDelegatedSubnetId` and `postgresPrivateDnsZoneId`, and must not set `postgresAllowAzureServices`. Public access with a firewall is for `dev` only. The "Allow Azure services" rule opens PostgreSQL's port to resources of **every Azure tenant**; every connection would still need a valid Entra token for an existing role, but with a private path available there is no reason to leave the port open.
 
-* `events.sqlite3`: event store
-* `state.sqlite3`: incidents, approvals, dependencies
-* `evidence/`: evidence and incident reports
-* `audit/audit.jsonl`: hash-chained audit log
-* `logs/`
-* `contracts/`
+```text
+ VNet (one per environment, or a spoke of a hub)
+ ├─ snet-apps      delegated to Microsoft.App/environments          the Container Apps environment (infrastructureSubnetId)
+ └─ snet-postgres  delegated to Microsoft.DBforPostgreSQL/flexibleServers   the PostgreSQL server (postgresDelegatedSubnetId)
+ private DNS zone  <name>.private.postgres.database.azure.com, linked to the VNet (postgresPrivateDnsZoneId)
+```
 
-Constraints that follow from this:
+The Container Apps environment is integrated with the VNet, so the app's outbound traffic leaves through `snet-apps` and reaches the server's private address, which the server's name resolves to through the private DNS zone. The API keeps its public, authenticated endpoint (`ingressMode = 'externalAuthenticated'`: every request still needs an Entra token), because the GitHub-hosted smoke test and the people who use the API reach it from the internet. A fully private API (`ingressMode = 'vnet'`) is a separate decision that also moves the smoke test inside the network (*Network exposure*).
 
-* **Single writer.** SQLite and the hash-chained audit log allow exactly one writing process, and the scheduler's leader lease is in-process. The app is therefore pinned to `minReplicas = maxReplicas = 1`, and uvicorn runs a single worker. Do not scale it out. In single-revision mode, Container Apps briefly runs the old and new revision side by side during an update. Deploy changes in a quiet period, and run `orqentis audit` / `GET /audit/verify` afterwards.
-* **SMB and SQLite.** The share is mounted with `nobrl`, so byte-range locks are not forwarded to the server. SQLite's locking cannot work over SMB, and without `nobrl` it typically fails with "database is locked". This is safe only because there is a single writer. The app uses SQLite WAL mode, which SQLite does not support across hosts on network file systems; with one host it works, but it is not a durable production design.
-* **Shared key.** Container Apps mounts Azure Files over SMB with the storage account key, so `allowSharedKeyAccess` must stay `true` on this account. Mitigations: the account is dedicated to this share, TLS 1.2+ and HTTPS-only are enforced, public blob access and cross-tenant replication are disabled, the portal defaults to Entra auth, and soft delete for shares is on. Rotate the key with `az storage account keys renew`, then redeploy the template so the environment picks up the new key. For a private setup, add a private endpoint and a VNet-integrated environment.
-* **Mount ownership.** The mount maps all files to UID/GID `10001` with owner-only modes, matching the non-root user in the Dockerfile. Change both together.
+**Why VNet integration and not a private endpoint.** Flexible Server can be made private in two ways. VNet integration (a delegated subnet plus a private DNS zone) is the long-established mode and is available on every compute tier, including the Burstable `Standard_B1ms` that `dev` and `test` use; the module already implements it; it needs no further resources (no endpoint, no network interface, no `privatelink` zone group); and the server then has no public endpoint at all, so there is no switch that could turn one back on. A private endpoint adds a network interface and its own DNS wiring, and earns its keep when one server must be reached from many VNets without peering, which this deployment (one VNet per environment) does not need. The costs of VNet integration: the mode is fixed when the server is created (an existing public server cannot be converted, so `test` and `prod` get new servers), the delegated subnet holds nothing but that server, and the subnets and the server must be in one region. I could not verify offline whether private endpoints are available for the Burstable tier.
 
-**Target architecture.** These local stores are replaced by **Eventhouse** (KQL) for operational events, telemetry and the audit trail, and by **OneLake** for evidence and reports. The app then becomes stateless, can scale beyond one replica, and no longer needs the file share or a shared key.
+**What the owner provisions before the first `test` or `prod` deployment** (the template creates none of it, and the deployment fails without the ids):
+
+1. A **VNet** in the environment's region.
+2. `snet-apps`: delegated to `Microsoft.App/environments`, at least `/27` (the environment uses workload profiles), with nothing else in it.
+3. `snet-postgres`: delegated to `Microsoft.DBforPostgreSQL/flexibleServers`, at least `/28` (check the current minimum), with nothing else in it.
+4. A **private DNS zone** whose name ends in `postgres.database.azure.com` (for example `fabricops-test.private.postgres.database.azure.com`), with a **virtual network link** to the VNet, and to any VNet an operator connects from.
+5. Rights for the environment's deploy identity (`fabricops-deploy-<env>`), granted by the owner outside the template (and outside the constrained role-assignment condition): `Network Contributor` on the VNet, or at least the `Microsoft.Network/virtualNetworks/subnets/join/action` on the two subnets, and `Private DNS Zone Contributor` on the zone. Without them the environment or the server cannot attach to the subnets. *(Not verified offline: if the first deployment reports an authorization failure on `subnets/join` or on the zone, grant exactly the action it names.)*
+6. The three **GitHub environment variables** `CONTAINER_APPS_SUBNET_ID`, `POSTGRES_DELEGATED_SUBNET_ID` and `POSTGRES_PRIVATE_DNS_ZONE_ID` (resource ids), set for `test` and `prod` ([docs/delivery.md](../../docs/delivery.md), section 7). `bash scripts/validate-bicep.sh` and `scripts/bicep-snapshot.sh` use fake ids of the same shape.
+7. **A way in for people.** The app needs nothing more (step 1 to 4; if you put network security groups on the subnets they must allow TCP 5432 from `snet-apps` to `snet-postgres`). The one-off bootstrap (section 3a), the restore checks ([docs/operations/restore.md](../../docs/operations/restore.md)) and `orqentis db status` / `orqentis audit` from a workstation need a client inside the network: a small Linux VM in the VNet (or a peered VNet), reached through Azure Bastion or a VPN, with the Azure CLI, `psql` 16 or later and a checkout of the repository; or a self-hosted runner there. Management commands that only use Azure's control plane (`az postgres flexible-server restore`, `show`, `update`) work from anywhere. `az containerapp exec` opens a shell in a replica, which is inside the network and holds the app's identity, for `orqentis db status` and `orqentis audit`, but not for the bootstrap, which needs an administrator. The contracts upload and reading evidence use the storage account's public endpoint with Entra, and need no network path.
+
+`dev` keeps public access: `postgresAllowAzureServices = true` (the only environment where the template accepts it) and, for whoever runs the bootstrap, `postgresAllowedIpRanges`. A server restored in a private environment needs `--vnet`, `--subnet` and `--private-dns-zone` on the restore command, or the restored server is not private.
+
+## Storage
+
+A deployed environment keeps **no state in the container**. Two stateful services hold it, both reached with the app's managed identity and no secret:
+
+| What | Where | Why |
+|---|---|---|
+| Incidents, approvals, dependencies, operational events with collector watermarks, scheduler leases, investigation jobs, the audit trail (records and chain head) | PostgreSQL Flexible Server `psql-<prefix>-<hash>`, database `orqentis` (`modules/postgres.bicep`) | Transactions, row locks and compare-and-set make concurrent replicas safe; backups with point-in-time restore |
+| Evidence artefacts and incident reports | Blob container `evidence` (`ORQENTIS_EVIDENCE_CONTAINER`) | Write-once; version-level immutability |
+| Audit-chain anchors | Blob container `audit-anchors` (`ORQENTIS_AUDIT_ANCHOR_CONTAINER`) | The chain head (sequence and hash), copied periodically to storage the database cannot rewrite |
+| The estate contracts file | Blob container `contracts`, blob `estate.json` (`ORQENTIS_CONTRACTS_CONTAINER`, `ORQENTIS_CONTRACTS_BLOB_NAME`) | Read-only for the app; versioned, soft-deleted and immutable per version like the other containers; re-read on the catalog refresh |
+| `ORQENTIS_DATA_DIR` (`/var/lib/orqentis`) | The container's own disk | Ephemeral and per replica: scratch space, lost when the replica restarts. Nothing durable is written there |
+
+There is no Azure Files share, no SQLite file and no storage account key in a deployed environment. `ORQENTIS_STORAGE_BACKEND=postgres` is set by the template, and the app refuses to start on local files in `dev`, `test` or `prod`. SQLite, the file evidence store and the JSONL audit log remain the adapters for local development, tests and `make demo` ([ADR-0003](../../docs/adr/0003-local-stores-first.md)).
+
+### PostgreSQL
+
+* **Entra only.** `authConfig` has `activeDirectoryAuth: Enabled` and `passwordAuth: Disabled`: the server has no administrator login and no password. A connection presents an Entra access token for `https://ossrdbms-aad.database.windows.net` as the password. The app uses the reader managed identity (the database role is named after it, `id-<prefix>-reader`); people use their own token. TLS is required (`require_secure_transport` is `ON`).
+* **Administrator.** `postgresEntraAdminObjectId` and `postgresEntraAdminName` are **required**; `postgresEntraAdminType` is `Group` (default), `User` or `ServicePrincipal`. Use a group, so people can be added and removed without touching the server. Its members run the bootstrap step (section 3a). The pipeline reads the values from the `POSTGRES_ENTRA_ADMIN_OBJECT_ID`, `POSTGRES_ENTRA_ADMIN_NAME` and `POSTGRES_ENTRA_ADMIN_TYPE` variables ([docs/delivery.md](../../docs/delivery.md)). Setting the administrator needs no Azure role beyond the deploy identity's `Contributor` on the resource group.
+* **Sizing.** `postgresSkuName` (default `Standard_B1ms`, Burstable; `prod` uses `Standard_D2ds_v5`; the tier is derived from the name), `postgresStorageSizeGiB` (default `32`; storage auto-grows, and once it has grown, raise the parameter to the current size before the next deployment because a smaller value is refused), `postgresVersion` (default `17`; applied when the server is created), `postgresBackupRetentionDays` (default `7`, up to `35`), `postgresGeoRedundantBackup` (default `false`; fixed when the server is created, it copies backups to the paired region, which is a data-residency decision), `postgresHighAvailabilityMode` (`Disabled`, `ZoneRedundant` or `SameZone`; not on the Burstable tier, and the deployment fails if you combine them) and `postgresDatabaseName` (default `orqentis`).
+* **Connection budget.** Every replica opens up to `postgresPoolMax` connections (`ORQENTIS_POSTGRES_POOL_MAX`, default `6`, at least `2`: the schema migration holds one connection under its lock). Plan for the worst moment of a deploy: the old revision and the new one both running at `maxReplicas` (the new revision scales up while the old one drains). The demand is therefore `2 x maxReplicas x postgresPoolMax`, plus about 15 connections the platform reserves, plus 5 for the migration and for operators (`psql`, the restore checks). `Standard_B1ms` allows about 50 (`max_connections`): `test`'s 2 replicas x 6 gives 2 x 2 x 6 + 20 = 44, which fits; with a pool of 8 it would be 52, and the deployment **fails** on `Standard_B1ms` with the numbers when the plan needs more than 50. Other SKUs are not checked by the template; read the limit with `SHOW max_connections;` (it grows with the SKU).
+* **Network: private outside dev.** `test` and `prod` use VNet integration: `postgresDelegatedSubnetId` (a subnet delegated to `Microsoft.DBforPostgreSQL/flexibleServers`, not the Container Apps subnet) together with `postgresPrivateDnsZoneId`, and a VNet-integrated Container Apps environment (`infrastructureSubnetId`). The server then has no public endpoint and firewall rules cannot be combined with it. The design, the reason for this choice and what must exist beforehand are under *Private networking*; [`examples/ingress-vnet.bicepparam`](examples/ingress-vnet.bicepparam) and `main.bicepparam` show the parameters.
+* **Network: public access, dev only.** `postgresAllowedIpRanges` is an array of `{ name, startIpAddress, endIpAddress }` rules (empty by default: nobody outside Azure can connect; add the address of whoever runs the bootstrap step), and `postgresAllowAzureServices` (template default `false`; **only `dev` sets `true`, and the deployment fails anywhere else**) adds the documented `0.0.0.0` rule that lets Azure services connect, which is what lets Container Apps without a VNet reach the server. It opens the TCP port to resources of every Azure tenant; every connection still needs a valid Entra token for an existing database role.
+* **Use an existing server.** `postgresExistingServerName` is empty by default. Set it to the name of a server in the same resource group, for example one restored from a backup, and the template creates nothing: it points the app at that server and leaves it alone (its Entra administrator, firewall rules and parameters are then yours to keep). [docs/operations/restore.md](../../docs/operations/restore.md) uses it.
+* Encryption at rest uses the platform's service-managed keys; customer-managed keys are not configured.
+
+### Evidence and audit anchors (Blob)
+
+`modules/evidence-storage.bicep` creates a StorageV2 account (`stev<prefix><hash>`) with `allowSharedKeyAccess: false` (no account key is in use: not for the app, the pipeline or the portal; use `--auth-mode login`), Entra as the default authentication, TLS 1.2, HTTPS only, no public blob access, no cross-tenant replication and **no hierarchical namespace**: it speaks the plain Blob API, which is also what the Azurite emulator speaks. The same adapter can write to a OneLake item instead of this account by setting `ORQENTIS_EVIDENCE_BLOB_URL` (the OneLake blob endpoint), `ORQENTIS_EVIDENCE_CONTAINER` (the workspace) and `ORQENTIS_EVIDENCE_PATH_PREFIX` (the item folder); the template deploys the account either way.
+
+* **Immutability.** Version-level immutability is enabled for the account with a default retention policy of `evidenceRetentionDays` (default `30`, up to `3650`) that every new blob version inherits: a version cannot be changed or deleted until its retention ends. The setting can only be switched on when an account is created, which is why this account has its own name (`stev...`, not the `st...` account of earlier template versions). An overwrite creates a new version and the previous one stays protected. *Verify on the first deployment:* reports that are re-rendered are written as overwrites; if the service refuses an overwrite of a blob whose current version is under retention, reports must be written under a new name per render instead.
+* **`Unlocked` or `Locked`: the owner's decision.** `evidenceImmutabilityState` is `Unlocked` or `Locked`, and in the environment files it comes from one pipeline variable, `EVIDENCE_IMMUTABILITY_LOCKED` (`true` maps to `Locked`, `false` to `Unlocked`, anything else fails the build with a message; this mapping is the only place that sets `Locked`). In `prod` the variable is **required, with no default**, so the policy is never locked or left open by omission; in `dev` and `test` it is optional and defaults to `false`. **`Locked` is irreversible for the retention period:** the retention can then only be extended, never shortened or removed, and the account cannot be deleted until every blob's retention has expired. It needs the owner's sign-off. **While the policy is `Unlocked`, anyone holding `Owner` or `Storage Account Contributor` (or any role with management rights) on the account can change or remove the policy and then delete anchors, audit epoch markers and evidence**, so keep those roles minimal until it is locked (the deploy identity's `Contributor` on the resource group is one of them). To lock `prod`: deploy once with `EVIDENCE_IMMUTABILITY_LOCKED=false` (a policy cannot be created `Locked`; the platform allows only the Unlocked to Locked transition), confirm `evidenceRetentionDays` (the proposed 365 is the owner's to confirm), get the sign-off, set the variable to `true` and deploy again. Lowering `evidenceRetentionDays` is refused once locked.
+* **Soft delete and versioning.** Versioning is on. Blob soft delete and container soft delete keep a deleted or overwritten blob, and a deleted container, recoverable for `evidenceSoftDeleteDays` (default `14`). Change feed is off. Recover with `az storage blob undelete` and `az storage container restore`, and list versions with `az storage blob list --include v`.
+* **Who may write where.** Always at container scope, never a role on the account, and no keys or SAS exist:
+
+  | Principal | `evidence` | `audit-anchors` | `audit-epochs` | `contracts` | Storage account (management plane) |
+  |---|---|---|---|---|---|
+  | The app (reader identity) | read and write | read and write | **read only** | **read only** | nothing |
+  | The actor (WRITE) identity | nothing | nothing | nothing | nothing | nothing |
+  | Contracts uploaders (people or identities the owner chooses) | nothing | nothing | nothing | write (`Storage Blob Data Contributor`) | nothing |
+  | Audit operators group (`auditOperatorsPrincipalId`, optional) | nothing | nothing | write (`Storage Blob Data Contributor`) | nothing | nothing |
+  | The environment's deploy identity | nothing (no data role) | nothing | nothing | nothing | **`Contributor` on the resource group: the only identity that can change the account, and so the immutability policy while it is `Unlocked`** |
+
+  The people who hold `Owner` or `Contributor` on the resource group or the subscription are the owner's own decision. The app's role assignments (`Storage Blob Data Contributor` on two containers, `Storage Blob Data Reader` on two) contain no management action: the reader identity cannot change a policy, a key or a network rule. It cannot list or create containers either (the template creates them). The template assigns **no uploader** and, when `auditOperatorsPrincipalId` is empty, **no operator**: the owner grants them, for example for uploaders
+
+  ```bash
+  az role assignment create --assignee-object-id <object id> --assignee-principal-type <User|Group|ServicePrincipal> \
+    --role "Storage Blob Data Contributor" --scope "<storage account id>/blobServices/default/containers/contracts"
+  ```
+
+  and for audit operators the same with `/containers/audit-epochs` (or set `auditOperatorsPrincipalId`, from the pipeline variable `AUDIT_OPERATORS_OBJECT_ID`, so that the template assigns it). People who need to read evidence or anchors need a data role of their own, for example `Storage Blob Data Reader` on a container.
+* **Audit epoch markers.** After a restore the audit history is cut and a new epoch starts (`orqentis audit start-epoch`, [docs/operations/restore.md](../../docs/operations/restore.md)). The marker that says so lives in `audit-epochs`, a container the app can only **read**: a compromised app identity can neither open an epoch (and so reset what verification checks) nor remove a marker. Only the operators group can write there, and they also need the database right to act as the application role (section 3a, `operator_role`).
+* **Network.** `evidenceNetworkDefaultAction` is `Allow` by default, in every environment: the public endpoint answers any caller, and every request still needs an Entra token and a role (a private endpoint or a `Deny` rule with the Container Apps subnet's `Microsoft.Storage` service endpoint is a possible hardening, not part of the PostgreSQL decision). `Deny` with `evidenceAllowedIpRanges` and/or `evidenceAllowedSubnetIds` restricts it (trusted Azure services stay allowed). An environment without a VNet has no fixed address, so `Deny` is for ingress mode `vnet` with a subnet that has the `Microsoft.Storage` service endpoint; the deployment fails if `Deny` has neither a range nor a subnet.
+* **Redundancy.** `storageSkuName`: `Standard_LRS` (`dev`, `test`) or `Standard_ZRS` (`prod`).
+
+### Backups and restore
+
+PostgreSQL backs itself up continuously; `postgresBackupRetentionDays` (7 to 35) is how far back a point-in-time restore can go. A restore creates a **new** server. [docs/operations/restore.md](../../docs/operations/restore.md) is the runbook, with the exact commands, what happens to evidence and the audit anchor, and the rehearsal checklist the owner signs off. Evidence and anchors are protected by versioning, soft delete and immutability, not by the database backup.
+
+### Upgrading from the Azure Files template
+
+This release changes the interface of the template:
+
+* `fileShareQuotaGiB` is removed (a parameter file that still sets it no longer compiles), and so are the `storageAccountName` and `dataFileShareName` outputs. New outputs: `postgresServerName`, `postgresServerFqdn`, `postgresDatabaseName`, `evidenceStorageAccountName`, `evidenceBlobEndpoint`, `evidenceContainerName`, `auditAnchorContainerName`, `auditEpochContainerName`, `contractsContainerName`.
+* The estate contracts file now comes from a **blob** (`contractsContainerName` / `contractsBlobName`, uploaded after the deployment, section 4). The file used to live on the Azure Files share at `contractsPath`, which is gone together with `ORQENTIS_CONTRACTS_PATH` (a parameter file that still sets `contractsPath` no longer compiles). A `rest` app stays not ready until the blob is uploaded. (`contractsContent`, a Container App secret design, was considered and never shipped.)
+* `postgresEntraAdminObjectId` and `postgresEntraAdminName` are required. `postgresPoolMax` now defaults to `6` (minimum `2`, as in the app), because the connection budget assumes two revisions at `maxReplicas`.
+* Outside `dev` the template requires private networking (`infrastructureSubnetId`, `postgresDelegatedSubnetId`, `postgresPrivateDnsZoneId`) and rejects `postgresAllowAzureServices`. `externalAuthenticated` is now valid together with `infrastructureSubnetId` (a VNet-integrated environment with a public, authenticated endpoint). A new `audit-epochs` container and the optional `auditOperatorsPrincipalId` exist. The deploy identity's role-assignment condition must allow assigning to a `Group` as well as to service principals (docs/delivery.md).
+* `schedulerStartupDelaySeconds` now defaults to `30` (it was `120`).
+* `minReplicas` / `maxReplicas` default to `2` / `2` (the template used to be pinned to 1); `dev` sets 1.
+* The deploy identity's role-assignment condition must now allow `Storage Blob Data Contributor` and `Storage Blob Data Reader`, and the `Microsoft.DBforPostgreSQL` provider must be registered ([docs/delivery.md](../../docs/delivery.md)).
+* The evidence account is a **new** account (`stev...`). An environment that ran the earlier template keeps its old `st<prefix><hash>` account and file share, which the template no longer references and an incremental deployment does not delete. There is no importer for the old SQLite and JSONL data; if an environment holds data you need, export it from the share before deleting the account (`az storage account delete -g "$RG" -n <old account>`).
 
 ## Observability
 
@@ -515,4 +690,4 @@ done
 bash scripts/validate-bicep.sh      # main.bicep, main.bicepparam, examples and env/*.bicepparam, plus the prod write-switch check
 ```
 
-The `env/*.bicepparam` files read the image, registry and API client id from environment variables (`CONTAINER_IMAGE`, `ACR_LOGIN_SERVER`, `ACR_RESOURCE_ID`, `ENTRA_API_CLIENT_ID`, and optionally `FABRIC_MODE`) with no defaults; `scripts/validate-bicep.sh` supplies placeholders. CI (`.github/workflows/ci.yml`) runs the build steps and `scripts/validate-bicep.sh` on every push and pull request, and `.github/workflows/bicep-diff.yml` posts an offline diff of what each environment would deploy (`bicep snapshot`, no Azure access) on pull requests. The deploy job records the real `az deployment group what-if` with the environment's own deploy identity just before it deploys.
+`main.bicepparam` and the examples compile without any environment variable (they carry placeholders). The `env/*.bicepparam` files read the image, registry, API client id and PostgreSQL administrator from environment variables (`CONTAINER_IMAGE`, `ACR_LOGIN_SERVER`, `ACR_RESOURCE_ID`, `ENTRA_API_CLIENT_ID`, `POSTGRES_ENTRA_ADMIN_OBJECT_ID`, `POSTGRES_ENTRA_ADMIN_NAME`, and for `test` and `prod` `CONTAINER_APPS_SUBNET_ID`, `POSTGRES_DELEGATED_SUBNET_ID`, `POSTGRES_PRIVATE_DNS_ZONE_ID`, and for `prod` `EVIDENCE_IMMUTABILITY_LOCKED`) with no defaults, and optionally `EVIDENCE_IMMUTABILITY_LOCKED` (`dev`, `test`; default `false`), `AUDIT_OPERATORS_OBJECT_ID`, `FABRIC_MODE`, `POSTGRES_ENTRA_ADMIN_TYPE` and `POSTGRES_EXISTING_SERVER_NAME`; `scripts/validate-bicep.sh` supplies placeholders. CI (`.github/workflows/ci.yml`) runs the build steps and `scripts/validate-bicep.sh` on every push and pull request, and `.github/workflows/bicep-diff.yml` posts an offline diff of what each environment would deploy (`bicep snapshot`, no Azure access) on pull requests. The deploy job records the real `az deployment group what-if` with the environment's own deploy identity just before it deploys.

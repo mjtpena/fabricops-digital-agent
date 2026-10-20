@@ -49,7 +49,7 @@ class ContractsError(Exception):
     summary = "Contracts are not usable"
 
     def __init__(
-        self, path: Path | None, violations: tuple[ContractViolation, ...], *, summary: str | None = None
+        self, path: Path | str | None, violations: tuple[ContractViolation, ...], *, summary: str | None = None
     ) -> None:
         self.path = path
         self.violations = violations
@@ -76,16 +76,22 @@ class ContractsError(Exception):
 class ContractsNotConfiguredError(ContractsError):
     """Rest mode without ``ORQENTIS_CONTRACTS_PATH``."""
 
-    summary = "ORQENTIS_CONTRACTS_PATH is required in rest mode (environments, topology, data products, SLAs)"
+    summary = (
+        "A contracts source is required in rest mode (environments, topology, data products, SLAs): "
+        "ORQENTIS_CONTRACTS_PATH, or the contracts blob of the postgres storage backend"
+    )
 
     def __init__(self) -> None:
-        super().__init__(None, (ContractViolation("", "set ORQENTIS_CONTRACTS_PATH to the contracts file"),))
+        super().__init__(
+            None,
+            (ContractViolation("", "set ORQENTIS_CONTRACTS_PATH to the contracts file, or use the postgres backend"),),
+        )
 
 
 class ContractsFileNotFoundError(ContractsError):
     summary = "Contracts file not found"
 
-    def __init__(self, path: Path, reason: str = "the file does not exist") -> None:
+    def __init__(self, path: Path | str, reason: str = "the file does not exist") -> None:
         super().__init__(path, (ContractViolation("", reason),))
 
 
@@ -94,5 +100,5 @@ class ContractsInvalidError(ContractsError):
 
     summary = "Contracts file is invalid"
 
-    def __init__(self, path: Path, violations: tuple[ContractViolation, ...]) -> None:
+    def __init__(self, path: Path | str, violations: tuple[ContractViolation, ...]) -> None:
         super().__init__(path, violations)

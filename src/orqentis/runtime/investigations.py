@@ -6,22 +6,23 @@ auto-investigation submits through exactly the same runner. The investigation it
 :meth:`~orqentis.incidents.investigation.InvestigationService.investigate`.
 
 * **Idempotent per incident.** While a job for an incident is queued or running, submitting again returns that job.
-* **Bounded.** At most ``max_concurrency`` investigations run at once (the rest are queued) and each one has a
-  timeout; an investigation that is cancelled or times out puts its incident back to ``DETECTED``.
-* **In memory.** Jobs live in this process (the last ``max_retained`` finished jobs are kept for status queries).
-  Durable job storage arrives with the PostgreSQL system of record.
+* **Bounded.** At most ``max_concurrency`` investigations run in this process at once (the rest wait in the queue) and
+  each one has a timeout that starts when it takes its slot; an investigation that is cancelled or times out puts its
+  incident back to ``DETECTED``.
+* **Where jobs live is the** :class:`~orqentis.runtime.job_store.JobStore`. The default keeps them in this process
+  (local development: the last ``max_retained`` finished jobs, no polling). The PostgreSQL store makes them durable
+  and shared: ``POST /incidents/{id}/investigate`` can land on any replica, the job is visible to every replica, and
+  *every* replica runs a worker loop that claims queued jobs (``FOR UPDATE SKIP LOCKED``), keeps its claims alive with a
+  heartbeat, and re-claims the jobs of a replica that died. A graceful shutdown hands running jobs back to the queue.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections import deque
+import contextlib
 from dataclasses import dataclass
 from datetime import timedelta
-from enum import StrEnum
 from typing import Any
-
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from orqentis.config.clock import Clock
 from orqentis.domain.common import new_id
@@ -33,62 +34,36 @@ from orqentis.observability.audit import AuditTrail
 from orqentis.observability.logging import get_logger
 from orqentis.observability.metrics import DISABLED, Metrics
 from orqentis.observability.redaction import redact_text
+from orqentis.runtime.fencing import ClaimFence, FencingError, claim_fenced, fenced
+from orqentis.runtime.job_store import (
+    ClaimedJob,
+    InMemoryJobStore,
+    InvestigationJob,
+    InvestigationJobNotFoundError,
+    InvestigationJobStatus,
+    InvestigationOutcome,
+    InvestigationTrigger,
+    JobStore,
+)
+from orqentis.runtime.lease import new_holder_id
 from orqentis.storage.incidents import IncidentQuery
 from orqentis.topology.catalog import EstateCatalog
+
+__all__ = [
+    "AutoInvestigationTask",
+    "InvestigationJob",
+    "InvestigationJobNotFoundError",
+    "InvestigationJobRunner",
+    "InvestigationJobStatus",
+    "InvestigationOutcome",
+    "InvestigationTrigger",
+    "Submission",
+]
 
 _log = get_logger(__name__)
 
 _MAX_ERROR_TEXT = 500
-
-
-class InvestigationJobNotFoundError(Exception):
-    pass
-
-
-class InvestigationJobStatus(StrEnum):
-    QUEUED = "QUEUED"
-    RUNNING = "RUNNING"
-    SUCCEEDED = "SUCCEEDED"
-    FAILED = "FAILED"
-
-    @property
-    def is_active(self) -> bool:
-        return self in {InvestigationJobStatus.QUEUED, InvestigationJobStatus.RUNNING}
-
-
-class InvestigationTrigger(StrEnum):
-    API = "API"
-    SCHEDULER = "SCHEDULER"
-
-
-class InvestigationOutcome(BaseModel):
-    """Summary of a finished investigation (the full result is the incident itself)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    incident_status: IncidentStatus
-    trace_id: str
-    findings: int
-    evidence: int
-    tool_calls: int
-    approval_ids: list[str] = Field(default_factory=list)
-    confidence_level: str | None = None
-    confidence_score: float | None = None
-
-
-class InvestigationJob(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    job_id: str
-    incident_id: str
-    status: InvestigationJobStatus
-    trigger: InvestigationTrigger
-    requested_by: str
-    created_at: AwareDatetime
-    started_at: AwareDatetime | None = None
-    finished_at: AwareDatetime | None = None
-    error: str | None = None
-    result: InvestigationOutcome | None = None
+_SHUTDOWN_REASON = "Cancelled: the service is shutting down"
 
 
 @dataclass(frozen=True)
@@ -106,49 +81,62 @@ class InvestigationJobRunner:
         audit: AuditTrail,
         clock: Clock,
         *,
+        store: JobStore | None = None,
         max_concurrency: int = 2,
         timeout: timedelta = timedelta(minutes=10),
         max_retained: int = 500,
+        worker_id: str | None = None,
+        poll_interval: timedelta = timedelta(seconds=2),
+        claim_ttl: timedelta = timedelta(seconds=120),
+        max_claims: int = 3,
         metrics: Metrics = DISABLED,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
+        if claim_ttl < poll_interval * 3:
+            raise ValueError("claim_ttl must be at least three times poll_interval")
         self._service = service
         self._incidents = incidents
         self._audit = audit
         self._clock = clock
         self._timeout = timeout
-        self._max_retained = max_retained
+        self._max_concurrency = max_concurrency
+        self._store: JobStore = store if store is not None else InMemoryJobStore(clock, max_retained=max_retained)
+        self._worker_id = worker_id or new_holder_id()
+        self._poll_interval = poll_interval
+        self._claim_ttl = claim_ttl
+        self._max_claims = max_claims
+        self._running: dict[str, asyncio.Task[None]] = {}  # job id -> its task, in this process
+        self._lost: set[str] = set()  # jobs whose claim another worker took over while we were running them
+        self._unentered: dict[str, ClaimedJob] = {}  # claimed, task created, task body not started yet
         self._metrics = metrics
-        self._slots = asyncio.Semaphore(max_concurrency)
-        self._jobs: dict[str, InvestigationJob] = {}
-        self._active: dict[str, InvestigationJob] = {}  # incident id -> its queued/running job
-        self._latest: dict[str, str] = {}  # incident id -> most recent job id
-        self._finished: deque[str] = deque()
         self._tasks: set[asyncio.Task[None]] = set()
-        self._failures: dict[str, int] = {}
+        self._pumping = False
+        self._pump_again = False
+        self._poller: asyncio.Task[None] | None = None
+        self._wake = asyncio.Event()
         self._closed = False
 
     # --------------------------------------------------------------------------------------------- queries
-    def get(self, job_id: str) -> InvestigationJob | None:
-        return self._jobs.get(job_id)
+    async def get(self, job_id: str) -> InvestigationJob | None:
+        return await self._store.get(job_id)
 
-    def latest_for(self, incident_id: str) -> InvestigationJob | None:
-        job_id = self._latest.get(incident_id)
-        return self._jobs.get(job_id) if job_id else None
+    async def latest_for(self, incident_id: str) -> InvestigationJob | None:
+        return await self._store.latest_for(incident_id)
 
-    def is_active(self, incident_id: str) -> bool:
-        return incident_id in self._active
+    async def is_active(self, incident_id: str) -> bool:
+        """Whether a job for the incident is queued or running anywhere (any replica)."""
+        return await self._store.is_active(incident_id)
 
-    def active_incident_ids(self) -> set[str]:
-        return set(self._active)
+    async def active_incident_ids(self) -> set[str]:
+        return await self._store.active_incident_ids()
 
-    def failed_attempts(self, incident_id: str) -> int:
-        """Investigations of this incident that actually failed since it last succeeded (this process only).
+    async def failed_attempts(self, incident_id: str) -> int:
+        """Investigations of this incident that actually failed since it last succeeded.
 
-        An investigation that was cancelled because the service is shutting down is not a failed attempt.
+        An investigation that was cancelled because a service is shutting down is not a failed attempt.
         """
-        return self._failures.get(incident_id, 0)
+        return await self._store.count_failed_attempts(incident_id)
 
     # -------------------------------------------------------------------------------------------- commands
     async def submit(self, incident_id: str, *, requested_by: Principal, trigger: InvestigationTrigger) -> Submission:
@@ -159,8 +147,8 @@ class InvestigationJobRunner:
         """
         if self._closed:
             raise InvestigationNotPossibleError("The investigation runner is shutting down")
-        if (existing := self._active.get(incident_id)) is not None:
-            return Submission(existing, created=False)
+        if (latest := await self._store.latest_for(incident_id)) is not None and latest.status.is_active:
+            return Submission(latest, created=False)
         incident = await self._incidents.get(incident_id)
         if incident.status not in INVESTIGABLE:
             raise InvestigationNotPossibleError(
@@ -170,120 +158,325 @@ class InvestigationJobRunner:
             raise InvestigationNotPossibleError(
                 f"No investigation workflow for {incident.primary_item_type} incidents yet"
             )
-        # The lookups above awaited: another request may have queued a job meanwhile. There is no await from here
-        # to the registration below, so exactly one job per incident can be created.
-        if (existing := self._active.get(incident_id)) is not None:
-            return Submission(existing, created=False)
-        job = InvestigationJob(
-            job_id=new_id("INV"),
-            incident_id=incident_id,
-            status=InvestigationJobStatus.QUEUED,
-            trigger=trigger,
-            requested_by=requested_by.id,
-            created_at=self._clock.now(),
+        # The store decides atomically: of two submissions racing (even on different replicas) exactly one creates the
+        # job and the other is handed that job.
+        job, created = await self._store.enqueue(
+            InvestigationJob(
+                job_id=new_id("INV"),
+                incident_id=incident_id,
+                status=InvestigationJobStatus.QUEUED,
+                trigger=trigger,
+                requested_by=requested_by.id,
+                created_at=self._clock.now(),
+            ),
+            requested_by,
         )
-        self._jobs[job.job_id] = job
-        self._active[incident_id] = job
-        self._latest[incident_id] = job.job_id
-        task = asyncio.create_task(self._run(job, requested_by), name=f"investigation:{job.job_id}")
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        _log.info(
-            "investigation queued",
-            extra={"job_id": job.job_id, "incident_id": incident_id, "trigger": trigger.value},
-        )
-        return Submission(job, created=True)
+        if created:
+            _log.info(
+                "investigation queued",
+                extra={"job_id": job.job_id, "incident_id": incident_id, "trigger": trigger.value},
+            )
+            self._request_pump()
+        return Submission(job, created=created)
+
+    async def start(self) -> None:
+        """Start the worker loop that claims queued jobs. Only a shared store needs one (others may enqueue)."""
+        if not self._store.shared or self._poller is not None or self._closed:
+            return
+        self._poller = asyncio.create_task(self._poll_loop(), name="investigation-worker")
 
     async def wait_idle(self) -> None:
-        """Wait for every queued and running investigation to finish (tests and shutdown)."""
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        """Wait for every investigation started by this process to finish (tests and shutdown)."""
+        while True:
+            # Yield first: a task that has just finished only leaves ``_tasks`` (and starts the next queued job) in its
+            # done callback, which runs on the next loop iteration. gather() of finished tasks does not yield at all.
+            await asyncio.sleep(0)
+            pending = [task for task in self._tasks if not task.done()]
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def shutdown(self) -> None:
-        """Stop accepting work and cancel what is queued or running; their incidents go back to ``DETECTED``."""
+        """Stop accepting work and cancel what is running.
+
+        With a private store the queued and running jobs end as ``FAILED`` ("shutting down", not counted as an
+        attempt) and their incidents go back to ``DETECTED``. With a shared store, running jobs are handed back to the
+        queue for another replica, and queued jobs are left where they are.
+        """
         self._closed = True
+        poller, self._poller = self._poller, None
+        if poller is not None:
+            poller.cancel()
+            await asyncio.gather(poller, return_exceptions=True)
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        # A task cancelled before its first step never ran any of its own code, so it could not mark its job.
-        for job in list(self._active.values()):
-            job.status = InvestigationJobStatus.FAILED
-            job.error = "Cancelled: the service is shutting down"
-            job.finished_at = self._clock.now()
-            del self._active[job.incident_id]
-            self._remember_finished(job)
+        # A task cancelled before its first step never ran any of its own code, so it could not hand its job back.
+        for claimed in list(self._unentered.values()):
+            if self._store.shared:
+                await self._store.release(claimed.job.job_id, self._worker_id, claimed.claim)
+            else:
+                await self._finish(claimed, InvestigationJobStatus.FAILED, error=_SHUTDOWN_REASON, counts=False)
+        self._unentered.clear()
+        if self._store.shared:
+            # A claim can commit just as the worker loop is cancelled: it then belongs to no task. Give it back now
+            # instead of leaving it RUNNING until its claim expires (which would also cost the job an attempt).
+            if (orphaned := await self._store.release_claims(self._worker_id)) > 0:
+                _log.info("released claims that no task had started", extra={"jobs": orphaned})
+        else:
+            # Jobs that never got a slot have no task to mark them.
+            for job in await self._store.cancel_queued(error=_SHUTDOWN_REASON, finished_at=self._clock.now()):
+                _log.info("queued investigation cancelled by shutdown", extra={"job_id": job.job_id})
+                await self._audit_failure(job)
 
     async def reset_stale(self, incident_id: str, *, reason: str) -> bool:
-        """Put an incident stuck in ``INVESTIGATING`` back to ``DETECTED`` (no live job of ours is working on it)."""
-        if incident_id in self._active:
+        """Put an incident stuck in ``INVESTIGATING`` back to ``DETECTED`` (no live job is working on it)."""
+        if await self._store.is_active(incident_id):
             return False
         return await self._reset(incident_id, reason=reason)
 
-    # ----------------------------------------------------------------------------------------------- internals
-    async def _run(self, job: InvestigationJob, actor: Principal) -> None:
-        budget: asyncio.Timeout | None = None
-        outcome = "succeeded"
+    # ----------------------------------------------------------------------------------------------- workers
+    def _request_pump(self) -> None:
+        if self._closed:
+            return
+        self._wake.set()
+        if self._store.shared and self._poller is not None:
+            return  # the worker loop claims it
+        if self._pumping:
+            self._pump_again = True
+            return
+        self._pumping = True
+        task = asyncio.create_task(self._pump(), name="investigation-pump")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _poll_loop(self) -> None:
+        while True:
+            try:
+                await self._pump_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _log.warning("investigation worker poll failed", exc_info=True)
+            self._wake.clear()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._wake.wait(), timeout=self._poll_interval.total_seconds())
+
+    async def _pump(self) -> None:
         try:
-            async with self._slots:
-                job.status = InvestigationJobStatus.RUNNING
-                job.started_at = self._clock.now()
-                # The timeout bounds the investigation, not the wait for a slot: starting the clock any earlier would
-                # let jobs queued behind a busy slot expire without ever having run (an incident storm).
-                budget = asyncio.timeout(self._timeout.total_seconds())
+            while True:
+                self._pump_again = False
+                try:
+                    await self._pump_once()
+                except Exception:
+                    _log.warning("could not claim queued investigations", exc_info=True)
+                if not self._pump_again:
+                    break
+        finally:
+            self._pumping = False
+
+    async def _pump_once(self) -> None:
+        """Claim queued jobs while there is a free slot. Runs outside any scheduled job's fence."""
+        with fenced(None):
+            if self._store.shared:
+                await self._reclaim()
+            while not self._closed and len(self._running) < self._max_concurrency:
+                claimed = await self._store.claim_next(self._worker_id, self._claim_ttl, self._clock.now())
+                if claimed is None:
+                    return
+                self._start(claimed)
+
+    def _start(self, claimed: ClaimedJob) -> None:
+        job_id = claimed.job.job_id
+        with fenced(None):  # the task must not inherit the fence of the scheduled job that happened to enqueue it
+            task = asyncio.create_task(self._run(claimed), name=f"investigation:{job_id}")
+        self._running[job_id] = task
+        self._unentered[job_id] = claimed
+        self._tasks.add(task)
+
+        def on_done(finished: asyncio.Task[None]) -> None:
+            self._finished_task(finished, job_id)
+
+        task.add_done_callback(on_done)
+
+    def _finished_task(self, task: asyncio.Task[None], job_id: str) -> None:
+        self._running.pop(job_id, None)
+        self._lost.discard(job_id)
+        self._tasks.discard(task)
+        self._request_pump()  # a slot is free: take the next queued job
+
+    async def _reclaim(self) -> None:
+        # Never take back a job this process is still running: after a database outage longer than the claim TTL its
+        # claim looks expired, but its task is alive and will heartbeat again (or find the claim lost, if another
+        # replica took it).
+        expired = await self._store.reclaim_expired(
+            max_attempts=self._max_claims, finished_at=self._clock.now(), exclude=list(self._running)
+        )
+        for job in expired:
+            _log.warning("investigation abandoned by its workers", extra={"job_id": job.job_id})
+            await self._reset(job.incident_id, reason=job.error or "abandoned")
+            await self._audit_failure(job)
+
+    # ----------------------------------------------------------------------------------------------- internals
+    async def _run(self, claimed: ClaimedJob) -> None:
+        job, actor = claimed.job, claimed.principal
+        self._unentered.pop(job.job_id, None)
+        run_task = asyncio.current_task()
+        heartbeat = (
+            asyncio.create_task(self._heartbeat(claimed, run_task), name=f"heartbeat:{job.job_id}")
+            if self._store.shared and run_task is not None
+            else None
+        )
+        budget: asyncio.Timeout | None = None
+        label = "succeeded"  # the outcome as the operational metrics name it
+        try:
+            if claimed.recovered:
+                # The worker that had this job died; its incident is still INVESTIGATING and cannot be investigated.
+                await self._reset(job.incident_id, reason="a previous worker stopped while investigating it")
+            # The timeout bounds the investigation, not the wait for a slot: starting the clock any earlier would let
+            # jobs queued behind busy slots expire without ever having run (an incident storm).
+            budget = asyncio.timeout(self._timeout.total_seconds())
+            fence = ClaimFence(job.job_id, self._worker_id, claimed.claim) if self._store.shared else None
+            with claim_fenced(fence):  # database writes of the investigation are refused once the claim is not ours
                 async with budget:
                     incident, trace = await self._service.investigate(job.incident_id, actor=actor)
-                job.result = InvestigationOutcome(
-                    incident_status=incident.status,
-                    trace_id=trace.trace_id,
-                    findings=len(incident.findings),
-                    evidence=len(incident.evidence),
-                    tool_calls=len(trace.tool_calls),
-                    approval_ids=list(incident.approval_ids),
-                    confidence_level=incident.confidence.level.value if incident.confidence else None,
-                    confidence_score=incident.confidence.score if incident.confidence else None,
-                )
-                job.status = InvestigationJobStatus.SUCCEEDED
-                self._failures.pop(job.incident_id, None)
+            outcome = InvestigationOutcome(
+                incident_status=incident.status,
+                trace_id=trace.trace_id,
+                findings=len(incident.findings),
+                evidence=len(incident.evidence),
+                tool_calls=len(trace.tool_calls),
+                approval_ids=list(incident.approval_ids),
+                confidence_level=incident.confidence.level.value if incident.confidence else None,
+                confidence_score=incident.confidence.score if incident.confidence else None,
+            )
+            await self._finish(claimed, InvestigationJobStatus.SUCCEEDED, result=outcome)
         except asyncio.CancelledError:
-            # Being stopped by a deploy says nothing about the incident, so it does not use up a retry.
-            outcome = "cancelled"
-            await self._fail(job, "Cancelled: the service is shutting down", reset=True, counts=False)
+            label = "cancelled"
+            await self._on_cancelled(claimed)
             raise
+        except FencingError:
+            # The claim was taken over while the investigation was writing: the new holder owns the job and incident.
+            label = "cancelled"
+            _log.warning("investigation write refused: the claim was lost", extra={"job_id": job.job_id})
+            self._lost.add(job.job_id)
         except TimeoutError as exc:
             if budget is not None and budget.expired():
-                outcome = "timeout"
-                await self._fail(job, f"Timed out after {self._timeout.total_seconds():g}s", reset=True)
+                label = "timeout"
+                await self._fail(claimed, f"Timed out after {self._timeout.total_seconds():g}s", reset=True)
             else:
-                outcome = "failed"
-                await self._fail(job, f"{type(exc).__name__}: {redact_text(str(exc))}"[:_MAX_ERROR_TEXT], reset=True)
+                label = "failed"
+                await self._fail(
+                    claimed, f"{type(exc).__name__}: {redact_text(str(exc))}"[:_MAX_ERROR_TEXT], reset=True
+                )
         except Exception as exc:
             # InvestigationService has already returned the incident to DETECTED and audited the abort.
-            outcome = "failed"
-            await self._fail(job, f"{type(exc).__name__}: {redact_text(str(exc))}"[:_MAX_ERROR_TEXT], reset=False)
+            label = "failed"
+            await self._fail(claimed, f"{type(exc).__name__}: {redact_text(str(exc))}"[:_MAX_ERROR_TEXT], reset=False)
         finally:
-            job.finished_at = self._clock.now()
+            started = job.started_at
             self._metrics.investigation_finished(
-                outcome=outcome,
+                outcome=label,
                 trigger=job.trigger,
-                seconds=(job.finished_at - job.started_at).total_seconds() if job.started_at else 0.0,
+                seconds=(self._clock.now() - started).total_seconds() if started is not None else 0.0,
             )
-            if self._active.get(job.incident_id) is job:
-                del self._active[job.incident_id]
-            self._remember_finished(job)
+            if heartbeat is not None:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
 
-    async def _fail(self, job: InvestigationJob, error: str, *, reset: bool, counts: bool = True) -> None:
-        job.status = InvestigationJobStatus.FAILED
-        job.error = error
-        if counts:
-            self._failures[job.incident_id] = self._failures.get(job.incident_id, 0) + 1
+    async def _heartbeat(self, claimed: ClaimedJob, run_task: asyncio.Task[Any] | None) -> None:
+        """Keep the claim alive; stop the investigation as soon as another replica could have taken the job over.
+
+        A failing heartbeat is retried, but only while the claim cannot yet have expired: once the last heartbeat that
+        succeeded is older than the claim lifetime minus one interval, any replica may re-queue and start the job, so
+        this worker stops its own run (it would otherwise investigate the same incident a second time at once). What it
+        might still write in the meantime is refused by the claim fence.
+        """
+        job = claimed.job
+        interval = self._claim_ttl.total_seconds() / 3
+        loop = asyncio.get_running_loop()
+        last_renewed = loop.time()
+        while True:
+            asleep_since = loop.time()
+            await asyncio.sleep(interval)
+            if (late := loop.time() - asleep_since - interval) > interval:
+                # The loop was blocked (a CPU-bound step, a paused container). If this lasts a whole claim lifetime,
+                # another replica takes the job over; the claim fence then refuses what this run still tries to write.
+                _log.warning(
+                    "event loop stalled; the claim heartbeat ran late",
+                    extra={"job_id": job.job_id, "late_seconds": round(late, 2)},
+                )
+            try:
+                alive = await asyncio.wait_for(
+                    self._store.heartbeat(job.job_id, self._worker_id, claimed.claim, self._claim_ttl), interval
+                )
+            except Exception:
+                _log.warning("investigation heartbeat failed", extra={"job_id": job.job_id}, exc_info=True)
+                if loop.time() - last_renewed > self._claim_ttl.total_seconds() - interval:
+                    _log.error(
+                        "investigation claim could not be renewed for as long as its lifetime allows; stopping",
+                        extra={"job_id": job.job_id},
+                    )
+                    self._abandon(job.job_id, run_task)
+                    return
+                continue
+            if not alive:
+                _log.warning("investigation claim lost; stopping", extra={"job_id": job.job_id})
+                self._abandon(job.job_id, run_task)
+                return
+            last_renewed = loop.time()
+
+    def _abandon(self, job_id: str, run_task: asyncio.Task[Any] | None) -> None:
+        """The job is, or may be, someone else's now: stop running it and touch nothing of it afterwards."""
+        self._lost.add(job_id)
+        if run_task is not None:
+            run_task.cancel()
+
+    async def _on_cancelled(self, claimed: ClaimedJob) -> None:
+        job = claimed.job
+        if job.job_id in self._lost:
+            return  # another worker owns the job now; it is theirs to finish or fail
+        # A shutdown says nothing about the incident, so it does not use up a retry.
+        await self._reset(job.incident_id, reason=_SHUTDOWN_REASON)
+        if self._store.shared:
+            await self._store.release(job.job_id, self._worker_id, claimed.claim)
+        else:
+            await self._fail(claimed, _SHUTDOWN_REASON, reset=False, counts=False)
+
+    async def _finish(
+        self,
+        claimed: ClaimedJob,
+        status: InvestigationJobStatus,
+        *,
+        error: str | None = None,
+        result: InvestigationOutcome | None = None,
+        counts: bool = True,
+    ) -> bool:
+        stored = await self._store.finish(
+            claimed.job.job_id,
+            self._worker_id,
+            claimed.claim,
+            status=status,
+            finished_at=self._clock.now(),
+            error=error,
+            result=result,
+            counts_attempt=counts,
+        )
+        if not stored:
+            _log.warning("investigation result discarded: the claim was lost", extra={"job_id": claimed.job.job_id})
+        return stored
+
+    async def _fail(self, claimed: ClaimedJob, error: str, *, reset: bool, counts: bool = True) -> None:
+        job = claimed.job
         _log.warning(
             "investigation job failed", extra={"job_id": job.job_id, "incident_id": job.incident_id, "error": error}
         )
         if reset:
             await self._reset(job.incident_id, reason=error)
-        await self._audit_failure(job)
+        if await self._finish(claimed, InvestigationJobStatus.FAILED, error=error, counts=counts):
+            await self._audit_failure(job.model_copy(update={"error": error}))
 
     async def _reset(self, incident_id: str, *, reason: str) -> bool:
         try:
@@ -313,13 +506,6 @@ class InvestigationJobRunner:
             )
         except Exception:
             _log.warning("could not audit failed investigation job", exc_info=True)
-
-    def _remember_finished(self, job: InvestigationJob) -> None:
-        self._finished.append(job.job_id)
-        while len(self._finished) > self._max_retained:
-            old = self._jobs.pop(self._finished.popleft(), None)
-            if old is not None and self._latest.get(old.incident_id) == old.job_id:
-                del self._latest[old.incident_id]
 
 
 class AutoInvestigationTask:
@@ -353,13 +539,13 @@ class AutoInvestigationTask:
         for incident in detected:
             if submitted >= self._batch_size:
                 break
-            if self._runner.is_active(incident.incident_id):
+            if await self._runner.is_active(incident.incident_id):
                 continue
             if self._catalog is not None and self._catalog.node(incident.primary_item_id) is None:
                 # Its item left the estate (the catalog refresh noted that on the incident): nothing to investigate.
                 _log.debug("auto-investigation skipped: item gone", extra={"incident_id": incident.incident_id})
                 continue
-            if self._runner.failed_attempts(incident.incident_id) >= self._max_attempts:
+            if await self._runner.failed_attempts(incident.incident_id) >= self._max_attempts:
                 continue  # give up quietly; a human can still investigate it via the API
             try:
                 await self._runner.submit(
@@ -375,7 +561,11 @@ class AutoInvestigationTask:
             _log.info("auto-investigation submitted", extra={"jobs": submitted})
 
     async def _recover_orphans(self) -> None:
-        """An incident left in ``INVESTIGATING`` by a process that died would otherwise never be picked up again."""
+        """An incident left in ``INVESTIGATING`` by a process that died would otherwise never be picked up again.
+
+        "No live investigation" is judged by the job store, so with a shared store a replica never mistakes another
+        replica's running investigation for an orphan.
+        """
         stuck = await self._incidents.repository.list(IncidentQuery(statuses=[IncidentStatus.INVESTIGATING], limit=200))
         cutoff = self._clock.now() - self._orphan_after
         for incident in stuck:

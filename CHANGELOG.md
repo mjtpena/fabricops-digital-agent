@@ -13,6 +13,47 @@ section does not match.
 
 ### Added
 
+- Durable storage and a stateless app (ADR-0017, implements ADR-0008): PostgreSQL adapters (asyncpg, Entra token as the
+  password, no password setting) for the event store, incidents, dependencies, approvals (compare-and-set), the audit
+  chain (chain-head row lock), the leader lease (database clock, fencing generation) and investigation jobs
+  (`FOR UPDATE SKIP LOCKED`, heartbeats, re-claim after a crash); versioned SQL migrations behind an advisory lock;
+  Blob evidence/report and audit-anchor adapters (write-once, version-level immutability, OneLake by URL).
+  `ORQENTIS_STORAGE_BACKEND=postgres` is required in `dev`/`test`/`prod`; `local` stays the default for development,
+  tests, mock mode and `make demo`.
+- The estate contracts file is a blob in deployed environments (`contracts/estate.json` in the evidence account,
+  read-only for the app, uploaded with `az storage blob upload --auth-mode login`): reloaded on every replica by the
+  catalog refresh without a restart, SHA-256 and blob version audited on every (re)load (`contracts.loaded`), a bad
+  upload keeps the last good contracts, and a missing or invalid blob at start-up leaves the app not ready (typed error,
+  no crash loop). `ORQENTIS_CONTRACTS_PATH` stays for local and mock runs.
+- Fenced writes: scheduled jobs run under the lease generation and every PostgreSQL write transaction checks it, so a
+  deposed leader's late write is refused. Detection runs under a cross-replica mutex.
+- Audit anchors: the chain head is written to an immutable blob every 15 minutes. Verification checks **every** anchor
+  (the full hash is in the object name) and the operator-written epoch marker, reports the age of the newest anchor, and
+  never raises a false alarm for an append that commits while it runs; the anchor job refuses to anchor a head that
+  contradicts the previous anchor (ERROR `audit chain verification failed`). `orqentis audit start-epoch` (an operator
+  action: its marker lives in the `audit-epochs` container that the application can only read) records a restore after
+  verifying the chain, with an audited `--override-verification`. `orqentis db migrate|status|reseed-counters`.
+- Safe against stalled or partitioned replicas: a worker that cannot renew its job claim stops, its database writes are
+  fenced by the claim, there is at most one open approval (pending, or granted and not yet used) per action and one
+  incident per detection (migration 0002, which cancels duplicates a database already holds instead of failing),
+  the detection mutex cancels its section if its lock connection dies, approval expiry and audit timestamps use the
+  database clock, neither the lease fence nor the claim fence starves a renewal or a heartbeat, a polling follower never
+  queues behind the leader's writes, and a Fabric write is preceded by an `action.execute.intent` audit record (503
+  `AUDIT_UNAVAILABLE`, nothing written, the incident back to `DIAGNOSED`, if it cannot be appended).
+- Audit operators can set a junk anchor aside: `orqentis audit start-epoch --override-verification ... --disregard-anchor
+  <object name>` records it in the new epoch's immutable marker and in the chain; an epoch marker whose commit never
+  happened pins nothing, even if the app appended records before the retry. Documented in `docs/operations/restore.md`.
+- `/health/ready` on the leader says `degraded: ["audit anchoring stale"]` when the anchor job has not succeeded for twice
+  its interval; `scripts/postgres-bootstrap.sql` leaves the operators group with `SET TRUE` whether the group itself or one
+  of its members runs it.
+- Bicep: test and prod are private (VNet-integrated Container Apps environment and PostgreSQL, no "Allow Azure services"),
+  `audit-epochs` container and operators group, an explicit `EVIDENCE_IMMUTABILITY_LOCKED` decision for prod, a connection
+  budget that assumes overlapping revisions, and the Storage Blob Data Reader role id corrected.
+- Bicep: PostgreSQL Flexible Server (B1ms default, Entra-only, PITR), evidence storage account (shared key disabled,
+  versioning, version-level immutability), container-scoped role assignments, `minReplicas`/`maxReplicas`
+  (1 in dev, 2 in test and prod). `docs/operations/restore.md`, `scripts/postgres-bootstrap.sql`.
+- Contract tests for every storage port against the local and the PostgreSQL/Blob adapters, and concurrency tests with
+  two instances, two OS processes, a killed process and a graceful stop; CI runs them with PostgreSQL and Azurite.
 - Alerts can notify a separately managed action group (WS9b): `existingActionGroupId` / `alertExistingActionGroupId` (Bicep) and
   `ALERT_ACTION_GROUP_ID` (read by `env/*.bicepparam`, passed by the deploy job from a GitHub variable). The pipeline then carries only an
   identifier, so addresses never reach the job log of a public repository; the template creates and changes no action group and a

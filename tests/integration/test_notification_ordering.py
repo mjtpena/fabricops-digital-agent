@@ -64,8 +64,8 @@ async def watched(tmp_path: Path) -> AsyncIterator[tuple[Container, Log, Ordered
         log.append(("store-approval", approval.status.value))
         return result
 
-    async def transition(updated: ApprovalRequest, *, expected_revision: int) -> Any:
-        result = await real_transition(updated, expected_revision=expected_revision)
+    async def transition(updated: ApprovalRequest, *, expected_revision: int, **options: Any) -> Any:
+        result = await real_transition(updated, expected_revision=expected_revision, **options)  # e.g. enforce_expiry
         if result is not None:
             log.append(("transition-approval", updated.proposed_action.status.value))
         return result

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -45,7 +46,12 @@ async def system_info(c: ContainerDep, _: ReadPrincipal) -> SystemInfo:
     )
 
 
-@router.get("/health/ready", response_model=Ready, responses={503: {"model": NotReady}})
+@router.get(
+    "/health/ready",
+    response_model=Ready,
+    response_model_exclude_none=True,
+    responses={503: {"model": NotReady}},
+)
 async def ready(request: Request, response: Response) -> Ready | JSONResponse:
     """Readiness: 200 once the container is built and the estate catalog has been loaded, else 503 with a reason."""
     runtime: Runtime = request.app.state.runtime
@@ -60,9 +66,17 @@ async def ready(request: Request, response: Response) -> Ready | JSONResponse:
         )
         return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=body.model_dump())
     settings: Settings = request.app.state.settings
+    problems: list[Literal["contracts reload failed", "audit anchoring stale"]] = []
+    if container.catalog_refresher.contracts_reload_failed:
+        problems.append("contracts reload failed")
+    # Only the leader runs the anchor job; its own readiness says when anchoring has not worked for twice the interval
+    # (every replica's verification reports the age of the newest anchor, see AuditVerification).
+    if container.audit_anchoring is not None and container.scheduler.is_leader and container.audit_anchoring.stale:
+        problems.append("audit anchoring stale")
+    degraded = problems or None
     if not settings.scheduler_enabled:
-        return Ready(scheduler="disabled")
-    return Ready(scheduler="leader" if container.scheduler.is_leader else "standby")
+        return Ready(scheduler="disabled", degraded=degraded)
+    return Ready(scheduler="leader" if container.scheduler.is_leader else "standby", degraded=degraded)
 
 
 @router.post("/telemetry/collect", response_model=CollectionResult)

@@ -45,6 +45,11 @@ class ApprovalForbiddenError(ApprovalError):
     code = "APPROVAL_FORBIDDEN"
 
 
+def _is_unused_grant(approval: ApprovalRequest) -> bool:
+    """Granted and not yet used: the approval stays APPROVED, the action's status says whether it was executed."""
+    return approval.status is ApprovalStatus.APPROVED and approval.proposed_action.status is ActionStatus.APPROVED
+
+
 def aggregate_state(approvals: list[ApprovalRequest]) -> ApprovalState:
     statuses = {a.status for a in approvals}
     if not approvals:
@@ -111,9 +116,13 @@ class ApprovalService:
             else:
                 self._locks[approval_id] = (lock, users - 1)
 
-    async def transition(self, updated: ApprovalRequest, *, expected_revision: int) -> ApprovalRequest | None:
+    async def transition(
+        self, updated: ApprovalRequest, *, expected_revision: int, enforce_expiry: bool = False
+    ) -> ApprovalRequest | None:
         """Compare-and-set a state change (see ``ApprovalProvider.transition``)."""
-        return await self._provider.transition(updated, expected_revision=expected_revision)
+        return await self._provider.transition(
+            updated, expected_revision=expected_revision, enforce_expiry=enforce_expiry
+        )
 
     async def get(self, approval_id: str) -> ApprovalRequest:
         approval = await self._provider.get(approval_id)
@@ -126,9 +135,19 @@ class ApprovalService:
     ) -> list[ApprovalRequest]:
         return [await self._expire_if_due(a) for a in await self._provider.list(incident_id=incident_id, status=status)]
 
-    async def find_pending(self, incident_id: str, fingerprint: str) -> ApprovalRequest | None:
-        for approval in await self.list(incident_id=incident_id, status=ApprovalStatus.PENDING):
-            if approval.action_fingerprint == fingerprint:
+    async def find_open(self, incident_id: str, fingerprint: str) -> ApprovalRequest | None:
+        """The approval that already covers this action: waiting for a decision, or granted, valid and not used yet.
+
+        Asking for the same action again must not create a second approval: both could be granted and executed, and the
+        action would be written twice.
+        """
+        now = self._clock.now()
+        for approval in await self.list(incident_id=incident_id):
+            if approval.action_fingerprint != fingerprint:
+                continue
+            if approval.status is ApprovalStatus.PENDING:
+                return approval
+            if _is_unused_grant(approval) and now <= approval.expires_at:
                 return approval
         return None
 
@@ -136,6 +155,11 @@ class ApprovalService:
         self, action: Action, decision: PolicyDecision, *, incident: Incident, requested_by: Principal
     ) -> ApprovalRequest:
         now = self._clock.now()
+        fingerprint = action.fingerprint()
+        for stale in await self.list(incident_id=incident.incident_id):
+            # A grant that ran out without being used still occupies the action's slot in the store: end it, audited.
+            if stale.action_fingerprint == fingerprint and _is_unused_grant(stale) and now > stale.expires_at:
+                await self._expire(stale)
         approval = ApprovalRequest(
             approval_id=new_id("APR"),
             incident_id=incident.incident_id,
@@ -152,7 +176,12 @@ class ApprovalService:
         action.approval_id = approval.approval_id
         action.status = ActionStatus.AWAITING_APPROVAL
         approval = approval.model_copy(update={"proposed_action": action.model_copy()})
-        await self._provider.submit(approval)
+        stored = await self._provider.submit(approval)
+        if stored.approval_id != approval.approval_id:
+            # The store already had a pending request for this very action (a stalled worker and its replacement, or
+            # another replica): that one stands, and nothing new was requested, audited or announced.
+            action.approval_id = stored.approval_id
+            return stored
         await self.publish_pending_metric()
         await self._audit.record(
             actor=requested_by.id,
@@ -199,9 +228,13 @@ class ApprovalService:
                     update |= {"status": ApprovalStatus.REJECTED, "rejected_by": principal.id, "rejected_at": now}
                 # Compare-and-set: of two concurrent decisions (even in different processes) exactly one is stored.
                 stored = await self._provider.transition(
-                    approval.model_copy(update=update), expected_revision=approval.revision
+                    approval.model_copy(update=update), expected_revision=approval.revision, enforce_expiry=approve
                 )
                 if stored is None:
+                    current = await self._provider.get(approval_id)
+                    if current is not None and current.revision == approval.revision:
+                        # Nobody else wrote: the store (by its own clock) judged the approval expired.
+                        raise ApprovalExpiredError(f"Approval {approval_id} has expired")
                     raise ApprovalStateError(f"Approval {approval_id} was decided by another request")
             except ApprovalError as exc:
                 await self._audit.record(
@@ -274,24 +307,28 @@ class ApprovalService:
 
     async def _expire_if_due(self, approval: ApprovalRequest) -> ApprovalRequest:
         if approval.status is ApprovalStatus.PENDING and self._clock.now() > approval.expires_at:
-            action = approval.proposed_action.model_copy(update={"status": ActionStatus.EXPIRED})
-            expired = approval.model_copy(update={"status": ApprovalStatus.EXPIRED, "proposed_action": action})
-            stored = await self._provider.transition(expired, expected_revision=approval.revision)
-            if stored is None:
-                # Someone decided it first: report what is stored now, not our stale copy.
-                return await self._provider.get(approval.approval_id) or approval
-            approval = stored
-            await self.publish_pending_metric()
-            await self._audit.record(
-                actor="system:approvals",
-                action="approval.expire",
-                outcome="EXPIRED",
-                incident_id=approval.incident_id,
-                details={"approval_id": approval.approval_id},
-            )
-            await self._sync_incident(
-                approval, action, actor="system:approvals", summary=f"Approval {approval.approval_id} expired"
-            )
+            return await self._expire(approval)
+        return approval
+
+    async def _expire(self, approval: ApprovalRequest) -> ApprovalRequest:
+        action = approval.proposed_action.model_copy(update={"status": ActionStatus.EXPIRED})
+        expired = approval.model_copy(update={"status": ApprovalStatus.EXPIRED, "proposed_action": action})
+        stored = await self._provider.transition(expired, expected_revision=approval.revision)
+        if stored is None:
+            # Someone decided it first: report what is stored now, not our stale copy.
+            return await self._provider.get(approval.approval_id) or approval
+        approval = stored
+        await self.publish_pending_metric()
+        await self._audit.record(
+            actor="system:approvals",
+            action="approval.expire",
+            outcome="EXPIRED",
+            incident_id=approval.incident_id,
+            details={"approval_id": approval.approval_id},
+        )
+        await self._sync_incident(
+            approval, action, actor="system:approvals", summary=f"Approval {approval.approval_id} expired"
+        )
         return approval
 
     async def _sync_incident(self, approval: ApprovalRequest, action: Action, *, actor: str, summary: str) -> None:

@@ -86,7 +86,9 @@ async def test_the_investigation_timeout_starts_when_a_job_starts_running_not_wh
     b = await runner.submit(second.incident_id, requested_by=OPERATOR, trigger=InvestigationTrigger.API)
     await runner.wait_idle()
     assert [a.job.status, b.job.status] == [InvestigationJobStatus.SUCCEEDED] * 2, (a.job.error, b.job.error)
-    assert runner.failed_attempts(first.incident_id) == 0 and runner.failed_attempts(second.incident_id) == 0
+    assert (
+        await runner.failed_attempts(first.incident_id) == 0 and await runner.failed_attempts(second.incident_id) == 0
+    )
 
 
 async def test_shutdown_does_not_burn_the_retry_budget_of_running_or_queued_investigations(
@@ -105,8 +107,11 @@ async def test_shutdown_does_not_burn_the_retry_budget_of_running_or_queued_inve
     await runner.shutdown()
     assert running.job.status is InvestigationJobStatus.FAILED and queued.job.status is InvestigationJobStatus.FAILED
     # Being stopped by a deploy says nothing about the incident: it must stay eligible for automatic investigation.
-    assert runner.failed_attempts(first.incident_id) == 0
-    assert runner.failed_attempts(second.incident_id) == 0
+    assert await runner.failed_attempts(first.incident_id) == 0
+    assert await runner.failed_attempts(second.incident_id) == 0
+    # Both ended, so both are in the audit trail (the one that never got a slot as well as the one that was running).
+    failed = [r for r in await container.audit.list() if r.action == "investigation.job" and r.outcome == "FAILED"]
+    assert sorted(r.incident_id or "" for r in failed) == sorted([first.incident_id, second.incident_id])
 
 
 async def test_a_genuine_timeout_still_counts_as_a_failed_attempt(
@@ -120,7 +125,7 @@ async def test_a_genuine_timeout_still_counts_as_a_failed_attempt(
     submission = await runner.submit(incident.incident_id, requested_by=OPERATOR, trigger=InvestigationTrigger.API)
     await runner.wait_idle()
     assert submission.job.status is InvestigationJobStatus.FAILED and "Timed out" in (submission.job.error or "")
-    assert runner.failed_attempts(incident.incident_id) == 1
+    assert await runner.failed_attempts(incident.incident_id) == 1
 
 
 # ------------------------------------------------------------------------------------------------ finding 2
@@ -307,5 +312,5 @@ async def test_removing_an_item_annotates_its_open_incidents_and_stops_automatic
         await c.investigation_jobs.wait_idle()
         assert isinstance(c.clock, FixedClock)
         c.clock.advance(MINUTE)
-    assert c.investigation_jobs.latest_for(incident.incident_id) is None
-    assert c.investigation_jobs.failed_attempts(incident.incident_id) == 0
+    assert await c.investigation_jobs.latest_for(incident.incident_id) is None
+    assert await c.investigation_jobs.failed_attempts(incident.incident_id) == 0

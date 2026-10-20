@@ -22,7 +22,7 @@ assume 730 hours (2,592,000 seconds in 30 days). The programme's budget and its 
 | Container Apps environment `cae-<prefix>` | Workload profiles, `Consumption` profile only | No standing fee for a Consumption-only environment. A dedicated profile would add *Dedicated Plan Management* (USD 0.10 per hour) | same | 0 |
 | Log Analytics workspace `log-<prefix>` | `PerGB2018`, 30 days (`dev`, `test`), 90 days (`prod`) | Ingestion per GB beyond the first 5 GB a month (USD 3.34), retention beyond the free period (USD 0.15 per GB-month) | service `Log Analytics`; [pricing page](https://azure.microsoft.com/pricing/details/monitor/) | USD 0-5; driven by log volume (below) |
 | Application Insights `appi-<prefix>` | Workspace-based | Nothing of its own: its data is Log Analytics ingestion | same | in the line above |
-| Storage account + Azure Files share | `Standard_LRS` (`Standard_ZRS` in `prod`), transaction-optimized share, 8 GiB quota in `dev` | GB stored and file transactions | service `Storage`; [pricing page](https://azure.microsoft.com/pricing/details/storage/files/) | under USD 1 for a few GiB |
+| Evidence storage account | Standard, blob containers `evidence`, `audit-anchors`, `contracts` and `audit-epochs`, versioning and version-level immutability | GB stored and blob transactions (the anchor job writes one small blob every 15 minutes) | service `Storage`; [pricing page](https://azure.microsoft.com/pricing/details/storage/blobs/) | under USD 1 for sandbox volumes |
 | Managed identities `id-<prefix>-reader`, `-actor` | n/a | free | n/a | 0 |
 | Easy Auth, ingress, probes | n/a | included | n/a | 0 |
 | Action group `ag-<prefix>` | email and webhook receivers | Email and webhook notifications are free within monthly allowances (see *Notifications* on the Azure Monitor pricing page) | [Azure Monitor pricing, Notifications](https://azure.microsoft.com/pricing/details/monitor/) | 0 |
@@ -33,12 +33,13 @@ assume 730 hours (2,592,000 seconds in 30 days). The programme's budget and its 
 A log alert with a `collector` dimension (the collector errors rule) may be billed per dimension value that is
 monitored; check *Cost analysis* after the first month before assuming the table.
 
-### Added by the PostgreSQL storage (WS6), after it merges
+### The PostgreSQL storage (WS6)
 
 | Resource | Default | Notes |
 |---|---|---|
 | PostgreSQL Flexible Server | Burstable `B1ms`, Entra-only, 7-day point-in-time restore | the largest fixed line of an environment (the programme estimated about USD 24 a month); stop it when a sandbox is idle (below) |
-| Blob storage for evidence | Standard, version-level immutability | cents for sandbox volumes |
+| Blob storage for evidence | Standard, version-level immutability (the table above) | cents for sandbox volumes |
+| Private networking (`test`, `prod`) | VNet, two delegated subnets, a private DNS zone | the subnets and the zone cost cents; VNet integration of the Container Apps environment needs a workload-profiles environment already in use |
 | Key Vault | Standard | cents per month and per 10,000 operations |
 
 ### Around the app, not in `main.bicep`

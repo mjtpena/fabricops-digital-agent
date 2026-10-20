@@ -763,6 +763,9 @@ class DeclaredDependencyService:
     def __init__(self, contracts: EstateContracts) -> None:
         self._dependencies = list(contracts.dependencies)
 
+    def replace(self, contracts: EstateContracts) -> None:
+        self._dependencies = list(contracts.dependencies)
+
     async def list_dependencies(self) -> list[Dependency]:
         return list(self._dependencies)
 
@@ -795,9 +798,8 @@ class RestFabricClient:
         self._http = FabricHttp(
             token_provider, timeout=timeout, max_retries=max_retries, transport=transport, sleep=sleep, budget=budget
         )
-        ctx = _Context(
-            self._http, fabric_base_url, powerbi_base_url, tenant_id, EnvironmentResolver(contracts.environments)
-        )
+        self._environments = EnvironmentResolver(contracts.environments)
+        ctx = _Context(self._http, fabric_base_url, powerbi_base_url, tenant_id, self._environments)
         self._environment_feed = ctx.feed
         self._workspaces = RestWorkspaceService(ctx)
         self._items = RestItemService(ctx, self._workspaces)
@@ -859,6 +861,11 @@ class RestFabricClient:
     @property
     def dependencies(self) -> DeclaredDependencyService:
         return self._dependencies
+
+    def apply_contracts(self, contracts: EstateContracts) -> None:
+        """Adopt reloaded contracts: declared environments and declared dependencies (the next listing uses them)."""
+        self._environments.replace(contracts.environments)
+        self._dependencies.replace(contracts)
 
     def observe_environment_changes(self, observer: EnvironmentObserver | None) -> None:
         """Be told, once per mapped node, when a contracts declaration changed its classification."""

@@ -23,13 +23,19 @@ class ApprovalProvider(Protocol):
         """Unconditional write. Only for the initial submit (and tests); state changes use ``transition``."""
         ...
 
-    async def transition(self, updated: ApprovalRequest, *, expected_revision: int) -> ApprovalRequest | None:
+    async def transition(
+        self, updated: ApprovalRequest, *, expected_revision: int, enforce_expiry: bool = False
+    ) -> ApprovalRequest | None:
         """Compare-and-set: store ``updated`` only if the stored revision is still ``expected_revision``.
 
         Returns the stored request (revision ``expected_revision + 1``), or ``None`` when another writer got
         there first and nothing was written. It must be atomic across processes (a conditional ``UPDATE``, or a
         row lock in PostgreSQL). Deciding, expiring, cancelling and claiming an execution all go through it, so
         exactly one of any set of racing writers wins.
+
+        With ``enforce_expiry`` the write also requires that the approval has not expired *as judged where the data
+        lives* (the PostgreSQL adapter uses the database clock inside the same statement); callers that grant or use
+        an approval pass it. The local adapter belongs to one process and relies on the caller's own check.
         """
         ...
 
@@ -85,7 +91,9 @@ class LocalApprovalProvider:
             ),
         )
 
-    async def transition(self, updated: ApprovalRequest, *, expected_revision: int) -> ApprovalRequest | None:
+    async def transition(
+        self, updated: ApprovalRequest, *, expected_revision: int, enforce_expiry: bool = False
+    ) -> ApprovalRequest | None:
         stored = updated.model_copy(update={"revision": expected_revision + 1})
         changed = await self._db.execute(
             "UPDATE approvals SET status = ?, body = ? "

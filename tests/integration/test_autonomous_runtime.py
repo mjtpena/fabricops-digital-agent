@@ -58,7 +58,7 @@ async def settle(container: Container) -> None:
 async def finished(container: Container, job_id: str, *, within: float = 30.0) -> InvestigationJob:
     async with asyncio.timeout(within):
         while True:
-            job = container.investigation_jobs.get(job_id)
+            job = await container.investigation_jobs.get(job_id)
             assert job is not None
             if not job.status.is_active:
                 return job
@@ -100,7 +100,7 @@ async def test_an_incident_from_scheduled_detection_is_investigated_without_any_
     incident = await container.incidents.get("INC-2026-0042")
     assert incident.status is IncidentStatus.AWAITING_APPROVAL
     assert incident.category == "SCHEMA_DRIFT" and incident.findings and incident.approval_ids
-    job = container.investigation_jobs.latest_for("INC-2026-0042")
+    job = await container.investigation_jobs.latest_for("INC-2026-0042")
     assert job is not None and job.status is InvestigationJobStatus.SUCCEEDED
     assert job.trigger is InvestigationTrigger.SCHEDULER and job.requested_by == SYSTEM_PRINCIPAL.id
 
@@ -121,7 +121,7 @@ async def test_auto_investigation_is_not_repeated_for_an_incident_already_handle
         await container.scheduler.tick()
         await settle(container)
         clock.advance(MINUTE)
-    job = container.investigation_jobs.latest_for("INC-2026-0042")
+    job = await container.investigation_jobs.latest_for("INC-2026-0042")
     assert job is not None
     audit = await container.audit.list(incident_id="INC-2026-0042")
     assert len([r for r in audit if r.action == "investigation.start"]) == 1
@@ -147,7 +147,7 @@ async def test_a_failing_investigation_is_retried_a_bounded_number_of_times(
         clock.advance(MINUTE)
 
     assert attempts == 3  # scheduler_auto_investigate_max_attempts
-    job = container.investigation_jobs.latest_for(incident.incident_id)
+    job = await container.investigation_jobs.latest_for(incident.incident_id)
     assert job is not None and job.status is InvestigationJobStatus.FAILED
     assert job.error is not None and "s3cr3t-value" not in job.error and "RuntimeError" in job.error
     audit = await container.audit.list(incident_id=incident.incident_id)
@@ -215,7 +215,9 @@ async def test_submitting_twice_returns_the_same_job_until_it_finishes(
     assert first.created and not again.created and again.job.job_id == first.job.job_id
     async with asyncio.timeout(10):
         await gate.started.wait()
-    assert first.job.status is InvestigationJobStatus.RUNNING and c.investigation_jobs.is_active(incident.incident_id)
+    assert first.job.status is InvestigationJobStatus.RUNNING and await c.investigation_jobs.is_active(
+        incident.incident_id
+    )
 
     gate.release.set()
     done = await finished(c, first.job.job_id)
@@ -240,7 +242,7 @@ async def test_non_investigable_and_unknown_incidents_are_rejected_up_front(cont
         await container.investigation_jobs.submit(
             "INC-0000-0000", requested_by=OPERATOR, trigger=InvestigationTrigger.API
         )
-    assert container.investigation_jobs.active_incident_ids() == set()
+    assert await container.investigation_jobs.active_incident_ids() == set()
 
 
 async def test_concurrency_is_bounded_and_the_rest_wait_in_the_queue(tmp_path: Path) -> None:
@@ -279,7 +281,7 @@ async def test_an_investigation_that_times_out_fails_cleanly_and_the_incident_ca
     )
     submission = await runner.submit(incident.incident_id, requested_by=OPERATOR, trigger=InvestigationTrigger.API)
     await runner.wait_idle()
-    job = runner.get(submission.job.job_id)
+    job = await runner.get(submission.job.job_id)
     assert job is not None and job.status is InvestigationJobStatus.FAILED
     assert job.error is not None and job.error.startswith("Timed out")
     # The abandoned investigation must not leave the incident stuck in INVESTIGATING.
@@ -305,7 +307,7 @@ async def test_shutdown_cancels_running_investigations_and_puts_incidents_back(
     assert (await c.incidents.get(incident.incident_id)).status is IncidentStatus.INVESTIGATING
 
     await c.investigation_jobs.shutdown()
-    job = c.investigation_jobs.get(submission.job.job_id)
+    job = await c.investigation_jobs.get(submission.job.job_id)
     assert job is not None and job.status is InvestigationJobStatus.FAILED and "shutting down" in (job.error or "")
     assert (await c.incidents.get(incident.incident_id)).status is IncidentStatus.DETECTED
     with pytest.raises(InvestigationNotPossibleError, match="shutting down"):

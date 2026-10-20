@@ -2,8 +2,8 @@
 
 How to run a deployed Orqentis FabricOps: what to watch, what each alert means and what to do first, how to restore,
 rotate, upgrade, roll back and pause it. It is written for the on-call engineer and the platform owner of an
-environment (`dev`, `test` or `prod`), and it describes what the repository deploys today. Things that arrive with the
-PostgreSQL storage (WS6) are marked **(after WS6)**. The design of the metrics and alerts is
+environment (`dev`, `test` or `prod`), and it describes what the repository deploys: PostgreSQL and Blob storage, two
+or more replicas in `test` and `prod`. The design of the metrics and alerts is
 [ADR-0019](adr/0019-metrics-alerts-and-operations.md); what everything costs is [`cost.md`](cost.md); how a change
 reaches an environment is [`delivery.md`](delivery.md); the Bicep parameters are in
 [`../infra/bicep/README.md`](../infra/bicep/README.md).
@@ -94,6 +94,8 @@ Attribute values are bounded: enum members and our own collector, job and tool n
 | `orqentis.scheduler.leader` | gauge | none | `1` while this replica holds the lease |
 | `orqentis.notifications` | counter | `channel` = `teams_workflows`/`webhook`, `outcome` = `sent`/`failed`/`dropped`/`abandoned` | How each notification ended (retries are attempts, not outcomes): `failed` is a refusal or exhausted attempts, `dropped` an outbox that was full, `abandoned` a shutdown |
 | `orqentis.audit.verifications` | counter | `result` = `valid`/`invalid`/`error` | Scheduled audit verifications |
+| `orqentis.audit.anchor.age` | gauge (s) | none | Age of the newest immutable audit anchor as the last scheduled verification saw it; absent when none exists. Alert when it exceeds twice `schedulerAuditAnchorIntervalMinutes` (the anchor job is not working) |
+| `orqentis.contracts.reload.failures` | counter | `error_type` | Refreshes in which the estate contracts file was refused or missing (the previous contracts stay in force). One per failing refresh, so a persisting failure is a rising count |
 
 **What a collection outcome means.** `success`: every collector and scope worked. `degraded`: some failed, at least one
 worked (FabricOps sees part of the estate); the heartbeat still advances, and the *collector errors* alert is what
@@ -296,8 +298,9 @@ pipeline. It is switched off by the template while `schedulerEnabled` or `collec
 
 ### Alert: audit verification failure
 
-**Meaning.** The scheduled `audit-verify` job found the audit hash chain (or its immutable anchor, **after WS6**) invalid,
-or could not read the log after retrying; or an append was refused after the log shrank. The audit trail is the record of
+**Meaning.** The scheduled `audit-verify` job found the audit hash chain, one of its immutable anchors or the epoch marker invalid,
+or could not read the log after retrying; or the anchor job refused to anchor a head that contradicts what was
+anchored (the same log message). The audit trail is the record of
 what the agent and the humans did, so **treat this as tampering until shown otherwise**. Sev 0. The log leg matches the
 exact JSON fields `logger` and `message` of our own two log lines, so text chosen by Fabric or the model cannot raise it.
 
@@ -308,19 +311,27 @@ persists the action group is reminded at most every six hours (`muteActionsDurat
 **First three things to check.** Preserve evidence first; do not restart, redeploy or "fix" anything yet.
 
 1. Read the failure. `ContainerAppConsoleLogs_CL | where Log_s has 'audit chain verification failed' | project TimeGenerated, Log_s | take 5`:
-   `check` is `chain` (records altered, removed or reordered), `anchor` (the chain no longer matches its immutable anchor) or
+   `check` is `chain` (records altered, removed or reordered), `anchor` (the chain contradicts an immutable anchor or the
+   epoch marker), `anchor-continuity` (the anchor job refused to anchor a head that contradicts the previous anchor) or
    `read` (the log could not be read, which is an availability problem, not proof of tampering); `first_invalid_sequence`
-   is the first record that does not verify; `reason` says why (`hash chain broken`, `sequence gap`, `log truncated`).
-2. Take a read-only copy and verify it yourself:
-   `az storage file download --account-name <storage account> --share-name orqentis-data --path audit/audit.jsonl --dest ./evidence/audit/audit.jsonl --auth-mode login --enable-file-backup-request-intent`
-   (the storage account is the `storageAccountName` deployment output), then `orqentis audit --data-dir ./evidence`. Compare
-   the records around `first_invalid_sequence` with any older copy you hold (section 8).
-3. Who could have written it? The storage account's activity log (`az monitor activity-log list --resource-id <storage account id>`)
-   and data-plane diagnostic logs if enabled; who holds `Storage File Data Privileged Contributor`; recent deployments.
+   is the first record that does not verify; `reason` says why (`hash chain broken`, `sequence gap`, `indexed columns
+   disagree`, `contradicts the audit anchor (epoch N) for sequence S`, `epoch counter was moved`, `restored or rewound`).
+2. Verify it yourself from a host with access to the database, without restarting anything: `orqentis audit` (the runbook's
+   section 6, [operations/restore.md](operations/restore.md), has the variables and the roles). Compare the records around
+   `first_invalid_sequence` with a point-in-time copy of the database (restore to a new server; it never touches the live
+   one) and with the anchors in the `audit-anchors` container, which nobody can change before the retention ends.
+3. Who could have written it? PostgreSQL's server logs and the storage account's activity log
+   (`az monitor activity-log list --resource-id <storage account id>`); who holds `Storage Blob Data Contributor` on
+   `audit-anchors` and on `audit-epochs`; who is in the PostgreSQL administrator group; recent deployments and restores
+   (a restore without `orqentis audit start-epoch` is reported as `restored or rewound` and is not tampering).
 
-Do not edit the log to make it verify. After the investigation the owner decides whether to archive the broken file and
-start a new chain, which is a deliberate, audited act. With the chain valid again (or archived), resolve the alert in the portal; the next hourly run
-confirms it. A `read` failure that repeats is a storage problem: check the Azure Files mount (section 5, *app down*).
+Do not edit the log to make it verify. After the investigation, if records were lost by a restore, an audit operator records
+it with `orqentis audit start-epoch` (it verifies the chain first and refuses over tampering unless the operator gives an
+audited override reason): a deliberate, audited act. With the chain valid again, resolve the alert in the portal; the next
+hourly run confirms it. A `read` failure that repeats is a database problem: check connectivity, the database role and the
+Entra token (section 5, *app down*). A verification that is `valid` but reports an old `last_anchor_age_seconds`, or
+`/health/ready` saying `degraded: audit anchoring stale`, means the anchor job is not working (a missing storage role or a
+stopped leader): the anchors stop protecting new records until it works again.
 
 ## 6. On call: the first five minutes
 
@@ -347,20 +358,18 @@ failure* followed by a restore. Allow for ingestion delay (about 2-5 minutes) pl
 | 5xx rate | Deploy `dev` with `fabricMode=rest` and no contracts file (the app stays up, builds in the background and answers `503 NOT_READY`), then send 25 authenticated `GET /incidents` calls within 10 minutes | Alert once 5 % of at least 20 requests are 5xx | Redeploy with the right parameters |
 | Collector errors | Remove the reader identity's Viewer role from one sandbox workspace, or use the known 403 of `semantic-model-refreshes` | One alert per failing collector after two failed runs | Restore the role |
 | Heartbeat | Deploy with `alertHeartbeatMinutes=5` and `schedulerStartupDelaySeconds=900` (no job runs for 15 min after a restart), then restart the revision | Alert about 10 minutes after the restart | Redeploy with the defaults |
-| Audit verification | Download `audit/audit.jsonl`, change one character inside a record without changing its length, upload it, restart the revision (the job runs right after the start-up delay) | Sev 0 alert; `GET /audit/verify` reports `valid: false` | Upload the original file again |
+| Audit verification | **Never on the live chain.** Restore the database to a scratch server ([operations/restore.md](operations/restore.md)), edit one record there as a superuser (`ALTER TABLE audit_records DISABLE TRIGGER USER; UPDATE ...`) and point a scratch deployment at it, or run `orqentis audit` against it | `hash chain broken` (and, with the scratch deployment, the Sev 0 alert) | Delete the scratch server |
 
 For every test: check the notification reached the receiver, that it carries the runbook link, and that the alert closes
 after the restore. Record the result in the production-readiness ledger.
 
 ## 8. Restore
 
-* **Today (Azure Files + SQLite, before WS6).** The data share has soft delete (14 days) and no snapshots or backups:
-  undeleting a share (`az storage share-rm restore`) is the only built-in recovery, and nothing is deployed in this mode
-  to `test` or `prod` before WS6. Treat `dev` data as disposable (`orqentis demo` and the sandbox regenerate it).
-* **After WS6.** PostgreSQL has point-in-time restore and evidence lives in immutable Blob storage; the restore runbook
-  (exact commands to restore to a new server and repoint the app, and what happens to the audit chain) is WS6's
-  `docs/operations/restore.md`, and this guide links to it once it merges. The audit chain's immutable anchor lets
-  `audit-verify` prove that a restore did not drop or rewrite records.
+* **PostgreSQL** has point-in-time restore (7 days in `dev` and `test`, 35 in `prod`, `postgresBackupRetentionDays`) and
+  evidence lives in immutable Blob storage. The restore runbook (exact commands to restore to a new server and repoint the
+  app, what happens to evidence, and the audit epoch an operator must open) is
+  [operations/restore.md](operations/restore.md), with a rehearsal checklist the owner signs off. The audit chain's immutable
+  anchors let `audit-verify` prove that a restore did not drop or rewrite records it should have kept.
 * Whatever the store, a restored FabricOps resumes from its watermarks and cursor, re-reading up to
   `ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS`. Rehearse one restore per environment before relying on it.
 
@@ -374,7 +383,8 @@ FabricOps keeps no credential of its own in the repository, in parameters or in 
 | Fabric service principal secret (`fabricAuthMode=service_principal`) | Key Vault secret, referenced versionless by `fabricServicePrincipalSecretUri` | Create a new secret on the app registration (`az ad app credential reset --id <appId> --append`), set it as a **new version of the same Key Vault secret**, then `az containerapp revision restart` so the process reads it; delete the old credential once collection works. Do this before it expires |
 | Fabric service principal certificate | Key Vault secret holding the PEM, mounted read-only | Same, with a new certificate version; restart the revision |
 | Application Insights connection string | Container App secret (not a parameter) | It lets its holder write telemetry to the component, not read it. To change it, recreate the component and redeploy |
-| Storage account key (the Azure Files mount) | Read at deployment into the environment's storage definition | `az storage account keys renew`, then **redeploy** so the environment picks up the new key; the share is unavailable until you do |
+| Storage account key | Does not exist: shared-key access is disabled on the evidence account and the app uses its managed identity | Nothing to rotate |
+| PostgreSQL password | Does not exist: Microsoft Entra authentication only, the access token is the password | Nothing to rotate |
 | Entra app registration of the API | Entra ID, no client secret (the API validates bearer tokens only) | Nothing to rotate; review the app role assignments quarterly |
 | CI/CD identities (`fabricops-cicd-*`) | Entra ID federated credentials (OIDC), no secret | Nothing to rotate; keep the subjects as `docs/delivery.md` shows |
 | Live-test service principal (`fabricops-live-reader`) | One client secret outside the repository, on the orchestrator's machine only; its expiry is recorded in `docs/live-environment.md` | `az ad app credential reset --id <appId>` before the date there, update the local copy, delete the old one. Never store it in CI |
@@ -399,10 +409,10 @@ az deployment group create -g "$RG" -p infra/bicep/env/prod.bicepparam      # or
 ```
 
 Then confirm with `scripts/smoke-test.sh`'s checks: the latest revision is ready and serves all traffic, `/health` is `200`,
-`/health/ready` is `200`. A deployment creates a new revision and the old one drains; the new process waits
-`schedulerStartupDelaySeconds` (120) before it takes the lease or runs a job, so the two do not both write. Until WS6 the old
-and the new revision still share one volume for those minutes: deploy in a quiet period and check `GET /audit/verify`
-afterwards (the `audit-verify` job does too). Do not roll back across a change of the stored data format without reading the
+`/health/ready` is `200`. A deployment creates a new revision and the old one drains. The two revisions overlap safely: one audit chain
+(the head row is locked by every append), one scheduler leader (the database lease, fenced writes), at most one execution per
+approval, and schema migrations that stay compatible with the previous release. Check `GET /audit/verify` afterwards (the
+`audit-verify` job does too). Do not roll back across a change of the stored data format without reading the
 release notes. Redeploying the same digest with other parameters is also how a threshold, a window or a receiver changes.
 
 ## 11. Data retention
@@ -411,9 +421,8 @@ release notes. Redeploying the same digest with other parameters is also how a t
 |---|---|---|---|
 | Console and system logs, application metrics, requests | Log Analytics workspace `log-$PREFIX` | `logRetentionInDays`: 30 (`dev`, `test`), 90 (`prod`), maximum 730 | `logRetentionInDays` in the parameter file; raising it costs money (`cost.md`) |
 | Application Insights data | Same workspace (workspace-based component) | Same | Same |
-| Incidents, approvals, events, evidence, audit chain **today** | Azure Files share `orqentis-data` (SQLite, evidence files, `audit/audit.jsonl`) | No expiry; share soft delete 14 days | `fileShareQuotaGiB`; copy with `az storage file download-batch` |
-| Incidents, approvals, events, leases, audit chain **after WS6** | PostgreSQL Flexible Server | Point-in-time restore window (WS6 parameter, 7 days in the plan) | WS6's retention parameter |
-| Evidence and reports **after WS6** | Blob storage with version-level immutability | Immutability period set by WS6; cannot be shortened | WS6 parameters |
+| Incidents, approvals, events, leases, jobs, audit chain | PostgreSQL Flexible Server | No expiry in the database; point-in-time restore window 7 / 7 / 35 days (`dev` / `test` / `prod`) | `postgresBackupRetentionDays` |
+| Evidence, reports, audit anchors, epoch markers, the contracts file | Blob storage with versioning, soft delete and version-level immutability | `evidenceRetentionDays` (7 / 30 / 365); cannot be shortened once the policy is locked (`EVIDENCE_IMMUTABILITY_LOCKED`) | `evidenceRetentionDays`, `evidenceSoftDeleteDays` |
 
 Alert history and the action group's activity follow the Azure Monitor defaults. The audit trail and evidence are never
 deleted by the application. A log retention shorter than the time you want to investigate back is a decision the owner
@@ -421,9 +430,8 @@ makes with `cost.md` in front of them.
 
 ## 12. Scaling and the leader lease
 
-* **One replica today.** The Bicep pins `minReplicas = maxReplicas = 1`: SQLite, the hash-chained audit file and the in-process
-  lease allow one writer. Do not scale out before WS6. `/health/ready` reports `"scheduler": "leader"`.
-* **After WS6** two or more replicas are supported. They compete for a database lease; exactly one holds it and runs the
+* **Replicas.** `minReplicas` and `maxReplicas` are 1 in `dev` and 2 in `test` and `prod`; the PostgreSQL storage makes two or
+  more safe. They compete for a database lease; exactly one holds it and runs the
   jobs (`orqentis.scheduler.leader` is `1` on that replica, `0` on the others), the rest serve the API. The lease TTL is
   `schedulerLeaseTtlSeconds` (60; at least three times `schedulerTickSeconds`). If the leader dies, a standby takes over
   within about one TTL, with a higher fencing token, and the dead leader's late writes are rejected. Watch

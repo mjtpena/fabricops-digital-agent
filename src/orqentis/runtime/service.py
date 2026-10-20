@@ -86,6 +86,7 @@ class Runtime:
         container, self._container = self._container, None
         if container is None:
             return
+        await container.replica_sync.stop()
         await container.scheduler.stop()
         await container.investigation_jobs.shutdown()
         await container.notifications.stop()  # last: the jobs above may still publish while they wind down
@@ -110,8 +111,12 @@ class Runtime:
 
     async def _become_ready(self, container: Container) -> None:
         self._container = container
+        # Every replica works on queued investigations (a shared job store), whether or not it runs the scheduler.
+        await container.investigation_jobs.start()
         await container.notifications.start()
         if self._settings.scheduler_enabled:
             await container.scheduler.start()
+            if self._settings.scheduler_catalog_refresh_enabled:
+                await container.replica_sync.start()
         else:
             _log.info("scheduler disabled (ORQENTIS_SCHEDULER_ENABLED=false)")
