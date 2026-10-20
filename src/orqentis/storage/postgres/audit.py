@@ -10,8 +10,10 @@ single transaction:
 
 Because the lock is taken before the head is read and held until commit, no two records can ever have the same
 predecessor: the chain cannot fork however many replicas append and however they interleave. If the transaction fails,
-nothing was written and no sequence number was consumed. The timestamp is taken from the injected clock while holding
-the lock (so, with synchronised clocks, it grows with the sequence; verification does not depend on it).
+nothing was written and no sequence number was consumed. The timestamp is taken while holding the lock, from the
+database's clock in deployed environments (the injected clock otherwise) and never earlier than the previous
+record's, so it does not go backwards along the chain whatever the clocks of the replicas say (verification does not
+depend on it).
 
 **Verification** re-derives every hash from the stored record bodies (exact JSON text), checks that sequences are
 contiguous, that the indexed columns agree with the body, that the last record is the chain head and that nothing exists
@@ -36,7 +38,7 @@ from orqentis.config.clock import Clock
 from orqentis.domain.common import new_id
 from orqentis.observability.anchors import AnchorConflictError, AuditAnchorStore, ChainHead
 from orqentis.observability.audit import GENESIS_HASH, AuditRecord, AuditVerification, record_digest
-from orqentis.observability.epochs import EpochMarker, EpochMarkerStore, current_epoch
+from orqentis.observability.epochs import EpochMarker, EpochMarkerStore, EpochPreconditionError, current_epoch
 from orqentis.observability.logging import get_logger
 from orqentis.observability.redaction import redact, redact_text
 from orqentis.storage.postgres.database import Connection, PostgresDatabase
@@ -58,11 +60,14 @@ class PostgresAuditTrail:
         clock: Clock,
         anchors: AuditAnchorStore | None = None,
         epochs: EpochMarkerStore | None = None,
+        *,
+        database_clock: bool = False,
     ) -> None:
         self._db = db
         self._clock = clock
         self._anchors = anchors
         self._epochs = epochs
+        self._database_clock = database_clock
 
     # ---------------------------------------------------------------------------------------------- append
     async def record(
@@ -102,14 +107,23 @@ class PostgresAuditTrail:
         timestamp: datetime | None,
         new_epoch: int | None = None,
     ) -> AuditRecord:
-        head = await conn.fetchrow("SELECT sequence, hash FROM audit_chain_head WHERE id = 1 FOR UPDATE")
+        head = await conn.fetchrow(
+            "SELECT h.sequence, h.hash, clock_timestamp() AS database_now, "
+            "(SELECT r.ts FROM audit_records r WHERE r.sequence = h.sequence) AS previous_ts "
+            "FROM audit_chain_head h WHERE h.id = 1 FOR UPDATE OF h"
+        )
         if head is None:
             raise RuntimeError("audit_chain_head is missing: the schema was not migrated")
         sequence, previous = int(head["sequence"]) + 1, str(head["hash"])
+        # The timestamp is taken while holding the head lock: from the database's clock in deployed environments (so
+        # replicas whose own clocks disagree interleave one consistent time), never earlier than the previous record.
+        stamped = timestamp or (head["database_now"] if self._database_clock else self._clock.now())
+        if head["previous_ts"] is not None and stamped < head["previous_ts"]:
+            stamped = head["previous_ts"]
         draft = AuditRecord(
             sequence=sequence,
             audit_id=new_id("AUD"),
-            timestamp=timestamp or self._clock.now(),
+            timestamp=stamped,
             actor=actor,
             action=action,
             outcome=outcome,
@@ -173,12 +187,21 @@ class PostgresAuditTrail:
     # -------------------------------------------------------------------------------------------- verification
     async def verify(self) -> AuditVerification:
         """Hash chain, indexed columns, head, epoch, every anchor and every epoch marker; see the module docstring."""
+        return await self._verify(restore=False)
+
+    async def _verify(self, *, restore: bool) -> AuditVerification:
+        """``restore=True`` is the precondition of a new epoch: a database that is merely *behind* its anchors and
+        markers (records lost by a restore) is acceptable, anything else that is wrong is not."""
         wanted: dict[int, tuple[str, str]] = {}  # sequence -> (hash that must be stored there, what says so)
-        marker_sequences: set[int] = set()
+        marker_sequences: dict[int, int] = {}  # sequence of an epoch-opening record -> the epoch it opens
         try:
             head = await self.head()
             markers = await self._epochs.all() if self._epochs is not None else []
-            if self._epochs is not None and head.epoch != current_epoch(markers):
+            if (
+                self._epochs is not None
+                and head.epoch != current_epoch(markers)
+                and not (restore and current_epoch(markers) > head.epoch)
+            ):
                 return self._rejected(self._epoch_mismatch(head.epoch, current_epoch(markers)))
             if (problem := await self._collect_checks(head.epoch, markers, wanted, marker_sequences)) is not None:
                 return self._rejected(problem)
@@ -217,19 +240,26 @@ class PostgresAuditTrail:
                         record.sequence,
                         f"hash chain contradicts the {anchored[1]} for sequence {record.sequence}",
                     )
-                if record.sequence in marker_sequences and record.action != "audit.epoch":
+                opens = marker_sequences.get(record.sequence)
+                if opens is not None and (record.action != "audit.epoch" or record.details.get("new_epoch") != opens):
+                    # An epoch is backed by its own audit.epoch record: the one its marker names, for that epoch.
                     return self._invalid(
-                        expected, record.sequence, f"the record at sequence {record.sequence} is not an epoch start"
+                        expected,
+                        record.sequence,
+                        f"the record at sequence {record.sequence} is not the start of audit epoch {opens}",
                     )
                 previous, expected, after = record.hash, expected + 1, record.sequence
         if previous != head.hash:
             return self._invalid(head.sequence, head.sequence, "the last record is not the chain head")
-        beyond = await self._db.fetchval("SELECT MIN(sequence) FROM audit_records WHERE sequence > $1", head.sequence)
+        # One statement, so one snapshot: records that were appended while the scan above ran are at or below the head
+        # *now* and are not a problem; only a row beyond the live head, which no append could have produced, is.
+        beyond = await self._db.fetchval(
+            "SELECT MIN(sequence) FROM audit_records "
+            "WHERE sequence > (SELECT sequence FROM audit_chain_head WHERE id = 1)"
+        )
         if beyond is not None:
-            return self._invalid(
-                head.sequence, int(beyond), f"record {beyond} exists beyond the chain head (sequence {head.sequence})"
-            )
-        if wanted and max(wanted) > head.sequence:
+            return self._invalid(head.sequence, int(beyond), f"record {beyond} exists beyond the chain head")
+        if wanted and max(wanted) > head.sequence and not restore:
             ahead = max(wanted)
             return self._invalid(
                 head.sequence,
@@ -237,14 +267,71 @@ class PostgresAuditTrail:
                 f"audit chain is behind its latest anchor (anchored sequence {ahead}, "
                 f"database head {head.sequence}): records were lost, for example by a restore",
             )
-        return AuditVerification(valid=True, records=head.sequence)
+        return AuditVerification(valid=True, records=head.sequence, **await self._freshness(head.epoch))
+
+    async def verify_anchor(self) -> AuditVerification:
+        """Only the immutable side: the epoch, every anchor and marker against the stored records, and the anchor's age.
+
+        Cheaper than :meth:`verify` (no re-derivation of the hashes): one batched read of the anchored sequences. The
+        scheduled audit verification calls it in addition to the full verification.
+        """
+        wanted: dict[int, tuple[str, str]] = {}
+        marker_sequences: dict[int, int] = {}  # sequence of an epoch-opening record -> the epoch it opens
+        try:
+            head = await self.head()
+            markers = await self._epochs.all() if self._epochs is not None else []
+            if self._epochs is not None and head.epoch != current_epoch(markers):
+                return self._rejected(self._epoch_mismatch(head.epoch, current_epoch(markers)))
+            if (problem := await self._collect_checks(head.epoch, markers, wanted, marker_sequences)) is not None:
+                return self._rejected(problem)
+        except AnchorConflictError as exc:
+            return self._rejected(str(exc))
+        head = await self.head()
+        stored: dict[int, tuple[str, str]] = {}
+        sequences = sorted(wanted)
+        for start in range(0, len(sequences), _PAGE):
+            batch = sequences[start : start + _PAGE]
+            rows = await self._db.fetch(
+                "SELECT sequence, hash, action FROM audit_records WHERE sequence = ANY($1)", batch
+            )
+            stored |= {int(r["sequence"]): (str(r["hash"]), str(r["action"])) for r in rows}
+        for sequence in sequences:
+            digest, what = wanted[sequence]
+            if sequence > head.sequence:
+                return self._invalid(
+                    head.sequence,
+                    sequence,
+                    f"audit chain is behind its latest anchor (anchored sequence {max(wanted)}, "
+                    f"database head {head.sequence}): records were lost, for example by a restore",
+                )
+            if sequence not in stored or stored[sequence][0] != digest:
+                return self._invalid(
+                    head.sequence, sequence, f"hash chain contradicts the {what} for sequence {sequence}"
+                )
+            if sequence in marker_sequences and stored[sequence][1] != "audit.epoch":
+                return self._invalid(
+                    head.sequence, sequence, f"the record at sequence {sequence} is not an epoch start"
+                )
+        return AuditVerification(valid=True, records=head.sequence, **await self._freshness(head.epoch))
+
+    async def _freshness(self, epoch: int) -> dict[str, Any]:
+        if self._anchors is None:
+            return {}
+        try:
+            latest = await self._anchors.latest(epoch)
+        except AnchorConflictError:
+            return {}
+        if latest is None:
+            return {"has_anchor": False}
+        age = max(0.0, (self._clock.now() - latest.anchored_at).total_seconds())
+        return {"has_anchor": True, "last_anchor_sequence": latest.sequence, "last_anchor_age_seconds": age}
 
     async def _collect_checks(
         self,
         epoch: int,
         markers: Sequence[EpochMarker],
         wanted: dict[int, tuple[str, str]],
-        marker_sequences: set[int],
+        marker_sequences: dict[int, int],
     ) -> str | None:
         """What the immutable side says the chain must contain: every anchor and epoch marker that still applies.
 
@@ -265,7 +352,7 @@ class PostgresAuditTrail:
 
         for marker in markers:
             if marker.epoch <= epoch and not lost(marker.epoch, marker.sequence):
-                marker_sequences.add(marker.sequence)
+                marker_sequences[marker.sequence] = marker.epoch
                 if (problem := add(marker.sequence, marker.hash, f"epoch {marker.epoch} marker")) is not None:
                     return problem
         if self._anchors is not None:
@@ -313,7 +400,7 @@ class PostgresAuditTrail:
         )
 
     # ------------------------------------------------------------------------------------------------ epochs
-    async def start_epoch(self, *, actor: str, reason: str) -> AuditRecord:
+    async def start_epoch(self, *, actor: str, reason: str, override_verification: str | None = None) -> AuditRecord:
         """Record, in the chain, that history was cut (a restore) and begin a new epoch. An operator action.
 
         The new epoch's **marker is written first, inside the transaction that appends the ``audit.epoch`` record**, to
@@ -327,6 +414,17 @@ class PostgresAuditTrail:
         """
         if self._epochs is None:
             raise RuntimeError("starting an audit epoch needs the epoch marker store (the audit-epochs container)")
+        # Precondition: do not bless a database that is tampered with. A restore leaves the chain behind its anchors,
+        # which is exactly what an epoch is for; anything else wrong (a broken hash, a record that contradicts an
+        # anchor, a moved epoch counter) refuses, unless an operator overrides with a reason that is itself audited.
+        verification = await self._verify(restore=True)
+        if not verification.valid:
+            if override_verification is None:
+                raise EpochPreconditionError(verification.reason or "the audit chain is not consistent")
+            _log.error(
+                "audit epoch started over a failed verification",
+                extra={"reason": verification.reason, "override": redact_text(override_verification)[:300]},
+            )
         previous_anchor = None
         head = await self.head()
         markers = await self._epochs.all()
@@ -345,6 +443,9 @@ class PostgresAuditTrail:
             "last_anchored_sequence": previous_anchor.sequence if previous_anchor else None,
             "last_anchored_hash": previous_anchor.hash if previous_anchor else None,
         }
+        if not verification.valid:
+            details["verification_override"] = override_verification
+            details["verification_failure"] = verification.reason
         async with self._db.transaction(fenced=False) as conn:
             record = await self._append(
                 conn,

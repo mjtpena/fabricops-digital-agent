@@ -8,7 +8,7 @@ anchor and trusted an epoch counter that lives in the database), or a part of th
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -24,7 +24,7 @@ from orqentis.observability.anchors import (
     AuditAnchorTask,
     LocalAuditAnchorStore,
 )
-from orqentis.observability.epochs import EpochMarker, LocalEpochMarkerStore
+from orqentis.observability.epochs import EpochMarker, EpochPreconditionError, LocalEpochMarkerStore
 from orqentis.storage.postgres import PostgresAuditTrail, PostgresConfig, PostgresStorage
 
 AT = datetime(2026, 10, 20, 8, 0, tzinfo=UTC)
@@ -272,3 +272,100 @@ async def test_a_database_with_no_anchors_and_no_markers_is_a_fresh_installation
     assert (await setup.app.verify()).valid
     anchor = await setup.anchor()
     assert anchor is not None and anchor.sequence == 3
+
+
+# ------------------------------------------------------------------------------- the precondition of a new epoch
+@pytest.mark.security
+async def test_an_epoch_is_refused_over_a_tampered_chain_unless_an_operator_overrides_and_that_is_audited(
+    setup: Setup, pg_config: PostgresConfig, postgres_server: PostgresServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``start-epoch`` must not bless whatever the database holds: a rewritten chain is not a restore."""
+    await chain_of(setup.pg)
+    await setup.anchor()
+    await recompute_history(postgres_server, pg_config.schema, setup.pg)
+
+    with pytest.raises(EpochPreconditionError, match="contradicts the audit anchor"):
+        await setup.operator.start_epoch(actor="operator:olivia", reason="looks like a restore")
+    head = await setup.pg.audit.head()
+    assert head.epoch == 1 and head.sequence == 6  # nothing appended, nothing moved
+    assert list(await setup.epoch_store.all()) == []  # and no marker
+
+    with caplog.at_level(logging.ERROR):
+        record = await setup.operator.start_epoch(
+            actor="operator:olivia", reason="restore", override_verification="INC-77: the anchors were re-created"
+        )
+    assert record.details["verification_override"] == "INC-77: the anchors were re-created"
+    assert "contradicts the audit anchor" in str(record.details["verification_failure"])
+    assert "audit epoch started over a failed verification" in caplog.text
+    assert (await setup.pg.audit.head()).epoch == 2
+
+
+@pytest.mark.security
+async def test_an_epoch_is_refused_when_the_counter_was_moved_forward_without_a_marker(
+    setup: Setup, pg_config: PostgresConfig, postgres_server: PostgresServer
+) -> None:
+    await chain_of(setup.pg, 3)
+    await setup.pg.database.execute("UPDATE audit_chain_head SET epoch = 5")
+    with pytest.raises(EpochPreconditionError, match="epoch counter was moved"):
+        await setup.operator.start_epoch(actor="operator:olivia", reason="restore")
+
+
+# ------------------------------------------------------------------------------------------------------ freshness
+async def test_a_valid_chain_says_how_old_its_newest_anchor_is_and_a_missing_anchor_is_not_silent(
+    pg: PostgresStorage, tmp_path: Path
+) -> None:
+    clock = FixedClock(AT)
+    anchors = LocalAuditAnchorStore(tmp_path / "anchors")
+    audit = PostgresAuditTrail(pg.database, clock, anchors, LocalEpochMarkerStore(tmp_path / "epochs"))
+    await chain_of(pg, 3)
+    none_yet = await audit.verify()
+    assert none_yet.valid and none_yet.has_anchor is False and none_yet.last_anchor_age_seconds is None
+
+    task = AuditAnchorTask(audit, anchors, clock, stale_after=timedelta(minutes=30))
+    await task.run()
+    fresh = await audit.verify()
+    assert fresh.valid and fresh.has_anchor and fresh.last_anchor_sequence == 3 and fresh.last_anchor_age_seconds == 0
+    quick = await audit.verify_anchor()
+    assert quick.valid and quick.last_anchor_age_seconds == 0
+
+    clock.set(AT + timedelta(minutes=45))  # the anchor job stopped (a missing storage role, a crashed leader)
+    stale = await audit.verify()
+    assert stale.valid and stale.last_anchor_age_seconds == 45 * 60  # valid, and says how long nothing was anchored
+    assert task.stale  # and the anchoring itself reports that it has not worked for twice the interval
+    await task.run()  # a run that works again clears it
+    assert not task.stale
+
+
+async def test_the_anchor_only_verification_finds_what_the_full_one_finds(
+    setup: Setup, pg_config: PostgresConfig, postgres_server: PostgresServer
+) -> None:
+    await chain_of(setup.pg)
+    await setup.anchor()
+    assert (await setup.app.verify_anchor()).valid
+    await recompute_history(postgres_server, pg_config.schema, setup.pg)
+    quick = await setup.app.verify_anchor()
+    assert not quick.valid and "contradicts the audit anchor" in (quick.reason or "")
+    await cut_back_to(postgres_server, pg_config.schema, 3)
+    assert "behind its latest anchor" in ((await setup.app.verify_anchor()).reason or "")
+
+
+@pytest.mark.security
+async def test_an_epoch_marker_must_name_the_audit_epoch_record_that_opened_that_very_epoch(setup: Setup) -> None:
+    await chain_of(setup.pg, 3)
+    opened = await setup.operator.start_epoch(actor="operator:olivia", reason="restore")
+    assert (await setup.app.verify()).valid
+    # A marker for epoch 3 that points at the (real, hashed, audit.epoch) record that opened epoch 2, and a counter
+    # moved to 3: the hash matches and the record is an epoch start, but it is not the start of epoch 3.
+    await setup.epoch_store.put(
+        EpochMarker(
+            epoch=3,
+            sequence=opened.sequence,
+            hash=opened.hash,
+            started_at=AT,
+            started_by="operator:mallory",
+            reason="reuse an old epoch record",
+        )
+    )
+    await setup.pg.database.execute("UPDATE audit_chain_head SET epoch = 3")
+    result = await setup.app.verify()
+    assert not result.valid and "is not the start of audit epoch" in (result.reason or "")

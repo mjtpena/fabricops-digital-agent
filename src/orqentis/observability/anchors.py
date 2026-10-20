@@ -33,6 +33,7 @@ import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -201,17 +202,26 @@ class AuditAnchorTask:
         *,
         epochs: EpochMarkerStore | None = None,
         on_failure: Callable[[str], Awaitable[None] | None] | None = None,
+        stale_after: timedelta | None = None,
     ) -> None:
         self._audit = audit
         self._store = store
         self._clock = clock
         self._epochs = epochs
         self._on_failure = on_failure
+        self._stale_after = stale_after
         self._last: tuple[int, int] | None = None  # (epoch, sequence) already anchored by this process
+        self._last_ok = clock.now()  # the last run that anchored, or found nothing new to anchor, without a problem
+
+    @property
+    def stale(self) -> bool:
+        """No run has succeeded for longer than ``stale_after`` (twice the anchor interval): anchoring is broken."""
+        return self._stale_after is not None and self._clock.now() - self._last_ok > self._stale_after
 
     async def run(self) -> AuditAnchor | None:
         head = await self._audit.head()
         if head.sequence == 0:
+            self._last_ok = self._clock.now()
             return None
         # Checked on every run, also when the head did not move: a chain that stops matching its anchors should be
         # reported at the next interval, not only when someone appends to it.
@@ -232,10 +242,12 @@ class AuditAnchorTask:
                     await outcome
             raise AnchorRefusedError(problem)
         if self._last == (head.epoch, head.sequence):
+            self._last_ok = self._clock.now()
             return None
         anchor = AuditAnchor(epoch=head.epoch, sequence=head.sequence, hash=head.hash, anchored_at=self._clock.now())
         created = await self._store.put(anchor)
         self._last = (head.epoch, head.sequence)
+        self._last_ok = self._clock.now()
         if created:
             _log.info("audit head anchored", extra={"epoch": head.epoch, "sequence": head.sequence})
         return anchor if created else None

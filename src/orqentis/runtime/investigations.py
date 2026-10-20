@@ -384,7 +384,15 @@ class InvestigationJobRunner:
         loop = asyncio.get_running_loop()
         last_renewed = loop.time()
         while True:
+            asleep_since = loop.time()
             await asyncio.sleep(interval)
+            if (late := loop.time() - asleep_since - interval) > interval:
+                # The loop was blocked (a CPU-bound step, a paused container). If this lasts a whole claim lifetime,
+                # another replica takes the job over; the claim fence then refuses what this run still tries to write.
+                _log.warning(
+                    "event loop stalled; the claim heartbeat ran late",
+                    extra={"job_id": job.job_id, "late_seconds": round(late, 2)},
+                )
             try:
                 alive = await asyncio.wait_for(
                     self._store.heartbeat(job.job_id, self._worker_id, claimed.claim, self._claim_ttl), interval

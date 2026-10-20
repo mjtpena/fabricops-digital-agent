@@ -12,7 +12,10 @@ backups or PITR; one restore rehearsed and documented") is met by the rehearsal 
 **Who.** Two roles, which may be the same person:
 
 * The **restore operator**: `Contributor` (or `Owner`) on the environment's resource group and a member of that environment's
-  PostgreSQL administrator group (docs/delivery.md, section 5a), signed in with `az login`. The pipeline's deploy identities
+  PostgreSQL administrator group (docs/delivery.md, section 5a), signed in with `az login`. In `test` and `prod` the
+  server has no public endpoint, so `psql` and `orqentis` run on a host **inside the virtual network** (a VM through Bastion
+  or VPN with `psql` 16 or later; `infra/bicep/README.md`, *Private networking*), and a restored server must be created with
+  the same delegated subnet and private DNS zone (section 4). The pipeline's deploy identities
   are not used for restores. For the `orqentis` commands below the operator also needs `Storage Blob Data Reader` on the
   `audit-anchors` and `audit-epochs` containers (an Owner or User Access Administrator grants it), and the database grant of
   section 5.
@@ -121,7 +124,7 @@ create what is missing. Do them one at a time (a flexible server answers "busy" 
 
 ```bash
 az postgres flexible-server microsoft-entra-admin list -g "$RG" -s "$NEW" -o table        # expect $ADMIN_NAME ($ADMIN_OID)
-az postgres flexible-server firewall-rule list -g "$RG" -s "$NEW" -o table                # expect allow-azure-services (0.0.0.0) and your postgresAllowedIpRanges; none with VNet integration
+az postgres flexible-server firewall-rule list -g "$RG" -s "$NEW" -o table                # dev: your postgresAllowedIpRanges (and allow-azure-services only if postgresAllowAzureServices is set); test and prod: none, they are VNet-integrated
 az postgres flexible-server parameter list -g "$RG" -s "$NEW" \
   --query "[?source=='user-override'].{name:name, value:value}" -o table                  # expect require_secure_transport = ON
 az postgres flexible-server show -g "$RG" -n "$NEW" \
@@ -133,7 +136,8 @@ puts it back:
 
 ```bash
 az postgres flexible-server microsoft-entra-admin create -g "$RG" -s "$NEW" -u "$ADMIN_NAME" -i "$ADMIN_OID" -t Group
-az postgres flexible-server firewall-rule create -g "$RG" -s "$NEW" -n allow-azure-services --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
+# dev only, and only if the template set it (test and prod must NOT have it: it opens 5432 to every Azure tenant):
+# az postgres flexible-server firewall-rule create -g "$RG" -s "$NEW" -n allow-azure-services --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
 az postgres flexible-server parameter set -g "$RG" -s "$NEW" --name require_secure_transport --value ON
 az postgres flexible-server update -g "$RG" -n "$NEW" --microsoft-entra-auth Enabled --password-auth Disabled
 ```

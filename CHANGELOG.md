@@ -27,8 +27,20 @@ section does not match.
   no crash loop). `ORQENTIS_CONTRACTS_PATH` stays for local and mock runs.
 - Fenced writes: scheduled jobs run under the lease generation and every PostgreSQL write transaction checks it, so a
   deposed leader's late write is refused. Detection runs under a cross-replica mutex.
-- Audit anchors: the chain head is written to an immutable blob every 15 minutes and `orqentis audit` verifies against
-  the latest one; `orqentis audit start-epoch` records a restore. `orqentis db migrate|status|reseed-counters`.
+- Audit anchors: the chain head is written to an immutable blob every 15 minutes. Verification checks **every** anchor
+  (the full hash is in the object name) and the operator-written epoch marker, reports the age of the newest anchor, and
+  never raises a false alarm for an append that commits while it runs; the anchor job refuses to anchor a head that
+  contradicts the previous anchor (ERROR `audit chain verification failed`). `orqentis audit start-epoch` (an operator
+  action: its marker lives in the `audit-epochs` container that the application can only read) records a restore after
+  verifying the chain, with an audited `--override-verification`. `orqentis db migrate|status|reseed-counters`.
+- Safe against stalled or partitioned replicas: a worker that cannot renew its job claim stops, its database writes are
+  fenced by the claim, there is at most one pending approval per action and one incident per detection (migration 0002),
+  the detection mutex cancels its section if its lock connection dies, approval expiry and audit timestamps use the
+  database clock, the lease fence no longer starves renewals, and a Fabric write is preceded by an
+  `action.execute.intent` audit record (503 `AUDIT_UNAVAILABLE`, nothing written, if it cannot be appended).
+- Bicep: test and prod are private (VNet-integrated Container Apps environment and PostgreSQL, no "Allow Azure services"),
+  `audit-epochs` container and operators group, an explicit `EVIDENCE_IMMUTABILITY_LOCKED` decision for prod, a connection
+  budget that assumes overlapping revisions, and the Storage Blob Data Reader role id corrected.
 - Bicep: PostgreSQL Flexible Server (B1ms default, Entra-only, PITR), evidence storage account (shared key disabled,
   versioning, version-level immutability), container-scoped role assignments, `minReplicas`/`maxReplicas`
   (1 in dev, 2 in test and prod). `docs/operations/restore.md`, `scripts/postgres-bootstrap.sql`.

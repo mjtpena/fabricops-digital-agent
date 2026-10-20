@@ -106,7 +106,7 @@ class IncidentService:
             actor="detection",
             timestamp=candidate.detected_at,
         )
-        await self._repo.save(incident)
+        await self._repo.save(incident)  # raises DuplicateIncidentError if this detection already has its incident
         await self._emit(incident, EventType.INCIDENT_CREATED, f"Incident {incident_id} created: {incident.title}")
         await self._audit.record(
             actor="system:detection",

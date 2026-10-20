@@ -35,7 +35,7 @@ class Ready(BaseModel):
     scheduler: Literal["disabled", "standby", "leader"]
     # Present only when something is wrong that does not stop the service: the estate contracts last uploaded were
     # refused, so the previous ones are in force (the refresh job fails until the upload is fixed).
-    degraded: list[Literal["contracts reload failed"]] | None = None
+    degraded: list[Literal["contracts reload failed", "audit anchoring stale"]] | None = None
 
 
 class NotReady(BaseModel):

@@ -105,9 +105,13 @@ class ApprovalService:
             else:
                 self._locks[approval_id] = (lock, users - 1)
 
-    async def transition(self, updated: ApprovalRequest, *, expected_revision: int) -> ApprovalRequest | None:
+    async def transition(
+        self, updated: ApprovalRequest, *, expected_revision: int, enforce_expiry: bool = False
+    ) -> ApprovalRequest | None:
         """Compare-and-set a state change (see ``ApprovalProvider.transition``)."""
-        return await self._provider.transition(updated, expected_revision=expected_revision)
+        return await self._provider.transition(
+            updated, expected_revision=expected_revision, enforce_expiry=enforce_expiry
+        )
 
     async def get(self, approval_id: str) -> ApprovalRequest:
         approval = await self._provider.get(approval_id)
@@ -146,7 +150,12 @@ class ApprovalService:
         action.approval_id = approval.approval_id
         action.status = ActionStatus.AWAITING_APPROVAL
         approval = approval.model_copy(update={"proposed_action": action.model_copy()})
-        await self._provider.submit(approval)
+        stored = await self._provider.submit(approval)
+        if stored.approval_id != approval.approval_id:
+            # The store already had a pending request for this very action (a stalled worker and its replacement, or
+            # another replica): that one stands, and nothing new was requested, audited or announced.
+            action.approval_id = stored.approval_id
+            return stored
         await self._audit.record(
             actor=requested_by.id,
             action="approval.request",
@@ -192,9 +201,13 @@ class ApprovalService:
                     update |= {"status": ApprovalStatus.REJECTED, "rejected_by": principal.id, "rejected_at": now}
                 # Compare-and-set: of two concurrent decisions (even in different processes) exactly one is stored.
                 stored = await self._provider.transition(
-                    approval.model_copy(update=update), expected_revision=approval.revision
+                    approval.model_copy(update=update), expected_revision=approval.revision, enforce_expiry=approve
                 )
                 if stored is None:
+                    current = await self._provider.get(approval_id)
+                    if current is not None and current.revision == approval.revision:
+                        # Nobody else wrote: the store (by its own clock) judged the approval expired.
+                        raise ApprovalExpiredError(f"Approval {approval_id} has expired")
                     raise ApprovalStateError(f"Approval {approval_id} was decided by another request")
             except ApprovalError as exc:
                 await self._audit.record(

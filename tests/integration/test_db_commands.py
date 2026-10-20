@@ -30,7 +30,7 @@ async def test_db_status_and_migrate(app_storage: AppStorage, tmp_path: Path) ->
 
     out, text = console()
     assert await run_db(settings, "migrate", out) == 0
-    assert "Applied 1 migration(s): 0001_initial" in text.getvalue()
+    assert "Applied 2 migration(s): 0001_initial, 0002_idempotency_and_expiry" in text.getvalue()
     out, text = console()
     assert await run_db(settings, "migrate", out) == 0 and "up to date" in text.getvalue()
     out, text = console()

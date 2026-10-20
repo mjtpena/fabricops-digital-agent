@@ -8,7 +8,9 @@
 * **Fencing generation.** ``generation`` is incremented on every new tenure (the row is free, expired or released) and
   kept when the current holder re-acquires an unexpired lease. It is never reset: releasing keeps the row with
   ``holder_id`` NULL. Renewals and fenced writes check holder *and* generation (see
-  :mod:`orqentis.runtime.fencing` and ``PostgresDatabase.transaction``).
+  :mod:`orqentis.runtime.fencing` and ``PostgresDatabase.transaction``). A fenced write holds a shared advisory
+  lock named after the lease; ``acquire`` takes the exclusive one. ``renew`` and ``release`` change no generation, so
+  they take none and are never held up by a stream of fenced writes.
 * ``renew`` fails only when the lease was released or taken over -- not merely because it expired and nobody claimed it
   (port contract) -- so a slow leader that nobody replaced keeps its tenure.
 """
@@ -19,7 +21,7 @@ from datetime import timedelta
 
 from orqentis.config.clock import Clock
 from orqentis.runtime.lease import Lease, new_holder_id
-from orqentis.storage.postgres.database import PostgresDatabase
+from orqentis.storage.postgres.database import PostgresDatabase, lease_lock_key
 
 _ACQUIRE = """
 INSERT INTO leases AS l (name, holder_id, generation, expires_at)
@@ -58,6 +60,9 @@ class PostgresLeaderLease:
     async def acquire(self, name: str, ttl: timedelta) -> Lease | None:
         sent_at = self._clock.now()
         async with self._db.transaction(fenced=False) as conn:
+            # Exclusive against the shared lock every fenced write holds: a takeover waits for the writes in flight
+            # (and those that start later queue behind it), so the generation never changes under a write.
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", lease_lock_key(name))
             row = await conn.fetchrow(_ACQUIRE, name, self._holder_id, ttl)
         if row is None:
             return None  # another holder has an unexpired lease

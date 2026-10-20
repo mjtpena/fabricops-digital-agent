@@ -10,6 +10,18 @@ from orqentis.domain.incidents import Incident, IncidentStatus
 from orqentis.storage.sqlite import SqliteDatabase
 
 
+class DuplicateIncidentError(Exception):
+    """The store already has an incident for this detection (same item and run, or same item and trigger event).
+
+    Detection looks for an existing incident first and runs under a mutex, so this is the database's backstop for the
+    moment the mutex is lost: a second pass must not open a second incident for one failure.
+    """
+
+    def __init__(self, existing: Incident | None) -> None:
+        super().__init__("an incident already exists for this detection")
+        self.existing = existing
+
+
 class IncidentQuery(BaseModel):
     statuses: list[IncidentStatus] | None = None
     category: str | None = None

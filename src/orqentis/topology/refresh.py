@@ -13,6 +13,7 @@ from orqentis.contracts.model import EstateContracts
 from orqentis.contracts.source import ContractsHolder
 from orqentis.domain.incidents import IncidentStatus, TimelineKind
 from orqentis.domain.principals import SYSTEM_PRINCIPAL
+from orqentis.domain.topology import Dependency
 from orqentis.fabric.ports import FabricClient
 from orqentis.incidents.service import IncidentService
 from orqentis.observability.audit import AuditTrail
@@ -98,6 +99,8 @@ class CatalogRefresher:
         diff.dependencies = diff_entities({e.id: e for e in self._graph.edges}, {e.id: e for e in edges})
         if diff.is_empty:
             _log.info("catalog refresh: no changes")
+            if shared_effects:
+                await self._repair_shared_dependencies(edges)
             await self._record_contracts_loaded()
             return diff
 
@@ -118,6 +121,20 @@ class CatalogRefresher:
             )
             await self._annotate_incidents_of_removed_items(diff.items.removed)
         return diff
+
+    async def _repair_shared_dependencies(self, edges: list[Dependency]) -> None:
+        """Make the shared dependency table match what the graph holds, when a follower got there first.
+
+        Every replica applies a change to its own memory (``ReplicaCatalogSync``); only the leader writes the shared
+        table. A follower that becomes the leader after it applied a change sees an empty diff, so the table would stay
+        behind the graph until the next change. Comparing the table with the edges makes the leader's refresh repair it.
+        The audit record of that diff and the annotation of incidents on removed items are not reconstructed: those
+        belong to the refresh that saw the change (ADR-0017, known limits).
+        """
+        stored = {e.id: e for e in await self._store.list_edges()}
+        if stored != {e.id: e for e in edges}:
+            await self._store.replace_all(edges)
+            _log.warning("shared dependency table was behind this replica's graph; rewritten")
 
     @property
     def contracts_reload_failed(self) -> bool:

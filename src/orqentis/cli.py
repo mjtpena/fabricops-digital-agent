@@ -299,14 +299,22 @@ def _cmd_runbooks(settings: Settings, console: Console) -> int:
     return 0
 
 
-async def _cmd_audit(settings: Settings, console: Console, *, start_epoch_reason: str | None = None) -> int:
+async def _cmd_audit(
+    settings: Settings,
+    console: Console,
+    *,
+    start_epoch_reason: str | None = None,
+    override_verification: str | None = None,
+) -> int:
     from orqentis.config.clock import SystemClock
     from orqentis.observability.audit import LocalAuditLog
 
     if settings.storage_backend is StorageBackend.POSTGRES:
         from orqentis.db_commands import run_audit_postgres
 
-        return await run_audit_postgres(settings, console, start_epoch_reason=start_epoch_reason)
+        return await run_audit_postgres(
+            settings, console, start_epoch_reason=start_epoch_reason, override_verification=override_verification
+        )
     if start_epoch_reason is not None:
         console.print(
             "[red]start-epoch applies to the PostgreSQL audit chain only (ORQENTIS_STORAGE_BACKEND=postgres).[/]"
@@ -342,6 +350,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="After a restore: record the loss in the chain and start a new anchor epoch (docs/operations/restore.md)",
     )
     epoch.add_argument("--reason", required=True, help="Why: the restore time and the source server")
+    epoch.add_argument(
+        "--override-verification",
+        metavar="WHY",
+        default=None,
+        help="Open the epoch although the chain failed verification beyond being behind its anchors (audited)",
+    )
     db = sub.add_parser("db", help="PostgreSQL system of record: migrate, status, reseed-counters")
     db.add_argument("db_command", choices=["migrate", "status", "reseed-counters"])
     add_contracts_parser(sub)
@@ -379,7 +393,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "audit":
         settings = _settings(**({"data_dir": args.data_dir} if args.data_dir else {}))
         reason = args.reason if args.audit_command == "start-epoch" else None
-        return asyncio.run(_cmd_audit(settings, console, start_epoch_reason=reason))
+        override = getattr(args, "override_verification", None) if reason is not None else None
+        return asyncio.run(_cmd_audit(settings, console, start_epoch_reason=reason, override_verification=override))
     if args.command == "db":
         from orqentis.db_commands import run_db
 

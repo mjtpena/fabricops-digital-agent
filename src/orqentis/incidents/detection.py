@@ -14,7 +14,7 @@ from orqentis.domain.taxonomy import IncidentCategory, Severity
 from orqentis.incidents.service import IncidentCandidate, IncidentService
 from orqentis.observability.logging import get_logger
 from orqentis.storage.event_store import EventQuery, EventStore
-from orqentis.storage.incidents import IncidentQuery
+from orqentis.storage.incidents import DuplicateIncidentError, IncidentQuery
 
 _log = get_logger(__name__)
 
@@ -117,7 +117,21 @@ class DetectionEngine:
                     )
                     await self._attach_stored_activity_failures(existing)
                     continue
-                incident = await self._incidents.create(candidate)
+                try:
+                    incident = await self._incidents.create(candidate)
+                except DuplicateIncidentError as exc:
+                    # The store's backstop: another pass opened it in the meantime (the mutex was lost, or a very
+                    # unlucky interleaving). Not an error and not a new incident.
+                    _log.warning(
+                        "duplicate detection suppressed by the store",
+                        extra={
+                            "event_id": event.event_id,
+                            "incident_id": exc.existing.incident_id if exc.existing else None,
+                        },
+                    )
+                    if exc.existing is not None:
+                        await self._attach_stored_activity_failures(exc.existing)
+                    continue
                 created.append(incident)
                 await self._attach_stored_activity_failures(incident)
         for event in recent:

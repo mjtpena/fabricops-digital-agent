@@ -204,14 +204,53 @@ of the database backup); `orqentis db reseed-counters` raises them above every i
 ### 11. Infrastructure and scaling
 
 PostgreSQL Flexible Server (B1ms default; `passwordAuth` disabled; Entra administrator group; PITR retention 7-35 days;
-public access with firewall rules for dev or VNet integration), an evidence storage account (shared key disabled,
-versioning, soft delete, account-level version-level immutability, an `evidence`, an `audit-anchors` and a `contracts`
+public access with firewall rules in dev only; test and prod use VNet integration with a delegated subnet and a private
+DNS zone and refuse "Allow Azure services"), an evidence storage account (shared key disabled, versioning, soft delete,
+account-level version-level immutability, an `evidence`, an `audit-anchors`, a `contracts` and an `audit-epochs`
 container), reader-identity role assignments scoped to those containers only (Blob Data Contributor on the first two,
-Blob Data **Reader** on `contracts`), and `minReplicas`/`maxReplicas` (1 in dev, 2 in test and prod). **Azure Files, the
+Blob Data **Reader** on `contracts` and `audit-epochs`), and `minReplicas`/`maxReplicas` (1 in dev, 2 in test and prod). **Azure Files, the
 storage key and the SMB mount are removed.** The estate contracts file, which lived on the share, becomes a blob
-(section 12). See `infra/bicep/README.md`.
+(section 13). See `infra/bicep/README.md`.
 
-### 12. The estate contracts file is a blob the app can only read
+### 12. Idempotency, fail-closed audit and fairness (second review)
+
+The independent red-team of the first version found these, each reproduced and now covered by a test that fails without
+its fix:
+
+* **Verification does not raise false alarms.** A row "beyond the head" is judged against the live head in one
+  statement, so an append that commits while a verification runs is not tampering (40 of 40 verifications of an
+  untouched chain used to report it under one append every 20 ms).
+* **A stalled or partitioned worker is harmless.** Its investigation stops once the claim could have been taken over
+  (the last renewal older than the claim lifetime minus one interval), and every database write of the investigation
+  runs under a **claim fence**: the transaction takes a shared lock on the job row and checks worker and claim number,
+  so a replaced worker's late writes are refused. Two further backstops in the database: at most **one pending
+  approval per incident and action** (a partial unique index; `submit` returns the existing request), and at most one
+  incident per **detection identity** (item and run, or item and trigger event; `DuplicateIncidentError`). The heartbeat
+  is not moved to a thread: the Entra credential and the pool belong to the event loop, and with the fence a starved
+  heartbeat can no longer do harm; a stall is logged.
+* **The detection mutex notices its own death.** A watchdog checks every second that the lock connection answers and
+  still holds the lock in `pg_locks`; if not, the section is cancelled with `MutexLostError`. The unique incident key is
+  what makes the window until then harmless.
+* **No write without a record.** The gateway appends `action.execute.intent` (approval, fingerprint, claim revision)
+  before the write client is called; if that cannot be appended nothing is written, the claim ends as failed and the
+  caller gets 503 `AUDIT_UNAVAILABLE`. If only the outcome record fails the write stands, the intent record names it and
+  an ERROR is logged. (`approval.decide` keeps its order: the decision is durable in the approval row itself.)
+* **Time comes from the database where it decides something.** Approval expiry is part of the claiming and deciding
+  statement (`expires_at > now()` of the database, in deployed environments); audit timestamps are the database's clock,
+  never earlier than the previous record. Scenario clocks (tests, demos) keep using the application's clock.
+* **Fair leases.** Fenced writes hold a shared *advisory* lock named after the lease and a takeover the exclusive one;
+  PostgreSQL queues the requests in order, so a stream of writers can no longer starve a takeover, and a renewal (which
+  changes no generation) takes no lock at all. With row-level `FOR SHARE` a renewal waited 8 seconds or more behind six
+  writers.
+* **Epochs have a precondition.** `start-epoch` verifies the chain first; a chain that is merely behind its anchors (what
+  a restore does) passes, anything else refuses unless an operator gives an override reason, which is written to the
+  audit trail and logged at ERROR.
+* **Verification reports freshness.** `AuditVerification` carries `has_anchor`, `last_anchor_sequence` and
+  `last_anchor_age_seconds`; the leader's `/health/ready` says `audit anchoring stale` when its anchor job has not
+  succeeded for twice the interval. `PostgresAuditTrail.verify_anchor()` is the cheap anchor-and-marker check for the
+  scheduled audit verification (WS9 wires it).
+
+### 13. The estate contracts file is a blob the app can only read
 
 * **Where.** `contracts/estate.json` in the evidence account (`ORQENTIS_CONTRACTS_CONTAINER`,
   `ORQENTIS_CONTRACTS_BLOB_NAME`; Bicep `contractsContainerName` / `contractsBlobName`). `ORQENTIS_CONTRACTS_PATH` stays
@@ -259,6 +298,14 @@ storage key and the SMB mount are removed.** The estate contracts file, which li
     the models *accept* and ignore, write it only from the next release. A job row that cannot be read is failed for
     free by the claim (the incident's slot is released); the other aggregates fail their request until the old
     revision is gone.
+  * A follower applies a catalog or contracts change to its own memory only (`ReplicaCatalogSync`); the leader writes the
+    shared effects. A follower that is promoted after applying a change sees an empty diff: the shared dependency table
+    is compared with the graph and repaired, but the `catalog.refresh` audit record of that diff and the annotation of
+    incidents on items that left the estate are not reconstructed.
+  * `approval.decide` keeps its order (compare-and-set, then audit): the decision is durable in the approval row, which
+    carries who decided and when. Only the Fabric write is gated on its audit record being written first.
+  * The claim heartbeat runs on the event loop. A starved loop can no longer do harm (the claim fence refuses a replaced
+    worker's writes and a stall is logged), but it can still cost a spurious re-run of the investigation.
   * Anchoring runs every 15 minutes (leader-only). Records newer than the latest anchor are protected by the hash
     chain alone: someone with full database rights could rewrite that last interval before the next anchor covers it.
     A shorter interval narrows the window (`ORQENTIS_SCHEDULER_AUDIT_ANCHOR_INTERVAL_MINUTES`); it is inherent, not a

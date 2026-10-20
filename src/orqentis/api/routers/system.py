@@ -66,9 +66,14 @@ async def ready(request: Request, response: Response) -> Ready | JSONResponse:
         )
         return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=body.model_dump())
     settings: Settings = request.app.state.settings
-    degraded: list[Literal["contracts reload failed"]] | None = (
-        ["contracts reload failed"] if container.catalog_refresher.contracts_reload_failed else None
-    )
+    problems: list[Literal["contracts reload failed", "audit anchoring stale"]] = []
+    if container.catalog_refresher.contracts_reload_failed:
+        problems.append("contracts reload failed")
+    # Only the leader runs the anchor job; its own readiness says when anchoring has not worked for twice the interval
+    # (every replica's verification reports the age of the newest anchor, see AuditVerification).
+    if container.audit_anchoring is not None and container.scheduler.is_leader and container.audit_anchoring.stale:
+        problems.append("audit anchoring stale")
+    degraded = problems or None
     if not settings.scheduler_enabled:
         return Ready(scheduler="disabled", degraded=degraded)
     return Ready(scheduler="leader" if container.scheduler.is_leader else "standby", degraded=degraded)

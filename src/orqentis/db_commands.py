@@ -15,7 +15,7 @@ from rich.console import Console
 from orqentis.bootstrap import open_postgres_session
 from orqentis.config.clock import SystemClock
 from orqentis.config.settings import Settings, StorageBackend
-from orqentis.observability.epochs import EpochMarkerAccessError
+from orqentis.observability.epochs import EpochMarkerAccessError, EpochPreconditionError
 from orqentis.storage.postgres import MigrationRunner
 
 _INCIDENT_ID = re.compile(r"^INC-(\d{4})-(\d+)$")
@@ -79,14 +79,32 @@ async def _reseed_counters(session: Any, console: Console) -> int:
     return 0
 
 
-async def run_audit_postgres(settings: Settings, console: Console, *, start_epoch_reason: str | None) -> int:
+async def run_audit_postgres(
+    settings: Settings,
+    console: Console,
+    *,
+    start_epoch_reason: str | None,
+    override_verification: str | None = None,
+) -> int:
     """Verify the audit chain (and its latest anchor); with a reason, start a new anchor epoch first."""
     session = await open_postgres_session(settings, SystemClock(), migrate=False)
     try:
         audit = session.storage.audit
         if start_epoch_reason is not None:
             try:
-                record = await audit.start_epoch(actor=f"operator:{getpass.getuser()}", reason=start_epoch_reason)
+                record = await audit.start_epoch(
+                    actor=f"operator:{getpass.getuser()}",
+                    reason=start_epoch_reason,
+                    override_verification=override_verification,
+                )
+            except EpochPreconditionError as exc:
+                console.print(
+                    f"Audit epoch not started: the audit chain is not consistent with itself or its anchors "
+                    f"({exc.reason}). Nothing was changed. A restore only leaves the chain behind its anchors; "
+                    "anything else may be tampering. If you have investigated and still need an epoch, repeat with "
+                    "--override-verification '<why>' (the reason is written to the audit trail)."
+                )
+                return 1
             except EpochMarkerAccessError as exc:
                 # Opening an epoch is an operator action the application's own identity cannot perform, on purpose.
                 console.print(f"Audit epoch not started: {exc}. Nothing was changed. See docs/operations/restore.md.")

@@ -288,3 +288,27 @@ async def test_a_nul_character_is_kept_in_the_record_and_does_not_break_the_inde
     assert record.actor == "user\x00x" and record.incident_id == "INC-\x00-1"  # the body keeps the exact value
     assert (await pg.audit.list(incident_id="INC-\x00-1"))[0].audit_id == record.audit_id
     assert (await pg.audit.verify()).valid
+
+
+async def test_verification_against_a_live_appender_never_reports_tampering(pg: PostgresStorage) -> None:
+    """Reproduced: 40 of 40 verifications of an untouched chain were 'invalid' with one append every 20 ms."""
+    await chain_of(pg, 400)
+    stop = asyncio.Event()
+
+    async def appender() -> int:
+        n = 0
+        while not stop.is_set():
+            await pg.audit.record(actor="live", action=f"append-{n}", outcome="OK")
+            n += 1
+            await asyncio.sleep(0.005)
+        return n
+
+    task = asyncio.create_task(appender())
+    try:
+        results = [await pg.audit.verify() for _ in range(25)]
+    finally:
+        stop.set()
+        appended = await task
+    assert appended > 25, "the appender must have been running during the verifications"
+    assert [r.reason for r in results if not r.valid] == []
+    assert all(r.valid for r in results)

@@ -29,6 +29,14 @@ class EpochMarkerAccessError(PermissionError):
     """The identity may read epoch markers but not write them (it is not in the operator group)."""
 
 
+class EpochPreconditionError(Exception):
+    """A new epoch was refused: the chain is not consistent with itself or its anchors (it may be tampered with)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class EpochMarkerConflictError(Exception):
     """A different marker already exists for this epoch (an earlier attempt that did not complete, or a collision)."""
 

@@ -74,6 +74,7 @@ async def test_the_audit_chain_is_anchored_and_verified_against_the_anchor(conta
     assert anchor is not None and anchor.sequence == head.sequence and anchor.hash == head.hash
     assert await task.run() is None  # nothing new to anchor
     assert (await container.audit.verify()).valid
+    assert container.audit_anchoring is not None and not container.audit_anchoring.stale
 
 
 async def test_a_job_submitted_through_the_runner_is_durable_and_visible_by_id(container: Container) -> None:

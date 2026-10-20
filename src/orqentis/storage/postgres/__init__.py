@@ -63,6 +63,7 @@ class PostgresStorage:
         *,
         anchors: AuditAnchorStore | None = None,
         epochs: EpochMarkerStore | None = None,
+        database_clock: bool = False,
         migrate: bool | None = True,
         holder_id: str | None = None,
     ) -> Self:
@@ -79,8 +80,8 @@ class PostgresStorage:
                 events=PostgresEventStore(db),
                 incidents=PostgresIncidentRepository(db),
                 dependencies=PostgresDependencyStore(db),
-                approvals=PostgresApprovalProvider(db),
-                audit=PostgresAuditTrail(db, clock, anchors, epochs),
+                approvals=PostgresApprovalProvider(db, clock, database_clock=database_clock),
+                audit=PostgresAuditTrail(db, clock, anchors, epochs, database_clock=database_clock),
                 lease=PostgresLeaderLease(db, clock, holder_id=holder_id),
                 jobs=PostgresJobStore(db),
                 mutex=PostgresMutex(db),

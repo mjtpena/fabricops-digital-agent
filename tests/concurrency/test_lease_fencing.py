@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -180,3 +181,52 @@ async def test_many_instances_racing_for_the_lease_produce_one_leader(
     finally:
         for instance in instances:
             await instance.close()
+
+
+async def test_renewing_and_taking_over_are_not_starved_by_a_stream_of_fenced_writes(
+    pg: PostgresStorage, pg_config: PostgresConfig
+) -> None:
+    """Reproduced: with six or more writers back to back, a renewal waited 8 s or more behind row-level share locks."""
+    second = await open_instance(pg_config, "replica-b")
+    busy = await open_instance(replace(pg_config, pool_max=40), "replica-a-writers")  # room for many overlapping writes
+    lease = await pg.lease.acquire(LEASE, timedelta(seconds=60))
+    assert lease is not None
+    fence = Fence(LEASE, lease.holder_id, lease.fencing_token)
+    stop = asyncio.Event()
+    refused = asyncio.Event()
+
+    async def writer() -> None:
+        with fenced(fence):
+            while not stop.is_set():
+                try:
+                    async with busy.database.transaction() as conn:
+                        await conn.execute("SELECT pg_sleep(0.05)")  # a write that takes a little time
+                except FencingError:
+                    refused.set()
+                    return
+
+    writers = [asyncio.create_task(writer()) for _ in range(30)]
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.sleep(0.3)  # the writers are saturating the lease
+        latencies: list[float] = []
+        for _ in range(8):
+            started = loop.time()
+            renewed = await asyncio.wait_for(pg.lease.renew(lease, timedelta(seconds=60)), 20)
+            latencies.append(loop.time() - started)
+            assert renewed is not None
+            await asyncio.sleep(0.1)
+        assert max(latencies) < 1.5, latencies  # was 8 s and more
+
+        # A takeover (after expiry) is not starved either, and the old leader's writers are then refused.
+        await pg.database.execute("UPDATE leases SET expires_at = now() - interval '1 minute'")
+        started = loop.time()
+        taken = await asyncio.wait_for(second.lease.acquire(LEASE, TTL), 20)
+        assert taken is not None and taken.fencing_token == lease.fencing_token + 1
+        assert loop.time() - started < 2.5
+        await asyncio.wait_for(refused.wait(), 10)
+    finally:
+        stop.set()
+        await asyncio.gather(*writers, return_exceptions=True)
+        await busy.close()
+        await second.close()

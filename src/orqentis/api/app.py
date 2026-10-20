@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
 from orqentis import __version__
-from orqentis.actions.gateway import ActionBlockedError
+from orqentis.actions.gateway import ActionBlockedError, AuditUnavailableError
 from orqentis.api.deps import NotReadyError
 from orqentis.api.middleware import install_api_hardening
 from orqentis.api.routers import approvals, estate, incidents, investigations, runbooks, system
@@ -105,6 +105,10 @@ def create_app(
     @app.exception_handler(ActionBlockedError)
     async def _blocked(_: Request, exc: ActionBlockedError) -> JSONResponse:
         return _error(status.HTTP_403_FORBIDDEN, exc.code, exc.message)
+
+    @app.exception_handler(AuditUnavailableError)
+    async def _audit_unavailable(_: Request, exc: AuditUnavailableError) -> JSONResponse:
+        return _error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code, exc.message)
 
     for router in (
         system.router,

@@ -12,9 +12,28 @@ from __future__ import annotations
 
 from typing import Any
 
+import asyncpg
+
 from orqentis.domain.incidents import Incident
-from orqentis.storage.incidents import IncidentQuery
+from orqentis.storage.incidents import DuplicateIncidentError, IncidentQuery
 from orqentis.storage.postgres.database import PostgresDatabase
+
+_DETECTION_INDEX = "ux_incidents_detection"
+
+
+def detection_key(incident: Incident) -> str | None:
+    """The identity of the detection that opened the incident: the item and the failing run, else the item and event.
+
+    Only incidents opened by detection have one (``metadata["detection_rule"]``): incidents loaded from history, or
+    saved by hand, are not claims on a detection and may share a run id.
+    """
+    if "detection_rule" not in incident.metadata:
+        return None
+    if incident.correlation_id:
+        return f"{incident.primary_item_id}|run|{incident.correlation_id}"
+    trigger = incident.metadata.get("trigger_event_id")
+    return f"{incident.primary_item_id}|event|{trigger}" if trigger else None
+
 
 # Seeds the counter from the highest number already stored (history loaded from fixtures, a migrated database), then
 # takes the next one. Both statements run in one transaction, and the UPDATE locks the counter row, so two replicas
@@ -62,23 +81,32 @@ class PostgresIncidentRepository:
         return moved
 
     async def save(self, incident: Incident) -> None:
-        async with self._db.transaction() as conn:
-            await conn.execute(
-                "INSERT INTO incidents (incident_id, status, category, severity, primary_item_id, workspace_id, "
-                "correlation_id, detected_at, updated_at, body) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) "
-                "ON CONFLICT (incident_id) DO UPDATE SET status = EXCLUDED.status, category = EXCLUDED.category, "
-                "severity = EXCLUDED.severity, updated_at = EXCLUDED.updated_at, body = EXCLUDED.body",
-                incident.incident_id,
-                incident.status.value,
-                incident.category,
-                incident.severity.value,
-                incident.primary_item_id,
-                incident.workspace_id,
-                incident.correlation_id,
-                incident.detected_at,
-                incident.updated_at,
-                incident.model_dump_json(),
-            )
+        key = detection_key(incident)
+        try:
+            async with self._db.transaction() as conn:
+                await conn.execute(
+                    "INSERT INTO incidents (incident_id, status, category, severity, primary_item_id, workspace_id, "
+                    "correlation_id, detected_at, updated_at, body, detection_key) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+                    "ON CONFLICT (incident_id) DO UPDATE SET status = EXCLUDED.status, category = EXCLUDED.category, "
+                    "severity = EXCLUDED.severity, updated_at = EXCLUDED.updated_at, body = EXCLUDED.body",
+                    incident.incident_id,
+                    incident.status.value,
+                    incident.category,
+                    incident.severity.value,
+                    incident.primary_item_id,
+                    incident.workspace_id,
+                    incident.correlation_id,
+                    incident.detected_at,
+                    incident.updated_at,
+                    incident.model_dump_json(),
+                    key,
+                )
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name != _DETECTION_INDEX or key is None:
+                raise
+            row = await self._db.fetchrow("SELECT body FROM incidents WHERE detection_key = $1", key)
+            raise DuplicateIncidentError(Incident.model_validate_json(row["body"]) if row else None) from None
 
     async def get(self, incident_id: str) -> Incident | None:
         row = await self._db.fetchrow("SELECT body FROM incidents WHERE incident_id = $1", incident_id)

@@ -126,6 +126,8 @@ class Container:
     lease: LeaderLease
     scheduler: Scheduler
     _databases: tuple[SqliteDatabase, ...]
+    # PostgreSQL backend: the job that anchors the audit chain head (None with local storage).
+    audit_anchoring: AuditAnchorTask | None = None
     # Closers of the PostgreSQL pool, the Blob client and the credential (empty with local storage).
     _closers: tuple[Callable[[], Awaitable[None]], ...] = ()
     # Notifications (ADR-0018): started and stopped with the scheduler by the API runtime. Without a notifier it
@@ -269,6 +271,9 @@ async def open_postgres_session(
             clock,
             anchors=blob.anchors,
             epochs=blob.epochs,
+            # Deployed environments run on the system clock: the database's clock then judges approval expiry and
+            # stamps audit records, so a replica with a skewed clock cannot change either.
+            database_clock=settings.clock is ClockMode.SYSTEM,
             migrate=migrate,
         )
     except BaseException:
@@ -687,10 +692,17 @@ async def _build_container(
             run_immediately=False,
         ),
     ]
+    anchoring: AuditAnchorTask | None = None
     if storage.anchors is not None and storage.audit_head is not None:
         # Copies the audit chain head (sequence + hash) to an immutable blob, so that rewriting the database cannot
         # also rewrite what the chain is checked against (observability/anchors.py).
-        anchor_task = AuditAnchorTask(storage.audit_head, storage.anchors, clock, epochs=storage.epochs)
+        anchoring = anchor_task = AuditAnchorTask(
+            storage.audit_head,
+            storage.anchors,
+            clock,
+            epochs=storage.epochs,
+            stale_after=2 * timedelta(minutes=settings.scheduler_audit_anchor_interval_minutes),
+        )
 
         async def audit_anchor_job(ctx: JobContext) -> None:
             await anchor_task.run()
@@ -758,6 +770,7 @@ async def _build_container(
         investigation_jobs=investigation_jobs,
         lease=lease,
         scheduler=scheduler,
+        audit_anchoring=anchoring,
         _databases=storage.databases,
         _closers=storage.closers,
         notifications=notifications,

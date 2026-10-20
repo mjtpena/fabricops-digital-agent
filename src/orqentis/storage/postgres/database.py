@@ -10,13 +10,18 @@
   idle connections, so the application never holds a stale credential for long. For a throwaway local test container
   ``auth="none"`` sends no password at all.
 * **Fenced writes.** :meth:`PostgresDatabase.transaction` checks the current :class:`~orqentis.runtime.fencing.Fence`
-  (if the code runs inside a scheduled job) against the lease row in the same transaction as the write.
+  (if the code runs inside a scheduled job) against the lease row in the same transaction as the write. The write holds
+  a *shared advisory lock* named after the lease while it runs and a takeover (``acquire``) takes the exclusive one, so
+  a takeover waits for the writes in flight, and writes that start after it queued wait behind it: PostgreSQL grants
+  lock requests in order, so neither side is starved. (A row-level ``FOR SHARE`` on the lease row lets overlapping
+  writers keep a waiting renewal or takeover out for ever; a renewal changes no generation and takes no such lock.)
 * Every table name in the adapters is unqualified; the connection's ``search_path`` selects the schema.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -93,6 +98,12 @@ def _role_initialiser(role: str | None) -> Any:
         await connection.execute(statement)
 
     return init
+
+
+def lease_lock_key(name: str) -> int:
+    """A stable signed 64-bit advisory-lock key for a lease name (a namespace of its own)."""
+    digest = hashlib.sha256(f"orqentis.lease:{name}".encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
 
 
 def _has_nul(args: tuple[Any, ...]) -> bool:
@@ -183,14 +194,15 @@ class PostgresDatabase:
     async def transaction(self, *, fenced: bool = True) -> AsyncIterator[Connection]:
         """A transaction on a pooled connection.
 
-        With ``fenced`` (the default) the transaction first checks the fence of the running scheduled job, if any, and
-        raises :class:`FencingError` when the lease has been taken over; a shared lock on the lease row then keeps a
-        competing ``acquire`` from bumping the generation until this transaction ends.
+        With ``fenced`` (the default) the transaction first takes the shared advisory lock of the lease and checks the
+        fence of the running scheduled job, if any, raising :class:`FencingError` when the lease has been taken over;
+        the lock then keeps a competing ``acquire`` from bumping the generation until this transaction ends.
         """
         async with self.connection() as conn, conn.transaction():
             if fenced and (fence := current_fence()) is not None:
+                await conn.execute("SELECT pg_advisory_xact_lock_shared($1)", lease_lock_key(fence.lease_name))
                 row = await conn.fetchrow(
-                    "SELECT generation FROM leases WHERE name = $1 AND holder_id = $2 AND generation = $3 FOR SHARE",
+                    "SELECT generation FROM leases WHERE name = $1 AND holder_id = $2 AND generation = $3",
                     fence.lease_name,
                     fence.holder_id,
                     fence.generation,

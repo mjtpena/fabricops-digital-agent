@@ -224,3 +224,19 @@ async def test_a_refused_reload_is_logged_audited_once_per_refused_digest_and_ma
         recovered = await http.get("/health/ready")
         assert recovered.json() == {"status": "ready", "scheduler": "disabled"}
         assert (await container.audit.verify()).valid
+
+
+async def test_a_follower_promoted_after_applying_a_change_still_repairs_the_shared_dependency_table(
+    container: Container, contracts_file: Path
+) -> None:
+    """A follower applies a change to its memory only; if it then becomes the leader its refresh sees an empty diff."""
+    store = container.catalog_refresher._store  # type: ignore[attr-defined]
+    assert {e.id for e in await store.list_edges()} == {"d1", "d2", "d3"}
+    publish(contracts_file, contracts_bytes(EXTRA_DEPENDENCY))
+    assert await container.replica_sync.run_once()  # follower: memory only
+    assert edge_ids(container) == {"d1", "d2", "d3", "d4"}
+    assert {e.id for e in await store.list_edges()} == {"d1", "d2", "d3"}  # the shared table is behind
+
+    diff = await container.catalog_refresher.refresh()  # now this replica leads: its own diff is empty...
+    assert diff.is_empty
+    assert {e.id for e in await store.list_edges()} == {"d1", "d2", "d3", "d4"}  # ...and it repaired the table

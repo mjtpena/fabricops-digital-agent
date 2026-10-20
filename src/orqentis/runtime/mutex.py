@@ -9,8 +9,13 @@ nothing and both open an incident. A :class:`Mutex` serialises such a section ac
 * The PostgreSQL adapter uses a session-level advisory lock held on one connection: it is released when the section
   ends and, if the instance dies in the middle, when its connection drops, so a crash can never leave it held.
 
-A wait is bounded: if the lock cannot be taken within ``max_wait``, :class:`MutexTimeoutError` is raised and the caller
-(a scheduled job, an API request) fails visibly instead of queueing behind a stuck holder forever.
+A wait is bounded: if the lock cannot be taken within ``max_wait``, :class:`MutexTimeoutError` is raised and the
+caller (a scheduled job, an API request) fails visibly instead of queueing behind a stuck holder forever.
+
+A lock held on a connection can be lost while its holder runs (a failover, an idle kill, a network blip): another
+instance then takes it and the first no longer excludes anyone. The PostgreSQL adapter watches its connection and,
+when the lock is gone, cancels the section, which raises :class:`MutexLostError` in the holder. The step must be safe
+to run again (the next pass redoes it), and the database backs it with unique keys where a duplicate would matter.
 """
 
 from __future__ import annotations
@@ -26,6 +31,10 @@ DEFAULT_MAX_WAIT = timedelta(minutes=2)
 
 class MutexTimeoutError(Exception):
     pass
+
+
+class MutexLostError(Exception):
+    """The lock was lost while the section ran: the section was cancelled, because it no longer excludes anyone."""
 
 
 class Mutex(Protocol):
