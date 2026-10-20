@@ -73,6 +73,11 @@ def _body(record: AuditRecord) -> dict[str, Any]:
     return record.model_dump(mode="json", exclude={"hash"})
 
 
+def record_digest(prev_hash: str, record: AuditRecord) -> str:
+    """The hash that links ``record`` to its predecessor: the one definition every audit adapter uses."""
+    return _digest(prev_hash, _body(record))
+
+
 class LocalAuditLog:
     """JSONL file where each record carries the SHA-256 of its predecessor.
 
