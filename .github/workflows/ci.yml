@@ -66,6 +66,23 @@ jobs:
       - name: Type check (mypy)
         run: mypy
 
+      # The storage contract and concurrency tests need PostgreSQL and Azurite (ADR-0017). PostgreSQL is the server that is
+      # preinstalled on the runner image: Docker Hub and ECR Public rate-limit shared runners (see the Dockerfile), so no
+      # image is pulled for it. It is reached over the local socket as the runner user (peer authentication: no password
+      # anywhere). Azurite comes from MCR, started by the tests themselves with an account key generated for the run.
+      # ORQENTIS_REQUIRE_SERVICES=1 turns a missing service into a failure instead of a skip.
+      - name: Start PostgreSQL and pull Azurite
+        run: |
+          sudo systemctl start postgresql.service
+          sudo -u postgres psql --command "CREATE ROLE runner SUPERUSER LOGIN"
+          docker pull --quiet mcr.microsoft.com/azure-storage/azurite
+          {
+            echo "ORQENTIS_REQUIRE_SERVICES=1"
+            echo "ORQENTIS_TEST_POSTGRES_HOST=/var/run/postgresql"
+            echo "ORQENTIS_TEST_POSTGRES_PORT=5432"
+            echo "ORQENTIS_TEST_POSTGRES_USER=runner"
+          } >> "$GITHUB_ENV"
+
       - name: Tests
         run: pytest -q
 

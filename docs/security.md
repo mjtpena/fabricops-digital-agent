@@ -133,6 +133,9 @@ not served under Easy Auth (they would answer callers with no role).
   `.env.example` contains no secrets.
 * The Application Insights connection string is a Container App secret.
 * The LLM uses Entra ID, not API keys.
+* PostgreSQL accepts an Entra access token only (`passwordAuth` is disabled on the server and no password setting
+  exists in the app); Blob storage has shared-key access disabled. The settings that `auth=none` / `ssl=disable`
+  would open for a local test container are rejected outside `deployment_environment=local`.
 * The contracts file holds declarations, not credentials. Its validation and loading errors name
   paths, ids and positions and never echo values from the file. `contracts scaffold` redacts and
   sanitises what it reads from Fabric (names, data source descriptions) and drops credentials, user info
@@ -171,8 +174,16 @@ records. The following are audited:
 * agent decisions (reasoner, model, prompt version, token usage, rejected outputs);
 * execution attempts, including every blocked attempt and its reason.
 
-The target architecture ships audit records to an append-only Eventhouse table or immutable
-storage.
+With the PostgreSQL backend (deployed environments) the chain lives in the database, serialised across replicas by a
+row lock on the chain head, and `audit_records` rejects `UPDATE`, `DELETE` and `TRUNCATE` with triggers (defence in
+depth against bugs). The tamper evidence is the chain plus **anchors**: every 15 minutes the head
+(epoch, sequence, hash) is written once to a blob in a container with version-level immutability, and `orqentis
+audit` / `GET /audit/verify` check that the database still holds the anchored record with the anchored hash. An
+edited record, a removed record, a removed tail, and a table rewritten with every hash recomputed are each detected
+(`tests/concurrency/test_audit_chain.py`). Records newer than the latest anchor are protected by the chain alone.
+After a restore the database can be behind its anchor; that is reported until an operator records the loss with
+`orqentis audit start-epoch` ([ADR-0017](adr/0017-postgresql-system-of-record.md),
+[operations/restore.md](operations/restore.md)).
 
 ## 6. Tool allowlists and input validation
 
@@ -234,8 +245,9 @@ to keep these defences under test.
 
 ## 9. Known gaps (MVP)
 
-* The local stores (SQLite, filesystem) are single-node, and their encryption at rest depends on
-  the host volume. The target is Eventhouse plus OneLake, with Entra ID RBAC.
+* The local stores (SQLite, filesystem) are single-node and for development only: deployed environments refuse to
+  start on them. The PostgreSQL and Blob stores are encrypted at rest by the platform (Microsoft-managed keys;
+  customer-managed keys are a possible follow-up) and reached over TLS 1.2+ (`verify-full`).
 * `easy_auth` trusts the front end's header. Do not expose the container without the built-in
   authentication layer.
 * **The app trusts `X-MS-CLIENT-PRINCIPAL` and does not validate bearer tokens itself.** If an externally reachable
@@ -272,20 +284,18 @@ boundaries above:
 * Catalog refreshes are audited with the ids that changed, and an empty estate is refused so a
   permission glitch cannot silently blind monitoring.
 
-**Deploys and two writers.** Container Apps (single-revision mode) runs the old and the new revision
-side by side during an update, on the same Azure Files volume, each with its own in-process lease.
-The SQLite stores and the hash-chained audit file are single-writer, so interleaved writes could
-fork the audit chain or contend on the databases. WS1 reduces this (a start delay so the new
-revision does not take the lease while the old one drains, a shutdown that stops the scheduler and
-releases the lease, and an audit log that re-reads its chain head before appending when the file
-grew) but cannot remove it: SMB has no locks, and real multi-writer safety needs the PostgreSQL lease
-and a database-serialised audit chain. **Until then, deploy with the scheduler off
-(`schedulerEnabled = false`) or accept this risk; nothing is deployed before the PostgreSQL work.**
+**Deploys and several writers.** Container Apps (single-revision mode) runs the old and the new revision
+side by side during an update, and test/prod run two replicas. With the PostgreSQL system of record
+([ADR-0017](adr/0017-postgresql-system-of-record.md)) that is safe: the audit chain is serialised by the database
+(one valid chain from any number of writers), approvals are decided and executed with compare-and-set (at most one
+execution per approval), the leader lease uses the database clock and every scheduled write is fenced by the lease
+generation (a deposed leader's late write is refused), detection runs under a cross-replica mutex, and investigation
+jobs are durable rows that any replica claims. The start delay (`schedulerStartupDelaySeconds`) is now only a
+courtesy. Tested with two instances, two OS processes, a killed process and a graceful stop
+(`tests/concurrency`).
 
-Limits: the scheduler's leader lease and the investigation jobs are in-process, which is correct for
-the single replica this deployment runs and not for several. Jobs are lost on restart (their
-incidents are recovered and re-investigated). Durable jobs and a database-backed lease arrive with
-the PostgreSQL system of record.
+Limits: the incident aggregate is still a last-writer-wins upsert (a row version is the follow-up), and rate limits
+are per replica (section 2.3). Detection and manual collection wait for each other for up to two minutes.
 
 ## 11. Least-privilege findings from the live sandbox
 
@@ -379,3 +389,18 @@ refreshes.
   the Microsoft Entra token endpoint with a bad client surfaces the `AADSTS` text, which is.
 * A notebook that raises surfaces as pipeline error code 2451 with the exception name and text nested in the
   message; a timed-out activity surfaces as pipeline error code 500 "InternalServerError executing request".
+
+## 12. Storage identities, encryption and network
+
+| Resource | Who can do what | Notes |
+|---|---|---|
+| PostgreSQL Flexible Server | Authentication is Microsoft Entra only (`passwordAuth` disabled). The Entra administrator **group** (parameter) can administer and run `scripts/postgres-bootstrap.sql`; the **reader managed identity** is a database role that owns one schema and may connect, with no superuser, no `CREATE` on the database and nothing in other schemas | The actor (write) identity has no access. The server is reachable over public access with explicit firewall rules (or VNet integration with a private DNS zone); TLS is required and the app verifies the certificate chain and host name |
+| Evidence storage account | Shared-key access disabled, Entra only. The reader identity has **Storage Blob Data Contributor on the `evidence` and `audit-anchors` containers only**, never on the account | Versioning, soft delete and account-level version-level immutability (retention parameter; `Unlocked` until the owner chooses `Locked`, which is irreversible). Blob public access off, TLS 1.2+, no cross-tenant replication |
+| Container App | Has no volume and no storage key. The estate contracts file is a Container App secret mounted read-only | Rate limiting and in-memory caches are per replica |
+
+Encryption at rest is the platform default for both services (Microsoft-managed keys); in transit is TLS. The audit
+anchors make the audit trail verifiable even against someone with full rights on the database, but not against someone
+who can change the immutability policy of the storage account before it is locked: keep the account's own RBAC small and
+lock the policy in production. Credentials for these services never appear in the repository, in settings or in
+CI: the only secrets in the picture are Container App secrets that Bicep fills from Key Vault references.
+

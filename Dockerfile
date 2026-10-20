@@ -60,7 +60,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ORQENTIS_RUNBOOKS_DIR=/app/runbooks \
     ORQENTIS_FIXTURES_DIR=/app/fixtures
 
-# Fixed, high UID/GID so the Azure Files mount options in infra/bicep can map file ownership to this user.
+# Fixed, high UID/GID: the non-root app user owns /var/lib/orqentis, the container's own scratch directory.
 RUN echo "orqentis:x:${APP_GID}:" >> /etc/group \
     && echo "orqentis:x:${APP_UID}:${APP_GID}:Orqentis FabricOps:/app:/sbin/nologin" >> /etc/passwd \
     && mkdir -p /app /var/lib/orqentis \
@@ -87,7 +87,8 @@ COPY fixtures/ /app/fixtures/
 WORKDIR /app
 USER orqentis:orqentis
 
-# Event store, state DB, evidence and audit log (an Azure Files share is mounted here in Container Apps).
+# Scratch space for the local adapters (SQLite, files). Deployed environments keep no state here: they use PostgreSQL
+# and Blob storage (ADR-0017), so the container is stateless and any number of replicas may run.
 VOLUME ["/var/lib/orqentis"]
 
 EXPOSE 8000

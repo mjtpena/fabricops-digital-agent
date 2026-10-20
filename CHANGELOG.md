@@ -13,6 +13,23 @@ section does not match.
 
 ### Added
 
+- Durable storage and a stateless app (ADR-0017, implements ADR-0008): PostgreSQL adapters (asyncpg, Entra token as the
+  password, no password setting) for the event store, incidents, dependencies, approvals (compare-and-set), the audit
+  chain (chain-head row lock), the leader lease (database clock, fencing generation) and investigation jobs
+  (`FOR UPDATE SKIP LOCKED`, heartbeats, re-claim after a crash); versioned SQL migrations behind an advisory lock;
+  Blob evidence/report and audit-anchor adapters (write-once, version-level immutability, OneLake by URL).
+  `ORQENTIS_STORAGE_BACKEND=postgres` is required in `dev`/`test`/`prod`; `local` stays the default for development,
+  tests, mock mode and `make demo`.
+- Fenced writes: scheduled jobs run under the lease generation and every PostgreSQL write transaction checks it, so a
+  deposed leader's late write is refused. Detection runs under a cross-replica mutex.
+- Audit anchors: the chain head is written to an immutable blob every 15 minutes and `orqentis audit` verifies against
+  the latest one; `orqentis audit start-epoch` records a restore. `orqentis db migrate|status|reseed-counters`.
+- Bicep: PostgreSQL Flexible Server (B1ms default, Entra-only, PITR), evidence storage account (shared key disabled,
+  versioning, version-level immutability), container-scoped role assignments, `minReplicas`/`maxReplicas`
+  (1 in dev, 2 in test and prod). `docs/operations/restore.md`, `scripts/postgres-bootstrap.sql`.
+- Contract tests for every storage port against the local and the PostgreSQL/Blob adapters, and concurrency tests with
+  two instances, two OS processes, a killed process and a graceful stop; CI runs them with PostgreSQL and Azurite.
+
 - Delivery pipeline (ADR-0016): `cd.yml` runs CI first, then builds the image once, scans it with Trivy, generates an SPDX
   SBOM, pushes it to the shared registry by digest, tags it (`<git sha>` for `main`, `dryrun-<git sha>` otherwise) only
   after the scan gate passes, deploys `dev` and smoke-tests it, then promotes the same digest to `test` and `prod`

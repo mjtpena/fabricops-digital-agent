@@ -281,6 +281,30 @@ conversation, so the real `Agent`, function invocation and telemetry layers run 
 endpoint. `tests/support/fake_entra.py` plays Microsoft Entra ID for real azure-identity
 credentials, which is how the tests prove where token requests go and which scope they ask for. Tests clear `ORQENTIS_*` environment variables and ignore `.env`.
 
+**Storage contract and concurrency tests** (`tests/contract`, `tests/concurrency`, `tests/integration/test_postgres_*`).
+Every storage port runs the same suite against its local adapter and its PostgreSQL / Blob adapter, and the concurrency
+suite runs several application instances against one PostgreSQL (two pools, two containers, two OS processes, a killed
+process). They need PostgreSQL and Azurite. With Docker running, the fixtures start throwaway containers (trust
+authentication, an Azurite account whose key is generated for the run) and remove them afterwards; to use servers you
+already have, set `ORQENTIS_TEST_POSTGRES_HOST` (`_PORT`, `_USER`) and `ORQENTIS_TEST_AZURITE_URL` (`_ACCOUNT`, `_KEY`).
+Without either, those tests are skipped; CI sets `ORQENTIS_REQUIRE_SERVICES=1`, which turns a missing service into a
+failure so it can never pass silently.
+
+```bash
+pytest tests/contract tests/concurrency tests/integration/test_postgres_backend.py tests/integration/test_postgres_migrations.py
+```
+
+Running the app against a local PostgreSQL (a throwaway container with trust authentication and Azurite):
+
+```bash
+export ORQENTIS_STORAGE_BACKEND=postgres ORQENTIS_POSTGRES_HOST=127.0.0.1 ORQENTIS_POSTGRES_PORT=5432 \
+  ORQENTIS_POSTGRES_USER=postgres ORQENTIS_POSTGRES_DATABASE=postgres ORQENTIS_POSTGRES_AUTH=none \
+  ORQENTIS_POSTGRES_SSL_MODE=disable ORQENTIS_EVIDENCE_BLOB_URL=https://<account>.blob.core.windows.net
+orqentis db status      # applied / pending migrations
+orqentis db migrate     # only as the role that owns the schema (the app migrates when it starts)
+orqentis audit          # verifies the chain and the latest anchor; `audit start-epoch --reason ...` after a restore
+```
+
 `tests/fixtures/fabric_rest/` holds real Fabric and Power BI responses recorded from the live sandbox
 (every identifier remapped to a synthetic GUID, nothing else changed) and
 `tests/integration/test_fabric_rest_recorded.py` replays them through the adapter, so the real payload

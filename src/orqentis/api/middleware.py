@@ -12,7 +12,8 @@
   route there reads it. Traffic without a valid identity is Easy Auth's job (401 before the app) and is not
   limited here.
 * **Per replica.** State is in memory. With N replicas the effective limit is N times the setting. The MVP
-  runs a single replica (SQLite stores), so this is exact today.
+  runs two or more replicas in test and prod, so the limit there is looser than the setting (a shared limiter is the
+  follow-up; put Front Door or API Management in front for a global limit).
 * **Docs lockdown.** Under Easy Auth the interactive docs and the OpenAPI document are removed. They would
   answer any authenticated caller, including one with no FabricOps role.
 
