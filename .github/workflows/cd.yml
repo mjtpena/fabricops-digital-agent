@@ -24,10 +24,12 @@ name: CD
 #   AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, ACR_NAME, ACR_LOGIN_SERVER, ACR_RESOURCE_ID, ACR_PUSH_CLIENT_ID
 #
 # The build job declares no environment, so its OIDC subject is the ref that triggered the run, and the identity behind
-# ACR_PUSH_CLIENT_ID can only push to the registry (it cannot deploy anything):
-#   repo:<owner>/<repo>:ref:refs/heads/main               (push to main)
-#   repo:<owner>/<repo>:ref:refs/heads/cd-dryrun/<name>   (dry run)
-#   repo:<owner>/<repo>:ref:refs/heads/<branch>           (manual run on a branch)
+# ACR_PUSH_CLIENT_ID can only push to the registry (it cannot deploy anything). <prefix> is the repository's
+# sub_claim_prefix (immutable subject claims: owner and repository ids), e.g.
+# repo:mjtpena@19221213/fabricops-digital-agent@1412312219; docs/delivery.md, section 0, shows how to read it:
+#   <prefix>:ref:refs/heads/main               (push to main)
+#   <prefix>:ref:refs/heads/cd-dryrun/<name>   (dry run)
+#   <prefix>:ref:refs/heads/<branch>           (manual run on a branch)
 
 on:
   push:

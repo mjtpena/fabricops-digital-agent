@@ -247,12 +247,36 @@ def test_cd_build_waits_for_ci_and_ci_is_reusable() -> None:
     assert {"pull_request", "schedule"} <= set(triggers)
 
 
+def _cancels(expression: str, event: str, ref: str) -> bool:
+    """Evaluate the small && expression used for `cancel-in-progress` (anything else fails the test loudly)."""
+    body = expression.strip().removeprefix("${{").removesuffix("}}").strip()
+    for clause in (part.strip() for part in body.split("&&")):
+        if match := re.fullmatch(r"github\.(event_name|ref) != '([^']+)'", clause):
+            allowed = {"event_name": event, "ref": ref}[match[1]] != match[2]
+        elif match := re.fullmatch(r"!startsWith\(github\.ref, '([^']+)'\)", clause):
+            allowed = not ref.startswith(match[1])
+        else:
+            raise AssertionError(f"unsupported clause in cancel-in-progress: {clause}")
+        if not allowed:
+            return False
+    return True
+
+
 def test_ci_concurrency_never_cancels_main_dry_run_or_scheduled_runs() -> None:
     concurrency = _load(WORKFLOWS / "ci.yml")["concurrency"]
     assert "github.event_name" in concurrency["group"], "the weekly run and pushes must not share a group"
     cancel = str(concurrency["cancel-in-progress"])
-    assert "'schedule'" in cancel
-    assert "refs/heads/main" in cancel
+    # Never cancelled: main, dry-run branches (CI runs inside CD for both), the weekly schedule.
+    for event, ref in [
+        ("push", "refs/heads/main"),
+        ("push", "refs/heads/cd-dryrun/ws4"),
+        ("schedule", "refs/heads/main"),
+        ("workflow_dispatch", "refs/heads/cd-dryrun/other/deep"),
+    ]:
+        assert not _cancels(cancel, event, ref), f"{event} on {ref} must not be cancelled by a later run"
+    # Superseded work on pull requests and feature branches is cancelled to save minutes.
+    for event, ref in [("pull_request", "refs/pull/6/merge"), ("push", "refs/heads/feature/x")]:
+        assert _cancels(cancel, event, ref), f"{event} on {ref} should be cancellable"
 
 
 def test_scan_gates_fail_on_unfixed_findings_too() -> None:
@@ -333,3 +357,81 @@ def test_trivy_exceptions_are_justified_and_expire_within_sixty_days() -> None:
         expires = entry["expired_at"]
         assert expires >= today, f"{entry['id']}: expired on {expires}; remove it or renew it with a fresh review"
         assert expires <= today + dt.timedelta(days=60), f"{entry['id']}: expires more than 60 days ahead"
+
+
+LEGACY_SUBJECT = re.compile(r"repo:[\w.-]+/[\w.-]+")  # repo:owner/name, the pre-immutable form
+IMMUTABLE_SUBJECT = re.compile(r"repo:[\w.-]+@\d+/[\w.-]+@\d+(?::|$)")  # repo:owner@<id>/name@<id>:...
+SUBJECT_FILES = (
+    "docs/delivery.md",
+    "docs/adr/0016-delivery-pipeline.md",
+    ".github/workflows/cd.yml",
+    ".github/workflows/deploy-environment.yml",
+    ".github/workflows/whatif.yml",
+    ".github/workflows/release.yml",
+)
+
+
+@pytest.mark.parametrize("relative", SUBJECT_FILES)
+def test_no_oidc_subject_uses_the_legacy_owner_name_form(relative: str) -> None:
+    """Repositories with immutable subject claims never match `repo:owner/name:...`: every login would fail."""
+    text = (ROOT / relative).read_text(encoding="utf-8")
+    assert not LEGACY_SUBJECT.search(text), f"{relative}: legacy subject form {LEGACY_SUBJECT.search(text)}"
+    assert "repo:$REPO" not in text.replace("SUBJECT_PREFIX:=repo:${REPO}", ""), (
+        f"{relative}: build subjects from $SUBJECT_PREFIX"
+    )
+
+
+def test_documented_subjects_use_the_immutable_prefix_and_cover_every_credential() -> None:
+    text = (ROOT / "docs" / "delivery.md").read_text(encoding="utf-8")
+    subjects = [match.group(0) + rest for match, rest in _subjects(text)]
+    assert subjects, "docs/delivery.md documents no subject"
+    for subject in subjects:
+        assert IMMUTABLE_SUBJECT.match(subject), f"{subject}: not the immutable owner@id/repo@id form"
+    documented = " ".join(subjects)
+    for suffix in (
+        ":ref:refs/heads/main",
+        ":environment:dev",
+        ":environment:test",
+        ":environment:prod",
+        ":environment:release",
+        ":pull_request",
+        ":ref:refs/heads/cd-dryrun/ws4",
+    ):
+        assert suffix in documented, f"docs/delivery.md does not document the subject ending {suffix}"
+    # The prefix is read from GitHub, not typed, and the docs say how and why.
+    assert "sub_claim_prefix" in text
+    assert "oidc/customization/sub" in text
+    assert "AADSTS70021" in text
+
+
+def _subjects(text: str) -> list[tuple[re.Match[str], str]]:
+    """Every literal `repo:...` subject in the document with the `:suffix` that follows it."""
+    found = []
+    for match in re.finditer(r"repo:[\w.@/-]+", text):
+        if match.group(0).startswith("repo:<") or match.group(0) in {"repo:$REPO"}:
+            continue
+        tail = re.match(r":[\w:/.*<>-]+", text[match.end() :])
+        found.append((match, tail.group(0) if tail else ""))
+    return found
+
+
+def test_environments_are_verified_before_any_environment_credential_is_created() -> None:
+    text = (ROOT / "docs" / "delivery.md").read_text(encoding="utf-8")
+    environments = text.index("### 3. GitHub environments")
+    identities = text.index("### 4. Entra identities")
+    assert environments < identities
+    assert "Do this before section 4" in text
+    first_environment_credential = min(
+        text.index(marker)
+        for marker in ('"$SUBJECT_PREFIX:environment:', "SUBJECT_PREFIX:environment:dev")
+        if marker in text
+    )
+    assert first_environment_credential > environments
+
+
+def test_required_status_checks_are_pinned_to_the_github_actions_app() -> None:
+    text = (ROOT / "docs" / "delivery.md").read_text(encoding="utf-8")
+    assert text.count('"integration_id": 15368') == 6, "all six required checks name the GitHub Actions app"
+    assert '"context": "' in text
+    assert re.search(r'"context": "[^"]+" \}', text) is None, "a required check without integration_id"
+    assert "refs/heads/cd-dryrun/**" in text, "a ruleset restricts who can create dry-run branches"

@@ -296,7 +296,7 @@ module readerOpenAiUser 'modules/openai-role.bicep' = if (!empty(azureOpenAiReso
 // group's id because every environment deploys this module into the registry's resource group.
 // The deploying principal therefore needs, in the REGISTRY's resource group, Microsoft.Resources/deployments/write (this
 // module is a nested deployment there) and, on the registry, Microsoft.Authorization/roleAssignments/write for AcrPull
-// (docs/delivery.md, section 4). Without the first, the deployment fails with AuthorizationFailed before the app exists.
+// (docs/delivery.md, section 5). Without the first, the deployment fails with AuthorizationFailed before the app exists.
 module readerSharedAcrPull 'modules/acr-pull.bicep' = if (!empty(containerRegistryResourceId)) {
   name: 'orqentis-acr-pull-${uniqueString(containerRegistryResourceId, resourceGroup().id, readerIdentityName)}'
   scope: resourceGroup(acrIdSegments[2], acrIdSegments[4])

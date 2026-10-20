@@ -3,7 +3,7 @@ name: Bicep what-if
 # On pull requests that touch the infrastructure, show what deploying them to dev would change. READ-ONLY: it runs
 # `az deployment group what-if`, never `create`, and the identity behind it can only simulate deployments.
 #
-# The job signs in over OIDC with the pull request subject (repo:<owner>/<repo>:pull_request) as the identity in the
+# The job signs in over OIDC with the pull request subject (<prefix>:pull_request, see docs/delivery.md section 0) as the identity in the
 # WHATIF_CLIENT_ID repository variable. It is skipped, not failed, when that variable is unset, when the pull request
 # comes from a fork (forks get no OIDC token), or when the target resource group does not exist yet.
 #

@@ -21,7 +21,7 @@ permissions:
 # branches and pull requests are cancelled; main, dry-run and scheduled runs always finish.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' && github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/cd-dryrun/') }}
 
 # Every third-party action is pinned by full commit SHA with the version in a trailing comment; Dependabot keeps
 # both current (.github/dependabot.yml). Runners are pinned to ubuntu-24.04 rather than ubuntu-latest.

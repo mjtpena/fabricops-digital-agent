@@ -55,7 +55,9 @@ Debian image, and the app never installs anything at run time. Dependabot is tol
 refresh the digest.
 
 **Identities (OIDC only, no secrets).** `azure/login` takes client, tenant and subscription ids from GitHub variables
-(identifiers, not secrets). Three kinds of Entra identity are never shared. The **build** identity (the existing
+(identifiers, not secrets). Federated-credential subjects start with the repository's immutable-subject prefix
+(`sub_claim_prefix`, which embeds the numeric owner and repository ids), read from the GitHub API rather than typed, and the
+`environment:*` credentials are created only after the environments' reviewer and branch rules have been verified as enforced. Three kinds of Entra identity are never shared. The **build** identity (the existing
 `fabricops-cicd-dev`) holds `AcrPush` on the registry and nothing else; subjects `ref:refs/heads/main`, the dry-run branch
 and `environment:release`. A **deploy** identity per environment (`fabricops-deploy-dev|test|prod`, subject
 `environment:<env>`) holds `Contributor` on its own resource group, `Role Based Access Control Administrator` constrained

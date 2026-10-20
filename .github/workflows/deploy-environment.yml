@@ -3,7 +3,7 @@ name: Deploy environment
 # Called by cd.yml once per environment (dev, then test, then prod), so the three deployments run exactly the same
 # steps. It deploys one image, by digest, into rg-fabricops-<environment> with infra/bicep/env/<environment>.bicepparam
 # and then runs the smoke test. The GitHub environment named by `environment` supplies the approval gate (required
-# reviewers on test and prod), the OIDC subject (repo:<owner>/<repo>:environment:<environment>) and the variables.
+# reviewers on test and prod), the OIDC subject (<prefix>:environment:<environment>, see docs/delivery.md section 0) and the variables.
 # Nothing here is a secret: client, tenant and subscription ids are identifiers, and Azure access is OIDC only.
 #
 # Environment variables (Settings > Environments > <environment> > Variables), see docs/delivery.md:

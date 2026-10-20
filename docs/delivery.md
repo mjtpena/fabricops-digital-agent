@@ -35,12 +35,12 @@ environment, can deploy that environment only) and **what-if** (can simulate a d
 
 | Workflow job | Trigger | OIDC subject it presents | Azure identity |
 |---|---|---|---|
-| `cd.yml` `build` | push to `main`; push to `cd-dryrun/**`; manual run | `repo:mjtpena/fabricops-digital-agent:ref:refs/heads/main`; for a dry run `...:ref:refs/heads/cd-dryrun/<name>`; for a manual run on a branch `...:ref:refs/heads/<branch>` | build: `fabricops-cicd-dev` (`AcrPush` only) |
-| `deploy-environment.yml` (dev) | after `build` on `main` | `repo:mjtpena/fabricops-digital-agent:environment:dev` | `fabricops-deploy-dev` |
-| same (test) | after dev, approval | `repo:mjtpena/fabricops-digital-agent:environment:test` | `fabricops-deploy-test` |
-| same (prod) | after test, approval | `repo:mjtpena/fabricops-digital-agent:environment:prod` | `fabricops-deploy-prod` |
-| `whatif.yml` | pull request touching `infra/**` | `repo:mjtpena/fabricops-digital-agent:pull_request` | `fabricops-whatif` |
-| `release.yml` `publish` | tag `v*.*.*`, after approval | `repo:mjtpena/fabricops-digital-agent:environment:release` | build: `fabricops-cicd-dev` |
+| `cd.yml` `build` | push to `main`; push to `cd-dryrun/**`; manual run | `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:ref:refs/heads/main`; for a dry run `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:ref:refs/heads/cd-dryrun/<name>`; for a manual run on a branch `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:ref:refs/heads/<branch>` | build: `fabricops-cicd-dev` (`AcrPush` only) |
+| `deploy-environment.yml` (dev) | after `build` on `main` | `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:environment:dev` | `fabricops-deploy-dev` |
+| same (test) | after dev, approval | `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:environment:test` | `fabricops-deploy-test` |
+| same (prod) | after test, approval | `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:environment:prod` | `fabricops-deploy-prod` |
+| `whatif.yml` | pull request touching `infra/**` | `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:pull_request` | `fabricops-whatif` |
+| `release.yml` `publish` | tag `v*.*.*`, after approval | `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:environment:release` | build: `fabricops-cicd-dev` |
 
 ## One-time setup (owner and tenant admin)
 
@@ -63,9 +63,22 @@ export ACR_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$ACR_RG/providers/
 export ISSUER=https://token.actions.githubusercontent.com
 export AUDIENCE=api://AzureADTokenExchange
 az account set --subscription "$SUBSCRIPTION_ID"
+
+# The prefix every federated-credential subject starts with (see below). Read it from GitHub; never type it from memory.
+export SUBJECT_PREFIX=$(gh api "repos/$REPO/actions/oidc/customization/sub" --jq '.sub_claim_prefix // empty')
+: "${SUBJECT_PREFIX:=repo:${REPO}}"    # repositories without immutable subjects use the plain owner/name form
+echo "$SUBJECT_PREFIX"                 # this repository: repo:mjtpena@19221213/fabricops-digital-agent@1412312219
 ```
 
 For another customer, change these values; nothing else in the repository refers to them.
+
+**The OIDC subject prefix.** This repository uses GitHub's *immutable subject claims*
+(<https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens>): the subject starts
+with the numeric owner and repository ids, `repo:mjtpena@19221213/fabricops-digital-agent@1412312219`, not with `repo:<owner>/<name>`. A
+renamed or deleted-and-recreated repository therefore cannot inherit a credential. A credential written in the plain
+form (which is what older articles show) never matches, and every login fails with `AADSTS70021: No matching federated
+identity record found`. For any other repository, `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` returns
+`use_immutable_subject` and `sub_claim_prefix`; use that value, and every `$SUBJECT_PREFIX` below stands for it.
 
 ### 1. Environment resource groups
 
@@ -113,20 +126,67 @@ az ad app update --id "$APP_ID" --app-roles @roles.json
 rm roles.json
 ```
 
-### 3. Entra identities with federated credentials (no secrets)
+### 3. GitHub environments (and prove their rules are enforced first)
 
-Each app gets one service principal and **no client secret or certificate**.
+**Do this before section 4.** A federated credential for `environment:prod` is only as safe as the rules on the `prod` environment: if the reviewers and the main-only deployment rule are not actually enforced (they are silently ignored on a plan that does not support them), a workflow on any branch that declares `environment: prod` would receive the prod deploy token. So create the environments, run the verification below, and only continue when it passes.
+
+Four environments: `dev`, `test` and `prod` deploy from `main` only; `release` publishes from `v*` tags only. `test`,
+`prod` and `release` need an approver.
+
+> **Plan check (do this first).** Required reviewers, deployment rules and rulesets on a **private** repository need
+> GitHub Pro, Team or Enterprise. On the Free plan the API accepts the call and silently ignores the rules. Verify
+> after creating each environment (commands below). Do not create any `environment:*` credential (section 4) and do not merge the CD workflow to `main` until `prod` shows a
+> required reviewer and a main-only deployment rule, and section 8's rulesets are active, or a push to `main` can deploy to production unreviewed.
+
+```bash
+OWNER_ID=$(gh api user --jq .id)     # run as the person who will approve (add more reviewers with more entries)
+
+create_environment() {   # create_environment <env> <branch|tag> <name pattern> <reviewers: yes|no>
+  local reviewers='[]'
+  [[ $4 == yes ]] && reviewers="[{\"type\":\"User\",\"id\":$OWNER_ID}]"
+  gh api -X PUT "repos/$REPO/environments/$1" --input - <<EOF
+{ "reviewers": $reviewers,
+  "prevent_self_review": false,
+  "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true } }
+EOF
+  gh api -X POST "repos/$REPO/environments/$1/deployment-branch-policies" -f name="$3" -f type="$2"
+}
+
+create_environment dev     branch main no
+create_environment test    branch main yes
+create_environment prod    branch main yes
+create_environment release tag    'v*' yes
+```
+
+`prevent_self_review` is `false` because the repository has one owner: with `true` the person who pushed to `main`
+could never approve their own promotion. With two or more maintainers set it to `true`. A "wait timer" is not needed.
+
+Verify (the `protection_rules` output must list `required_reviewers` for `test`, `prod` and `release`, and each
+environment must list its branch or tag policy):
+
+```bash
+for ENV in dev test prod release; do
+  echo "== $ENV"
+  gh api "repos/$REPO/environments/$ENV" --jq '[.protection_rules[] | .type] , .deployment_branch_policy'
+  gh api "repos/$REPO/environments/$ENV/deployment-branch-policies" --jq '[.branch_policies[] | .name]'
+done
+```
+
+### 4. Entra identities with federated credentials (no secrets)
+
+**Start only after section 3's verification passed** (the `environment:*` credentials below are what the environment rules protect). Each app gets one service principal and **no client secret or certificate**. Every subject starts with `$SUBJECT_PREFIX` from section 0.
 
 **The build identity** is the existing `fabricops-cicd-dev` (client id `c3960e5b-b0fd-4bee-a247-667fbc753018`). It is
-repurposed as push-only: its only role stays `AcrPush` on the registry. It keeps the credential `gh-ref-main`
-(`ref:refs/heads/main`), loses `gh-env-dev` (deploying to `dev` now uses its own identity, so the build identity must
-not be usable from a `dev` job) and gains `gh-env-release`, for the release job:
+push-only: its only role is `AcrPush` on the registry, and it must carry exactly one federated credential, `gh-ref-main`,
+whose subject is `$SUBJECT_PREFIX:ref:refs/heads/main`. It has no `environment:dev` credential (that subject belongs to
+`fabricops-deploy-dev` below; the build identity must not be usable from a `dev` job). If you find a `gh-env-dev`
+credential on it, delete it. The release job adds one more, for the `release` environment of section 3:
 
 ```bash
 export BUILD_APP_ID=c3960e5b-b0fd-4bee-a247-667fbc753018
-az ad app federated-credential delete --id "$BUILD_APP_ID" --federated-credential-id gh-env-dev
+az ad app federated-credential list --id "$BUILD_APP_ID" --query "[].{name:name,subject:subject}" -o table   # expect gh-ref-main
 az ad app federated-credential create --id "$BUILD_APP_ID" --parameters \
-  "{\"name\":\"gh-env-release\",\"issuer\":\"$ISSUER\",\"subject\":\"repo:$REPO:environment:release\",\"audiences\":[\"$AUDIENCE\"]}"
+  "{\"name\":\"gh-env-release\",\"issuer\":\"$ISSUER\",\"subject\":\"$SUBJECT_PREFIX:environment:release\",\"audiences\":[\"$AUDIENCE\"]}"
 ```
 
 **The deploy identities** (one per environment) and **the what-if identity** are new:
@@ -141,10 +201,10 @@ new_identity() {   # new_identity <display name> <credential name> <subject>
   echo "$1 appId: $app_id"
 }
 
-new_identity fabricops-deploy-dev  gh-env-dev  "repo:$REPO:environment:dev"
-new_identity fabricops-deploy-test gh-env-test "repo:$REPO:environment:test"
-new_identity fabricops-deploy-prod gh-env-prod "repo:$REPO:environment:prod"
-new_identity fabricops-whatif      gh-pull-request "repo:$REPO:pull_request"
+new_identity fabricops-deploy-dev  gh-env-dev  "$SUBJECT_PREFIX:environment:dev"
+new_identity fabricops-deploy-test gh-env-test "$SUBJECT_PREFIX:environment:test"
+new_identity fabricops-deploy-prod gh-env-prod "$SUBJECT_PREFIX:environment:prod"
+new_identity fabricops-whatif      gh-pull-request "$SUBJECT_PREFIX:pull_request"
 ```
 
 Record the printed ids:
@@ -156,12 +216,13 @@ export DEPLOY_PROD_APP_ID=<printed above>
 export WHATIF_APP_ID=<printed above>
 ```
 
-Check that your organisation did not customise the OIDC subject claim; the subjects above assume the default
-(`gh api repos/$REPO/actions/oidc/customization/sub` must say `"use_default": true`). Federated credentials do not
+Check the subject format before relying on these credentials: `gh api repos/$REPO/actions/oidc/customization/sub` must
+return `"use_default": true` (no custom claim template; a customised template changes the subject) and shows
+`use_immutable_subject` and `sub_claim_prefix`, which section 0 put in `$SUBJECT_PREFIX`. Federated credentials do not
 accept wildcards, so each subject is registered exactly. Add one more only while you are doing a branch dry run (see
 *Dry run on a branch*).
 
-### 4. Azure role assignments (least privilege)
+### 5. Azure role assignments (least privilege)
 
 | Identity | Role | Scope | Why |
 |---|---|---|---|
@@ -263,7 +324,7 @@ to `modules/acr-pull.bicep` by reading the diff.
 > being blocked by the missing read of keys. Do **not** grant the what-if identity key access. Treat it as a known
 > limit, report it in the pull request, and keep the what-if advisory (it is not a required check).
 
-### 5. Smoke-test identity
+### 6. Smoke-test identity
 
 The post-deployment smoke test calls the API with a token for the environment's own **deploy** service principal, so
 that principal must hold the `FabricOps.Automation` role on that environment's API registration (assigned *to the
@@ -292,50 +353,6 @@ The `Automation` role may call read endpoints and `POST /telemetry/collect`; it 
 
 The smoke test also reads the container app and its revisions to confirm that the new revision is the one serving
 traffic; the deploy identity can, through `Contributor` on its resource group.
-
-### 6. GitHub environments
-
-Four environments: `dev`, `test` and `prod` deploy from `main` only; `release` publishes from `v*` tags only. `test`,
-`prod` and `release` need an approver.
-
-> **Plan check (do this first).** Required reviewers, deployment rules and rulesets on a **private** repository need
-> GitHub Pro, Team or Enterprise. On the Free plan the API accepts the call and silently ignores the rules. Verify
-> after creating each environment (commands below). Do not merge the CD workflow to `main` until `prod` shows a
-> required reviewer and section 8's rulesets are active, or a push to `main` can deploy to production unreviewed.
-
-```bash
-OWNER_ID=$(gh api user --jq .id)     # run as the person who will approve (add more reviewers with more entries)
-
-create_environment() {   # create_environment <env> <branch|tag> <name pattern> <reviewers: yes|no>
-  local reviewers='[]'
-  [[ $4 == yes ]] && reviewers="[{\"type\":\"User\",\"id\":$OWNER_ID}]"
-  gh api -X PUT "repos/$REPO/environments/$1" --input - <<EOF
-{ "reviewers": $reviewers,
-  "prevent_self_review": false,
-  "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true } }
-EOF
-  gh api -X POST "repos/$REPO/environments/$1/deployment-branch-policies" -f name="$3" -f type="$2"
-}
-
-create_environment dev     branch main no
-create_environment test    branch main yes
-create_environment prod    branch main yes
-create_environment release tag    'v*' yes
-```
-
-`prevent_self_review` is `false` because the repository has one owner: with `true` the person who pushed to `main`
-could never approve their own promotion. With two or more maintainers set it to `true`. A "wait timer" is not needed.
-
-Verify (the `protection_rules` output must list `required_reviewers` for `test`, `prod` and `release`, and each
-environment must list its branch or tag policy):
-
-```bash
-for ENV in dev test prod release; do
-  echo "== $ENV"
-  gh api "repos/$REPO/environments/$ENV" --jq '[.protection_rules[] | .type] , .deployment_branch_policy'
-  gh api "repos/$REPO/environments/$ENV/deployment-branch-policies" --jq '[.branch_policies[] | .name]'
-done
-```
 
 ### 7. GitHub variables
 
@@ -388,7 +405,7 @@ Per-environment settings that are not variables (image reference, tags, CPU, ret
 `infra/bicep/env/<env>.bicepparam` and change through a reviewed pull request. `prod` keeps `enableWriteActions =
 false`; CI fails if it changes.
 
-### 8. Protect `main` and the release tags
+### 8. Protect `main`, the release tags and the dry-run branches
 
 The pipeline deploys whatever reaches `main` and releases whatever is tagged, so both need rulesets. Without them, any
 collaborator with write access could push to `main` without review or create a `v*` tag. (`ci` runs again inside `cd.yml`,
@@ -415,12 +432,12 @@ gh api -X POST "repos/$REPO/rulesets" --input - <<'EOF'
     { "type": "required_status_checks",
       "parameters": { "strict_required_status_checks_policy": true,
                       "required_status_checks": [
-                        { "context": "Test (Python 3.12)" },
-                        { "context": "Test (Python 3.13)" },
-                        { "context": "Dependency audit (pip-audit)" },
-                        { "context": "Lint workflows (actionlint)" },
-                        { "context": "Bicep build" },
-                        { "context": "Docker image build" } ] } }
+                        { "context": "Test (Python 3.12)", "integration_id": 15368 },
+                        { "context": "Test (Python 3.13)", "integration_id": 15368 },
+                        { "context": "Dependency audit (pip-audit)", "integration_id": 15368 },
+                        { "context": "Lint workflows (actionlint)", "integration_id": 15368 },
+                        { "context": "Bicep build", "integration_id": 15368 },
+                        { "context": "Docker image build", "integration_id": 15368 } ] } }
   ]
 }
 EOF
@@ -438,9 +455,26 @@ gh api -X POST "repos/$REPO/rulesets" --input - <<'EOF'
 EOF
 ```
 
-The six required checks are the job names in `ci.yml`; if you add or rename a CI job, change the list. The what-if is
+A third ruleset limits who can create or move the dry-run branches (see *Dry run on a branch*); only repository admins
+can, so a collaborator cannot use a temporary dry-run credential:
+
+```bash
+gh api -X POST "repos/$REPO/rulesets" --input - <<'EOF'
+{
+  "name": "dry-run branches",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["refs/heads/cd-dryrun/**"], "exclude": [] } },
+  "bypass_actors": [ { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" } ],
+  "rules": [ { "type": "creation" }, { "type": "update" }, { "type": "deletion" }, { "type": "non_fast_forward" } ]
+}
+EOF
+```
+
+The six required checks are the job names in `ci.yml`, pinned to the GitHub Actions app (`integration_id` 15368) so that
+no other app can report a check with the same name and satisfy the rule; if you add or rename a CI job, change the list. The what-if is
 not required (it is skipped for forks and before the resource group exists). Verify with
-`gh api repos/$REPO/rulesets --jq '.[] | [.name, .enforcement] | @tsv'`; both must be `active`.
+`gh api repos/$REPO/rulesets --jq '.[] | [.name, .enforcement] | @tsv'`; all three must be `active`.
 
 ### 9. First deployment of each environment
 
@@ -476,7 +510,7 @@ a run never deploys, and it fails at the login step, harmlessly, while no creden
 ```bash
 BRANCH=cd-dryrun/ws4            # any name under cd-dryrun/
 az ad app federated-credential create --id "$BUILD_APP_ID" --parameters \
-  "{\"name\":\"tmp-dry-run\",\"issuer\":\"$ISSUER\",\"subject\":\"repo:$REPO:ref:refs/heads/$BRANCH\",\"audiences\":[\"$AUDIENCE\"]}"
+  "{\"name\":\"tmp-dry-run\",\"issuer\":\"$ISSUER\",\"subject\":\"$SUBJECT_PREFIX:ref:refs/heads/$BRANCH\",\"audiences\":[\"$AUDIENCE\"]}"
 git push origin "HEAD:refs/heads/$BRANCH"          # from a checkout of the commit to test
 gh run watch --repo $REPO "$(gh run list --repo $REPO --workflow cd.yml --branch "$BRANCH" --limit 1 --json databaseId --jq '.[0].databaseId')"
 # afterwards: remove the credential and the branch
@@ -484,11 +518,17 @@ az ad app federated-credential delete --id "$BUILD_APP_ID" --federated-credentia
 git push origin --delete "$BRANCH"
 ```
 
-The subject for the branch above is `repo:mjtpena/fabricops-digital-agent:ref:refs/heads/cd-dryrun/ws4`. The dry run
+The subject for the branch above is `repo:mjtpena@19221213/fabricops-digital-agent@1412312219:ref:refs/heads/cd-dryrun/ws4`. The dry run
 needs only the repository variables `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `ACR_NAME`, `ACR_LOGIN_SERVER` and
 `ACR_PUSH_CLIENT_ID`. Once `cd.yml` is on `main`, a manual run also works on any branch: register
-`repo:$REPO:ref:refs/heads/<branch>` the same way, then
+`$SUBJECT_PREFIX:ref:refs/heads/<branch>` the same way, then
 `gh workflow run cd.yml --repo $REPO --ref <branch> -f deploy=false`.
+
+**The dry-run credential is temporary: create it, run once, delete it** (the last two commands above). While it exists,
+the build identity's `AcrPush` covers the whole registry, and a credential cannot be limited to image tags, so anyone who
+can push a branch matching `cd-dryrun/**` could push images, using a workflow of their own. The pipeline itself only ever
+writes `dryrun-<sha>` tags there. Two things keep that exposure small: the credential does not exist for most of the time,
+and the third ruleset in section 8 limits who can create or update `cd-dryrun/**` branches to repository admins.
 
 Dry-run images are tagged `dryrun-<sha>`, never the bare commit sha, and a release only ever accepts the CD run on
 `main`, so a branch image can never be released. Delete old ones with `az acr repository delete` (or an `acr purge`
@@ -547,13 +587,13 @@ bump it, change `ACTIONLINT_VERSION` and `ACTIONLINT_SHA256` together (the check
 | Symptom | Cause and fix |
 |---|---|
 | `AADSTS70021: No matching federated identity record found` | The run's subject is not registered. The error shows the subject; compare it with the table at the top and create that federated credential on the right app |
-| `AuthorizationFailed ... Microsoft.Resources/deployments/write` on `rg-fabricops-shared` | The deploy identity lacks the `FabricOps Nested Deployment` role there (section 4). The AcrPull and OpenAI role modules deploy into that resource group |
+| `AuthorizationFailed ... Microsoft.Resources/deployments/write` on `rg-fabricops-shared` | The deploy identity lacks the `FabricOps Nested Deployment` role there (section 5). The AcrPull and OpenAI role modules deploy into that resource group |
 | `AuthorizationFailed ... roleAssignments/write` during deployment | The deploy identity lacks the constrained RBAC Administrator on the registry (or OpenAI account) scope, or the template tried to assign a role or principal type outside the condition |
 | Job fails with `Missing GitHub variables` | Section 7. The message lists the names |
 | `Resource group ... does not exist` | Section 1 |
-| Deployment fine, smoke test `AADSTS501051` or `403` on `/incidents` | The deploy principal lacks the `FabricOps.Automation` role (section 5), or the role is missing on the API registration (section 2) |
+| Deployment fine, smoke test `AADSTS501051` or `403` on `/incidents` | The deploy principal lacks the `FabricOps.Automation` role (section 6), or the role is missing on the API registration (section 2) |
 | Smoke test `FAIL revision` | The latest revision is not ready, is not serving all traffic or runs another image than the one deployed. Check `az containerapp revision list -g rg-fabricops-<env> -n ca-fabricops-<env>` and the revision's system logs |
-| Smoke test `GET /health -> 401` | `/health` is behind Container Apps authentication (`anonymousHealthEndpoints = false`). Set `SMOKE_HEALTH_AUTHENTICATED=true` |
+| Smoke test `GET /health -> 401` | `/health` is behind Container Apps authentication: either `anonymousHealthEndpoints = false`, or the template deployed predates WS3's change (before it, every path required sign-in). Set `SMOKE_HEALTH_AUTHENTICATED=true`, or deploy a template that excludes `/health` |
 | First revision `ImagePullBackOff` | `AcrPull` propagation delay: restart the revision |
 | Release: `No successful CD run on main` | CD has not finished for the tagged commit, or `prod` is still waiting for approval, or a stage failed. Wait for or fix CD, then re-push the tag |
 | CD: `already points at … Tags are not moved` | An earlier build of this commit already tagged an image. Re-running every job rebuilds a different digest; push a new commit instead, or re-run only the failed jobs |

@@ -54,14 +54,24 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ORQENTIS_FIXTURES_DIR=/app/fixtures
 
 # Fixed, high UID/GID so the Azure Files mount options in infra/bicep can map file ownership to this user.
-RUN echo "orqentis:x:${APP_GID}:" >> /etc/group     && echo "orqentis:x:${APP_UID}:${APP_GID}:Orqentis FabricOps:/app:/sbin/nologin" >> /etc/passwd     && mkdir -p /app /var/lib/orqentis     && chown orqentis:orqentis /var/lib/orqentis
+RUN echo "orqentis:x:${APP_GID}:" >> /etc/group \
+    && echo "orqentis:x:${APP_UID}:${APP_GID}:Orqentis FabricOps:/app:/sbin/nologin" >> /etc/passwd \
+    && mkdir -p /app /var/lib/orqentis \
+    && chown orqentis:orqentis /var/lib/orqentis
 
 COPY --from=builder /opt/venv /opt/venv
 # pip is build tooling and the runtime image never installs anything. Remove the venv's copy and the base image's
 # RPM packages (pip, setuptools, wheel), then fail the build if pip can still be run: the libraries pip vendors
 # (urllib3, msgpack, ...) otherwise show up as findings in the image scan in .github/workflows/cd.yml. Removal goes
 # through the interpreter and the package manager, not hard-coded site-packages paths.
-RUN python -m pip uninstall --yes pip     && rpm -e --nodeps python3-pip python3-setuptools python3-wheel     && if python -m pip --version > /dev/null 2>&1         || /usr/bin/python3 -m pip --version > /dev/null 2>&1         || command -v pip pip3 > /dev/null 2>&1; then          echo "pip is still installed in the runtime image" >&2; exit 1;        fi
+RUN python -m pip uninstall --yes pip \
+    && rpm -e --nodeps python3-pip python3-setuptools python3-wheel \
+    && if python -m pip --version > /dev/null 2>&1 \
+        || /usr/bin/python3 -m pip --version > /dev/null 2>&1 \
+        || command -v pip pip3 > /dev/null 2>&1; then \
+         echo "pip is still installed in the runtime image" >&2; exit 1; \
+       fi
+
 # Runbooks are the reviewed operational knowledge base; fixtures back the mock-mode demo estate.
 # Both are read-only at runtime and owned by root.
 COPY runbooks/ /app/runbooks/
