@@ -1,0 +1,29 @@
+{
+  "label": "error_refresh_history_forbidden",
+  "description": "Refresh history as Viewer: 403 Unauthorized (write permission is required).",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1.0/myorg/groups/00000000-0000-4000-8000-000000000006/datasets/00000000-0000-4000-8000-00000000000f/refreshes",
+        "query": {
+          "$top": "20"
+        },
+        "json": null
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-00000000003a"
+        },
+        "json": {
+          "error": {
+            "code": "Unauthorized",
+            "message": "Api accessed by user <eupi>00000000-0000-4000-8000-00000000003b</eupi> with insufficient privileges. request is unauthorized, identity None."
+          }
+        }
+      }
+    }
+  ]
+}

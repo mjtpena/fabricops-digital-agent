@@ -1,0 +1,39 @@
+{
+  "label": "capacities",
+  "description": "GET /capacities as the test principal: only capacities open to everyone, not the sandbox capacity.",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/capacities",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000043"
+        },
+        "json": {
+          "value": [
+            {
+              "id": "00000000-0000-4000-8000-000000000044",
+              "displayName": "Trial-capacity",
+              "sku": "FTL64",
+              "region": "Southeast Asia",
+              "state": "Active"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000045",
+              "displayName": "Premium Per User - Reserved",
+              "sku": "PP3",
+              "region": "Southeast Asia",
+              "state": "Active"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

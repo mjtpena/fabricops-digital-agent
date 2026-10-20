@@ -9,7 +9,7 @@ write capability turned on.
 
 | Identity | Used by | Permissions | Notes |
 |---|---|---|---|
-| Reader (operating identity), e.g. user-assigned managed identity `id-orqentis-reader` | `RestFabricClient` (all reads); Agent Framework chat client | Fabric workspace **Viewer** on monitored workspaces (includes semantic model read for refresh history); Azure OpenAI **Cognitive Services OpenAI User**; AcrPull on the image registry | Least privilege. No write role anywhere. |
+| Reader (operating identity), e.g. user-assigned managed identity `id-orqentis-reader` | `RestFabricClient` (all reads); Agent Framework chat client | Fabric workspace **Viewer** on monitored workspaces (workspaces, items, job instances and pipeline activity runs; **not** semantic model refresh history, see section 11); Azure OpenAI **Cognitive Services OpenAI User**; AcrPull on the image registry | Least privilege. No write role anywhere. |
 | Actor (write capability), e.g. `id-orqentis-actor` | `FabricWriteClient`, held only by the `ActionGateway` | Fabric **Contributor** only on workspaces where approved remediation is allowed | Not attached to the app unless `enableWriteActions` is set at deployment **and** `ORQENTIS_ENABLE_WRITE_ACTIONS=true`. The MVP ships no REST write adapter. |
 | Human approvers | REST API (`/approvals/*`) | Entra ID app roles `FabricOps.Operator`, `FabricOps.PlatformAdmin` | Roles arrive in the Easy Auth client principal. |
 | Automation identities (scheduler, smoke test) | REST API (read endpoints, `POST /telemetry/collect`) | Entra ID app role `FabricOps.Automation` (Application members only) | An app-only token is a `SERVICE` principal. It can never approve, reject, execute or investigate. |
@@ -33,7 +33,7 @@ Fabric prerequisites for the reader identity:
    records that gap.
 
 ARM/Bicep cannot assign Fabric workspace roles. See `infra/bicep/README.md` for the step-by-step
-grants and for checking them with `POST /telemetry/collect` (`collector_errors` must be empty).
+grants and for checking them with `POST /telemetry/collect` (`collector_errors` must be empty, apart from the `semantic-model-refreshes` 403 a Viewer-only identity gets; section 11).
 
 ## 2. Authentication (Microsoft Entra ID)
 
@@ -286,3 +286,96 @@ Limits: the scheduler's leader lease and the investigation jobs are in-process, 
 the single replica this deployment runs and not for several. Jobs are lost on restart (their
 incidents are recovered and re-investigated). Durable jobs and a database-backed lease arrive with
 the PostgreSQL system of record.
+
+## 11. Least-privilege findings from the live sandbox
+
+Measured on 2026-10-20 against the FabricOps sandbox estate (`docs/live-environment.md`) with the test
+service principal `fabricops-live-reader`, which holds the workspace **Viewer** role on the four sandbox
+workspaces and nothing else. The evidence is in `tests/live` (skipped unless `ORQENTIS_LIVE_TESTS=1`);
+`scripts/live-estate/create.sh` rebuilds the estate and the grants.
+
+| Read | Workspace Viewer alone | Notes |
+|---|---|---|
+| List workspaces (`GET /v1/workspaces`) | Works | Returns only the workspaces the principal holds a role on. |
+| List and get items | Works | A lakehouse also appears as a second item of type `SQLEndpoint` with the same name; the adapter keeps it as a generic item. |
+| Job instances of pipelines and notebooks | Works | Observed newest first (7 runs on 2026-10-20, asserted by `test_list_item_job_instances_comes_back_newest_first_from_the_service`). Fabric documents no ordering, so the adapter sorts by start time itself and never stops reading pages early. |
+| Pipeline activity runs (`POST .../queryactivityruns`, a read-only query) | Works | Carries the activity error text. A timed-out activity has an empty error object; the adapter now says "timed out". |
+| Semantic model metadata (`GET .../datasets/{id}`, list datasets and reports in a workspace) | Works (hand probes, not part of the adapter) | Observed HTTP 200 for the test principal with Viewer on 2026-10-20 (`GET .../datasets/{id}` at 02:24:05Z; list datasets and list reports earlier the same day). The adapter does not call these endpoints, so no committed test or fixture covers them. |
+| **Semantic model refresh history** (`GET .../datasets/{id}/refreshes`) | **Observed: 403 `Unauthorized`** | **Observed** with Viewer only, on the sandbox model: 403 at 02:22:51Z, 02:24:03Z, 02:24:22Z and 02:28:18Z (committed as a test and a fixture: `test_refresh_history_needs_more_than_viewer`, `error_refresh_history_forbidden.json`). **Tried on 2026-10-20 to fix it, none worked**: dataset `Read` and `ReadExplore` cannot be granted to a service principal (the users API answers 400 "API supported only for User or Group principal types"), the principal's effective dataset right is already `Read`, and the Fabric job-instances API returns 404 for a semantic model, even for the owner (details and timestamps below). Microsoft documents the cause: "Caller must have Write permissions on the dataset" ([Get Refresh History In Group](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/get-refresh-history-in-group)); that is what the 403 is consistent with, and Contributor was deliberately not tried because it is a write role. Nothing was granted. The refresh collector records the 403 in `collector_errors` and the other collectors carry on. Decision for the owner: accept the gap, give the principal workspace Contributor (the documented way to get dataset Write; a real privilege increase), or take refresh outcomes from another source. One narrow read path works for a *known* refresh id: see below. |
+| List capacities (`GET /v1/capacities`) | Works, but is not what it seems | Returns only capacities that are open to everyone (in the sandbox tenant a trial capacity and a PPU capacity). The dedicated F-SKU sandbox capacity is invisible. Capacity roles carry write rights, so they stay ungranted. |
+| Deployment pipelines | Empty list | No deployment-pipeline role is granted (the roles that expose them can deploy). |
+| OneLake (`_delta_log`, tables, files) | **Denied: 403 on every path** | See below. |
+
+### Reading a table's `_delta_log` over OneLake (schema-drift collector, ADR-0009)
+
+Workspace Viewer gives no OneLake data access. The narrowest working read-only grant is a **OneLake data
+access role** on the source lakehouse that gives the principal `Read` on one table. The call replaces the
+lakehouse's whole role set, so send the built-in `DefaultReader` role back unchanged:
+
+```bash
+az rest --method put --resource https://api.fabric.microsoft.com \
+  --url "https://api.fabric.microsoft.com/v1/workspaces/<workspaceId>/items/<lakehouseId>/dataAccessRoles" \
+  --body @roles.json
+```
+
+```json
+{"name": "fabricopsDeltaLogReader", "kind": "Policy",
+ "decisionRules": [{"effect": "Permit", "permission": [
+   {"attributeName": "Action", "attributeValueIncludedIn": ["Read"]},
+   {"attributeName": "Path", "attributeValueIncludedIn": ["Tables/customers"]}]}],
+ "members": {"microsoftEntraMembers": [{"tenantId": "<tenantId>", "objectId": "<principalObjectId>"}]}}
+```
+
+Proven with the test principal on the sandbox DEV lakehouse (`tests/live/test_live_onelake.py`, with the TEST
+lakehouse as the denied control):
+
+* before the role, listing `Tables/customers/_delta_log` and reading `00000000000000000000.json` were both
+  HTTP 403; after it both were HTTP 200, effective immediately; removing the role made them 403 again;
+* the grant is read-only and table-scoped: the other table (`customers_clean`) and `Files` stay 403, and
+  creating a file under `Files` or `Tables/customers` stays 403;
+* role names allow only letters and digits, and roles can be defined only at the lakehouse root or table
+  level, so `_delta_log` cannot be granted on its own: reading the log also lets the identity read that
+  table's data files;
+* no write right, item-level `Write` or Contributor role is involved, and the role goes away with the
+  lakehouse.
+
+The brief expected item-level `Read` + `ReadAll`. `ReadAll` exposes every table and all files, so the
+table-level role is the smaller grant, and there was nothing to stop on. Whether the role also works without
+the Viewer assignment could not be isolated: after the Viewer assignment was deleted, Fabric kept honouring
+it for the service principal for at least 16 minutes (workspace, items, runs and activity runs stayed
+readable). Grant both, and do not assume that removing a service principal's workspace role takes effect
+immediately.
+
+### Refresh history: what was tried (2026-10-20, sandbox `customers_model`, test principal)
+
+| Attempt | Result |
+|---|---|
+| Baseline: `GET .../datasets/{id}/refreshes?$top=5` with workspace Viewer | 403 at 02:22:51Z and again at 02:24:03Z, 02:24:22Z and 02:28:18Z; body `{"error":{"code":"Unauthorized","message":"Api accessed by user <eupi>{principal object id}</eupi> with insufficient privileges. request is unauthorized, identity None."}}`. The sandbox owner reads the same endpoint with 200. |
+| (a) Dataset `Read` granted directly (`POST .../datasets/{id}/users`, `principalType: App`) | **Not possible and not needed.** 400 `InvalidRequest`: "API supported only for User or Group principal types" (02:23:17Z; the docs say the same: adding permissions to service principals is not supported). Not needed because `GET .../users` already lists the principal with `datasetUserAccessRight: Read`, derived from the Viewer role, and the 403 above is what Read gets. |
+| (b) `ReadExplore` (Build), `POST` and `PUT` | Same 400 for both (02:23:37Z, 02:23:39Z). Build cannot be set on a service principal through the API. Per the docs Viewer has Read but not Build, and Build is "build new content" and XMLA querying, not refresh history. A Build grant for a group would need an Entra group, which is out of scope. Not tested further. |
+| (c) Fabric API, `GET /v1/workspaces/{ws}/items/{id}/jobs/instances` for the SemanticModel item | 404 `ItemNotFound` "Could not found the requested item" for the test principal **and** for the owner (02:23:39Z): the job API does not support semantic models at all. |
+| Other Power BI reads | `GET /v1.0/myorg/datasets/{id}/refreshes` (no group): 403 "API is not accessible for application". `GET .../datasets/{id}` metadata: 200. `GET .../users`, `.../refreshSchedule`: 401 / 404. |
+| **`GET .../datasets/{id}/refreshes/{requestId}`** ([Get Refresh Execution Details](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/get-refresh-execution-details-in-group)) | **200 with Viewer only**, for a completed refresh (02:24:43Z), a Direct Lake framing refresh (02:24:53Z) and a **failed** one (02:26:31Z, with the engine `messages` and `serviceExceptionJson`, i.e. the error text). It needs the refresh's request id, and there is no way to list ids as a Viewer. |
+
+No dataset or workspace grant was made or changed by this investigation. The permission the documentation names for the list is dataset
+**Write**; this was not tested, because testing it means granting a write role. The semantic model permissions article says Write is
+implicit for workspace Admin, Member and Contributor and never for Viewer, and the users API documentation says it "can't be used to
+grant dataset Write" ([semantic model permissions](https://learn.microsoft.com/en-us/power-bi/connect-data/service-datasets-permissions),
+[Post Dataset User In Group](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/post-dataset-user-in-group)). Read from the
+documentation, that leaves the Contributor workspace role for a service principal, which also lets it create and change every item in
+the workspace.
+
+The execution-details endpoint is the only read-only route to refresh outcomes. It is usable where something else already knows the
+request id (a refresh started by a pipeline's semantic model refresh activity, whose run output should carry it: not verified here,
+because that activity needs a Power BI connection that the sandbox deliberately does not create), not for scheduled or manual
+refreshes.
+
+### Failure-injection facts that affect detection
+
+* A Fabric connection of type `WebForPipeline` (used by pipeline Web activities) cannot skip its connection
+  test but accepts any HTTP answer, so a deliberately invalid credential can be stored for failure testing.
+* The pipeline Web activity reports the body of a failed call, not its status code. A 401 from the Fabric API
+  surfaces as "Unable to process the request" and is not recognisable as an authentication failure; a call to
+  the Microsoft Entra token endpoint with a bad client surfaces the `AADSTS` text, which is.
+* A notebook that raises surfaces as pipeline error code 2451 with the exception name and text nested in the
+  message; a timed-out activity surfaces as pipeline error code 500 "InternalServerError executing request".

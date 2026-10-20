@@ -27,3 +27,8 @@ var/
 .idea/
 .vscode/
 .DS_Store
+
+# Live sandbox estate: generated from live ids / local overrides (never commit tenant ids)
+scripts/live-estate/contracts.sandbox.json
+scripts/live-estate/config.env
+scripts/live-estate/*.generated.json

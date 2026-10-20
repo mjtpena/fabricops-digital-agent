@@ -1,0 +1,50 @@
+{
+  "name": "customers_model",
+  "compatibilityLevel": 1604,
+  "model": {
+    "culture": "en-US",
+    "defaultPowerBIDataSourceVersion": "powerBI_V3",
+    "discourageImplicitMeasures": true,
+    "expressions": [
+      {
+        "name": "DatabaseQuery",
+        "kind": "m",
+        "expression": [
+          "let",
+          "    database = AzureStorage.DataLake(\"https://onelake.dfs.fabric.microsoft.com/__SOURCE_WORKSPACE_ID__/__SOURCE_LAKEHOUSE_ID__\", [HierarchicalNavigation=true])",
+          "in",
+          "    database"
+        ]
+      }
+    ],
+    "tables": [
+      {
+        "name": "customers_clean",
+        "columns": [
+          {"name": "customer_id", "dataType": "int64", "sourceColumn": "customer_id", "summarizeBy": "none"},
+          {"name": "full_name", "dataType": "string", "sourceColumn": "full_name", "summarizeBy": "none"},
+          {"name": "country", "dataType": "string", "sourceColumn": "country", "summarizeBy": "none"},
+          {"name": "segment", "dataType": "string", "sourceColumn": "segment", "summarizeBy": "none"},
+          {"name": "signup_date", "dataType": "dateTime", "sourceColumn": "signup_date", "summarizeBy": "none", "formatString": "Long Date"},
+          {"name": "lifetime_value", "dataType": "double", "sourceColumn": "lifetime_value", "summarizeBy": "sum"},
+          {"name": "value_band", "dataType": "string", "sourceColumn": "value_band", "summarizeBy": "none"}
+        ],
+        "partitions": [
+          {
+            "name": "customers_clean",
+            "mode": "directLake",
+            "source": {
+              "type": "entity",
+              "entityName": "customers_clean",
+              "expressionSource": "DatabaseQuery"
+            }
+          }
+        ],
+        "measures": [
+          {"name": "Customer count", "expression": "COUNTROWS(customers_clean)", "formatString": "0"},
+          {"name": "Total lifetime value", "expression": "SUM(customers_clean[lifetime_value])", "formatString": "#,0.00"}
+        ]
+      }
+    ]
+  }
+}

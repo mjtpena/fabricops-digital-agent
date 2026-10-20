@@ -1,0 +1,57 @@
+{
+  "label": "workspaces",
+  "description": "GET /workspaces as the Viewer-only test principal: exactly the four sandbox workspaces.",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000001"
+        },
+        "json": {
+          "value": [
+            {
+              "id": "00000000-0000-4000-8000-000000000002",
+              "displayName": "FabricOps Sandbox [DEV]",
+              "description": "FabricOps programme sandbox. Synthetic data only.",
+              "type": "Workspace",
+              "capacityId": "00000000-0000-4000-8000-000000000003",
+              "capacityRegion": "Australia East"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000004",
+              "displayName": "FabricOps Sandbox [TEST]",
+              "description": "FabricOps programme sandbox. Synthetic data only.",
+              "type": "Workspace",
+              "capacityId": "00000000-0000-4000-8000-000000000003",
+              "capacityRegion": "Australia East"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000005",
+              "displayName": "FabricOps Sandbox [PROD]",
+              "description": "FabricOps programme sandbox. Synthetic data only.",
+              "type": "Workspace",
+              "capacityId": "00000000-0000-4000-8000-000000000003",
+              "capacityRegion": "Australia East"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000006",
+              "displayName": "FabricOps Sandbox Consumer",
+              "description": "FabricOps programme sandbox. Synthetic data only.",
+              "type": "Workspace",
+              "capacityId": "00000000-0000-4000-8000-000000000003",
+              "capacityRegion": "Australia East"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

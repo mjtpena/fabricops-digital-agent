@@ -1,0 +1,27 @@
+{
+  "label": "error_model_job_instances_not_found",
+  "description": "Fabric job instances of a semantic model: 404 ItemNotFound.",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000006/items/00000000-0000-4000-8000-00000000000f/jobs/instances",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-00000000003c"
+        },
+        "json": {
+          "requestId": "00000000-0000-4000-8000-00000000003c",
+          "errorCode": "ItemNotFound",
+          "message": "Could not found the requested item",
+          "isRetriable": false
+        }
+      }
+    }
+  ]
+}

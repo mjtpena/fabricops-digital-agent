@@ -219,7 +219,7 @@ through the event store; in mock mode they are replayed from fixtures.
 | 5. FabricOps Investigator agent (Agent Framework + deterministic reasoner) | Done |
 | 6. Policy and approval boundary | Done |
 | 7. REST API | Done |
-| 8. Real Fabric read-only adapter | Done (HTTP behaviour covered by tests against mocked transports; not yet run against a live tenant) |
+| 8. Real Fabric read-only adapter | Done. Mocked-transport tests, tests replaying recorded live responses, and a live suite against the sandbox estate (`docs/live-environment.md`, `tests/live`); Viewer cannot read semantic model refresh history (`docs/security.md` section 11) |
 | 9. Eventhouse persistence | Next. `EventStore` port is defined; `LocalEventStore` (SQLite) implemented |
 | 10. Teams integration | Planned. `ApprovalProvider` port is defined; `LocalApprovalProvider` implemented |
 

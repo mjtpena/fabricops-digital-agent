@@ -1,0 +1,96 @@
+{
+  "label": "activity_runs_03_failed",
+  "description": "GET job instance + POST queryactivityruns for a Failed run (job error code 2015).",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/items/00000000-0000-4000-8000-000000000015/jobs/instances/00000000-0000-4000-8000-000000000021",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000031"
+        },
+        "json": {
+          "id": "00000000-0000-4000-8000-000000000021",
+          "itemId": "00000000-0000-4000-8000-000000000015",
+          "jobType": "Pipeline",
+          "invokeType": "Manual",
+          "status": "Failed",
+          "failureReason": {
+            "requestId": "00000000-0000-4000-8000-000000000031",
+            "errorCode": "2015",
+            "message": "Operation on target call_crm_source failed: The datasetSettings are required for the connection 'Web'.",
+            "isRetriable": false
+          },
+          "rootActivityId": "00000000-0000-4000-8000-000000000022",
+          "startTimeUtc": "2026-10-20T01:04:27.41",
+          "endTimeUtc": "2026-10-20T01:04:43.9866667"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/datapipelines/pipelineruns/00000000-0000-4000-8000-000000000021/queryactivityruns",
+        "query": {},
+        "json": {
+          "filters": [],
+          "orderBy": [
+            {
+              "orderBy": "ActivityRunStart",
+              "order": "ASC"
+            }
+          ],
+          "lastUpdatedAfter": "2026-10-20T00:04:27.410000Z",
+          "lastUpdatedBefore": "2026-10-20T02:04:43.986666Z"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-000000000032"
+        },
+        "json": {
+          "value": [
+            {
+              "pipelineId": "00000000-0000-4000-8000-000000000015",
+              "pipelineRunId": "00000000-0000-4000-8000-000000000021",
+              "activityName": "call_crm_source",
+              "activityType": "WebActivity",
+              "activityRunId": "00000000-0000-4000-8000-000000000033",
+              "status": "Failed",
+              "activityRunStart": "2026-10-20T01:04:35.9858437Z",
+              "activityRunEnd": "2026-10-20T01:04:40.0753292Z",
+              "durationInMs": 4089,
+              "input": {
+                "method": "GET",
+                "relativeUrl": "workspaces"
+              },
+              "output": null,
+              "iterationHash": "",
+              "userProperties": {},
+              "error": {
+                "errorCode": "2015",
+                "message": "The datasetSettings are required for the connection 'Web'.",
+                "failureType": "UserError",
+                "target": "call_crm_source",
+                "details": []
+              },
+              "retryAttempt": null,
+              "recoveryStatus": "None",
+              "integrationRuntimeNames": null,
+              "executionDetails": null
+            }
+          ],
+          "continuationToken": null
+        }
+      }
+    }
+  ]
+}

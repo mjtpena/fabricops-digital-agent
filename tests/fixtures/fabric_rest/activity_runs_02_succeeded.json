@@ -1,0 +1,137 @@
+{
+  "label": "activity_runs_02_succeeded",
+  "description": "GET job instance + POST queryactivityruns for a Succeeded run (job error code none).",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/items/00000000-0000-4000-8000-000000000015/jobs/instances/00000000-0000-4000-8000-00000000001c",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-00000000002d"
+        },
+        "json": {
+          "id": "00000000-0000-4000-8000-00000000001c",
+          "itemId": "00000000-0000-4000-8000-000000000015",
+          "jobType": "Pipeline",
+          "invokeType": "Manual",
+          "status": "Completed",
+          "failureReason": null,
+          "rootActivityId": "00000000-0000-4000-8000-00000000001d",
+          "startTimeUtc": "2026-10-20T01:11:12.4741108",
+          "endTimeUtc": "2026-10-20T01:12:32.4766667"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000004/datapipelines/pipelineruns/00000000-0000-4000-8000-00000000001c/queryactivityruns",
+        "query": {},
+        "json": {
+          "filters": [],
+          "orderBy": [
+            {
+              "orderBy": "ActivityRunStart",
+              "order": "ASC"
+            }
+          ],
+          "lastUpdatedAfter": "2026-10-20T00:11:12.474110Z",
+          "lastUpdatedBefore": "2026-10-20T02:12:32.476666Z"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-00000000002e"
+        },
+        "json": {
+          "value": [
+            {
+              "pipelineId": "00000000-0000-4000-8000-000000000015",
+              "pipelineRunId": "00000000-0000-4000-8000-00000000001c",
+              "activityName": "transform_customers",
+              "activityType": "TridentNotebook",
+              "activityRunId": "00000000-0000-4000-8000-00000000002f",
+              "status": "Succeeded",
+              "activityRunStart": "2026-10-20T01:11:20.1362059Z",
+              "activityRunEnd": "2026-10-20T01:12:29.9262902Z",
+              "durationInMs": 69790,
+              "input": {
+                "notebookId": "00000000-0000-4000-8000-000000000014",
+                "workspaceId": "00000000-0000-4000-8000-000000000004"
+              },
+              "output": {
+                "status": "Succeeded",
+                "result": {
+                  "runId": "00000000-0000-4000-8000-00000000002f",
+                  "runStatus": "Succeeded",
+                  "sessionId": "00000000-0000-4000-8000-000000000030",
+                  "sparkPool": "00000000-0000-4000-8000-000000000004",
+                  "error": null,
+                  "lastCheckedOn": "2026-10-20T01:12:27.5466667Z",
+                  "metadata": {
+                    "isForPipeline": null,
+                    "runStartTime": "2026-10-20T01:11:25.9601305Z",
+                    "runEndTime": "2026-10-20T01:12:19.1370299Z"
+                  },
+                  "highConcurrencyModeStatus": null,
+                  "exitValue": null
+                },
+                "message": "Notebook execution is in Succeeded state, runId: 00000000-0000-4000-8000-00000000002f",
+                "SparkMonitoringURL": "workloads/de-ds/sparkmonitor/00000000-0000-4000-8000-000000000014/00000000-0000-4000-8000-000000000030",
+                "sessionSource": "",
+                "sessionTag": "",
+                "effectiveIntegrationRuntime": "AutoResolveIntegrationRuntime (Australia East)",
+                "executionDuration": 67,
+                "durationInQueue": {
+                  "integrationRuntimeQueue": 0
+                },
+                "billingReference": {
+                  "activityType": "ExternalActivity",
+                  "billableDuration": [
+                    {
+                      "meterType": "AzureIR",
+                      "duration": 0.03333333333333333,
+                      "unit": "Hours"
+                    }
+                  ]
+                }
+              },
+              "iterationHash": "",
+              "userProperties": {},
+              "error": {
+                "errorCode": "",
+                "message": "",
+                "failureType": "",
+                "target": "transform_customers",
+                "details": ""
+              },
+              "retryAttempt": null,
+              "recoveryStatus": "None",
+              "integrationRuntimeNames": [
+                "autoresolveintegrationruntime"
+              ],
+              "executionDetails": {
+                "integrationRuntime": [
+                  {
+                    "name": "AutoResolveIntegrationRuntime",
+                    "type": "Managed",
+                    "location": "Australia East"
+                  }
+                ]
+              }
+            }
+          ],
+          "continuationToken": null
+        }
+      }
+    }
+  ]
+}
