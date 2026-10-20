@@ -35,7 +35,7 @@ one PR to `main`. Briefs live in [`docs/programme/briefs/`](programme/briefs/).
 | WS0 | CI fix (Docker Hub 429; Windows local gates) | 0 | | in progress (blocked on B1) | orchestrator | [#1](https://github.com/mjtpena/fabricops-digital-agent/pull/1) | Local gates green; CI not started (B1) |
 | WS1 | Autonomous runtime | 1 | | changes requested | `ws1-runtime` (Sonnet) | [#4](https://github.com/mjtpena/fabricops-digital-agent/pull/4) | Review 1: REQUEST CHANGES (3 silent missed-incident paths, deploy two-writer hazard); fixes in progress |
 | WS2 | Portability and contracts | 1 | | changes requested | `ws2-portability` (Sonnet) | [#5](https://github.com/mjtpena/fabricops-digital-agent/pull/5) | Review 1: APPROVE WITH FIXES (unreviewed scaffold drafts enforced; downgrades unaudited); fixes in progress |
-| WS3 | Identity and API hardening | 1 | | changes requested | `ws3-identity` (Sonnet) | [#3](https://github.com/mjtpena/fabricops-digital-agent/pull/3) | Review 1: APPROVE WITH FIXES; independent red-team ([comment](https://github.com/mjtpena/fabricops-digital-agent/pull/3#issuecomment-6281103223)): FIX BEFORE MERGE (incl. invariant 7 atomicity); fixes in progress |
+| WS3 | Identity and API hardening | 1 | | approved, waiting for CI | `ws3-identity` (Sonnet) | [#3](https://github.com/mjtpena/fabricops-digital-agent/pull/3) | Review 1 + independent red-team ([comment](https://github.com/mjtpena/fabricops-digital-agent/pull/3#issuecomment-6281103223)) → 19 findings fixed; verification: all fixed, starred fixes proven by revert, 8-process race gives exactly 1 write; 406 tests, 182 security tests |
 | WS4 | Delivery pipeline | 1 | A6 (done) for the push dry run | changes requested | `ws4-delivery` (Sonnet) | [#6](https://github.com/mjtpena/fabricops-digital-agent/pull/6) | Review 1: REQUEST CHANGES (release download paths; nested-deployment permission; unfixed-CVE gate; main/tag protection); fixes in progress |
 | WS5 | Live sandbox estate and live test harness | 1 | D8, A3–A5 | in progress | orchestrator's local subagent (Sonnet, shares the `az` login) | | |
 | WS6 | Durable storage and stateless app | 2 | D1, WS1 | not started | | | |
@@ -43,7 +43,7 @@ one PR to `main`. Briefs live in [`docs/programme/briefs/`](programme/briefs/).
 | WS8 | Notifications and web UI | 2 | D3, WS3 (WS6 preferred) | not started | | | |
 | WS9 | Observability and operations | 2 | WS1 (+WS6) | not started | | | |
 | WS10 | LLM reasoner in production | 3 | D7, WS5, WS7 | not started | | | |
-| WS11 | Supervised write path | 3 | WS3, WS6 | not started | | | |
+| WS11 | Supervised write path | 3 | WS3, WS6 | not started | | | Carries forward from WS3 verification: reconcile approvals stuck in `EXECUTING` after a crash (visibility + alert); audit the execution claim before the write and record cancellation as `UNKNOWN`; claim before moving the incident to REMEDIATING; log a failed final state/version check; decide whether a policy tightening invalidates earlier lower-role approvals (as risk escalation does) |
 | WS12 | Independent security review | 3 | Waves 1–2 | not started | | | |
 | W4 | Cut-over: deploy, game day, portability rehearsal, soak, release | 4 | all | not started | orchestrator | | |
 
@@ -77,7 +77,7 @@ Hot files (additive changes only; merged in dependency order): `src/orqentis/boo
 | R4 | The sandbox capacity (D8) is shared with 4 non-programme workspaces. Capacity signals include their load, and reading the Capacity Metrics app's workspace (not created by the programme) needs the owner's approval before the WS7 spike | orchestrator | open |
 | R5 | With the external-authenticated ingress default, the app trusts `X-MS-CLIENT-PRINCIPAL`; any Easy Auth gap (first-deploy window, auth disabled by mistake) would let a forged header act as a human admin. Mitigation now: deploy `internal` first, `allowedApplications`. Follow-up: in-app bearer-token validation, raised to WS12 | WS3 / WS12 | open |
 | R6 | Cookie (ID-token) sessions in the WS8 UI need CSRF protection: JSON-only state-changing routes and an Origin check | WS8 | open |
-| R7 | Approval decisions and single-use execution were not atomic in pre-existing code (5 concurrent executes → 5 writes; approve/reject race lost the rejection), and execute did not re-check the current policy's role. Invariant 7 gap found by the WS3 red-team; being fixed in PR #3 with compare-and-set transitions. No live write was possible (rest mode holds the disabled write client) | WS3 | fixing |
+| R7 | Approval decisions and single-use execution were not atomic in pre-existing code (5 concurrent executes → 5 writes; approve/reject race lost the rejection), and execute did not re-check the current policy's role. Invariant 7 gap found by the WS3 red-team; being fixed in PR #3 with compare-and-set transitions. No live write was possible (rest mode holds the disabled write client) | WS3 | fixed in PR #3 (verified; merges with it) |
 | R8 | Until WS6, the old and new revisions overlap during a deploy and both run schedulers against the same files (audit chain fork risk). Nothing is deployed before WS6; interim mitigations in WS1 | WS1 / WS6 | open |
 | R9 | WS1 (≈4.3k lines) and WS2 (≈5.7k lines) exceed the ≈1.5k-line PR guideline (much of it tests and docs). Accepted as single PRs to avoid re-splitting cost; reviewed in full | orchestrator | accepted |
 
