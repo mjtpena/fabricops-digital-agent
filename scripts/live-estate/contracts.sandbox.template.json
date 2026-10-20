@@ -1,0 +1,129 @@
+{
+  "external_sources": [
+    {
+      "id": "src-sandbox-crm-dev",
+      "tenant_id": "@@TENANT_ID@@",
+      "workspace_id": "@@DEV.workspace@@",
+      "display_name": "Synthetic CRM customers feed (DEV)",
+      "item_type": "ExternalSource",
+      "environment": "DEV",
+      "owner": "fabricops-programme",
+      "source": "declared",
+      "metadata": {
+        "system": "Synthetic CRM",
+        "connection": {"id": "@@CONNECTION_ID@@", "name": "fabricops-sandbox-fake-source", "auth_type": "Basic"}
+      }
+    },
+    {
+      "id": "src-sandbox-crm-test",
+      "tenant_id": "@@TENANT_ID@@",
+      "workspace_id": "@@TEST.workspace@@",
+      "display_name": "Synthetic CRM customers feed (TEST)",
+      "item_type": "ExternalSource",
+      "environment": "TEST",
+      "owner": "fabricops-programme",
+      "source": "declared",
+      "metadata": {"system": "Synthetic CRM"}
+    },
+    {
+      "id": "src-sandbox-crm-prod",
+      "tenant_id": "@@TENANT_ID@@",
+      "workspace_id": "@@PROD.workspace@@",
+      "display_name": "Synthetic CRM customers feed (PROD)",
+      "item_type": "ExternalSource",
+      "environment": "PROD",
+      "owner": "fabricops-programme",
+      "source": "declared",
+      "metadata": {"system": "Synthetic CRM"}
+    }
+  ],
+  "data_products": [
+    {
+      "id": "dp-sandbox-customers-dev",
+      "tenant_id": "@@TENANT_ID@@",
+      "workspace_id": "@@DEV.workspace@@",
+      "display_name": "customers_clean (DEV)",
+      "owner": "fabricops-programme",
+      "environment": "DEV",
+      "backing_item_ids": ["@@DEV.lakehouse@@"],
+      "description": "Cleaned synthetic customers, produced by transform_customers."
+    },
+    {
+      "id": "dp-sandbox-customers-test",
+      "tenant_id": "@@TENANT_ID@@",
+      "workspace_id": "@@TEST.workspace@@",
+      "display_name": "customers_clean (TEST)",
+      "owner": "fabricops-programme",
+      "environment": "TEST",
+      "backing_item_ids": ["@@TEST.lakehouse@@"],
+      "description": "Cleaned synthetic customers, produced by transform_customers."
+    },
+    {
+      "id": "dp-sandbox-customers-prod",
+      "tenant_id": "@@TENANT_ID@@",
+      "workspace_id": "@@PROD.workspace@@",
+      "display_name": "customers_clean (PROD)",
+      "owner": "fabricops-programme",
+      "environment": "PROD",
+      "backing_item_ids": ["@@PROD.lakehouse@@"],
+      "description": "Cleaned synthetic customers, consumed by customers_model."
+    }
+  ],
+  "dependencies": [
+    {"id": "dep-sbx-dev-01", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@DEV.pipeline@@", "target_item_id": "src-sandbox-crm-dev", "dependency_type": "READS_FROM"},
+    {"id": "dep-sbx-dev-02", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@DEV.pipeline@@", "target_item_id": "@@DEV.transform@@", "dependency_type": "TRIGGERS"},
+    {"id": "dep-sbx-dev-03", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@DEV.transform@@", "target_item_id": "@@DEV.lakehouse@@", "dependency_type": "READS_FROM"},
+    {"id": "dep-sbx-dev-04", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@DEV.transform@@", "target_item_id": "@@DEV.lakehouse@@", "dependency_type": "WRITES_TO"},
+    {"id": "dep-sbx-dev-05", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@DEV.lakehouse@@", "target_item_id": "dp-sandbox-customers-dev", "dependency_type": "PRODUCES"},
+
+    {"id": "dep-sbx-test-01", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@TEST.pipeline@@", "target_item_id": "src-sandbox-crm-test", "dependency_type": "READS_FROM"},
+    {"id": "dep-sbx-test-02", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@TEST.pipeline@@", "target_item_id": "@@TEST.transform@@", "dependency_type": "TRIGGERS"},
+    {"id": "dep-sbx-test-03", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@TEST.transform@@", "target_item_id": "@@TEST.lakehouse@@", "dependency_type": "READS_FROM"},
+    {"id": "dep-sbx-test-04", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@TEST.transform@@", "target_item_id": "@@TEST.lakehouse@@", "dependency_type": "WRITES_TO"},
+    {"id": "dep-sbx-test-05", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@TEST.lakehouse@@", "target_item_id": "dp-sandbox-customers-test", "dependency_type": "PRODUCES"},
+
+    {"id": "dep-sbx-prod-01", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@PROD.pipeline@@", "target_item_id": "src-sandbox-crm-prod", "dependency_type": "READS_FROM"},
+    {"id": "dep-sbx-prod-02", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@PROD.pipeline@@", "target_item_id": "@@PROD.transform@@", "dependency_type": "TRIGGERS"},
+    {"id": "dep-sbx-prod-03", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@PROD.transform@@", "target_item_id": "@@PROD.lakehouse@@", "dependency_type": "READS_FROM"},
+    {"id": "dep-sbx-prod-04", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@PROD.transform@@", "target_item_id": "@@PROD.lakehouse@@", "dependency_type": "WRITES_TO"},
+    {"id": "dep-sbx-prod-05", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@PROD.lakehouse@@", "target_item_id": "dp-sandbox-customers-prod", "dependency_type": "PRODUCES"},
+
+    {"id": "dep-sbx-consumer-01", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@CONSUMER.model@@", "target_item_id": "dp-sandbox-customers-prod", "dependency_type": "CONSUMES"},
+    {"id": "dep-sbx-consumer-02", "tenant_id": "@@TENANT_ID@@", "source_item_id": "@@CONSUMER.report@@", "target_item_id": "@@CONSUMER.model@@", "dependency_type": "DEPENDS_ON"}
+  ],
+  "slas": [
+    {
+      "id": "sla-sandbox-customers-dev",
+      "tenant_id": "@@TENANT_ID@@",
+      "data_product_id": "dp-sandbox-customers-dev",
+      "display_name": "customers_clean (DEV) daily availability",
+      "description": "customers_clean must be refreshed before @@SLA_DEADLINE@@ @@SLA_TIMEZONE@@.",
+      "deadline_local_time": "@@SLA_DEADLINE@@",
+      "timezone": "@@SLA_TIMEZONE@@",
+      "freshness_item_id": "@@DEV.pipeline@@",
+      "owner": "fabricops-programme"
+    },
+    {
+      "id": "sla-sandbox-customers-test",
+      "tenant_id": "@@TENANT_ID@@",
+      "data_product_id": "dp-sandbox-customers-test",
+      "display_name": "customers_clean (TEST) daily availability",
+      "description": "customers_clean must be refreshed before @@SLA_DEADLINE@@ @@SLA_TIMEZONE@@.",
+      "deadline_local_time": "@@SLA_DEADLINE@@",
+      "timezone": "@@SLA_TIMEZONE@@",
+      "freshness_item_id": "@@TEST.pipeline@@",
+      "owner": "fabricops-programme"
+    },
+    {
+      "id": "sla-sandbox-customers-prod",
+      "tenant_id": "@@TENANT_ID@@",
+      "data_product_id": "dp-sandbox-customers-prod",
+      "display_name": "customers_clean (PROD) daily availability",
+      "description": "customers_clean must be refreshed before @@SLA_DEADLINE@@ @@SLA_TIMEZONE@@.",
+      "deadline_local_time": "@@SLA_DEADLINE@@",
+      "timezone": "@@SLA_TIMEZONE@@",
+      "freshness_item_id": "@@PROD.pipeline@@",
+      "owner": "fabricops-programme"
+    }
+  ]
+}
