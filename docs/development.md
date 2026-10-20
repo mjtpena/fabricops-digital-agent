@@ -53,6 +53,23 @@ curl -s -X POST localhost:8000/approvals/<APR-id>/approve \
 
 Interactive OpenAPI documentation is served at `http://127.0.0.1:8000/docs`.
 
+`orqentis serve` binds to `127.0.0.1` by default and refuses the self-asserted dev headers on any other address.
+To test the container image locally, opt in explicitly and publish the port on loopback only:
+
+```bash
+docker run --rm -p 127.0.0.1:8000:8000 -e ORQENTIS_API_AUTH_MODE=dev_headers \
+  -e ORQENTIS_DEV_HEADERS_ALLOW_REMOTE=true orqentis-fabricops:local
+```
+
+Without those two variables the image uses `easy_auth`: `GET /health` answers and every other route returns 401.
+
+Locally the API only checks the roles that approvals need. To try the production role model (every call
+needs `FabricOps.Reader`, `FabricOps.Automation`, `FabricOps.Operator` or `FabricOps.PlatformAdmin`), start the
+server with `ORQENTIS_API_REQUIRE_READ_ROLE=true` and add `-H 'X-Orqentis-Roles: FabricOps.Reader'`. The
+`dev_headers` mode always produces a person; service principals only exist behind Easy Auth (see
+`tests/support/easy_auth.py` for principals shaped like the ones Container Apps forwards). Request bodies over
+`ORQENTIS_API_MAX_BODY_BYTES` get 413, and mutating or expensive calls are rate limited (429 + `Retry-After`).
+
 ## Configuration
 
 All settings are environment variables with the prefix `ORQENTIS_`. They are listed with

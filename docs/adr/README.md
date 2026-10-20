@@ -14,3 +14,4 @@
 | [0010](0010-human-interface.md) | Human interface: notifier port and a minimal server-rendered UI | Accepted |
 | [0011](0011-deployment-model-and-environments.md) | Single-tenant deployment model and environment topology | Accepted |
 | [0012](0012-llm-hosting.md) | LLM hosting for the Agent Framework reasoner | Accepted |
+| [0015](0015-principal-classification-and-api-hardening.md) | Principal classification from token claims, Automation role and API hardening | Accepted |

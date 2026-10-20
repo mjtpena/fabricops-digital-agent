@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
@@ -42,6 +43,15 @@ class ApiAuthMode(StrEnum):
 class ClockMode(StrEnum):
     SYSTEM = "system"
     SCENARIO = "scenario"  # freeze time at the synthetic scenario's "now" (mock mode only)
+
+
+def _is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class Settings(BaseSettings):
@@ -85,6 +95,19 @@ class Settings(BaseSettings):
 
     # API
     api_auth_mode: ApiAuthMode = ApiAuthMode.DEV_HEADERS
+    # dev_headers lets every caller pick its own identity and roles, so `orqentis serve` refuses it on a
+    # non-loopback address unless this is set (for example `docker run` of a local test container).
+    dev_headers_allow_remote: bool = False
+    # Roles for reads. None (default): required under easy_auth, not enforced under dev_headers (local only).
+    # With enforcement every API call needs a FabricOps role (Reader, Automation, Operator or PlatformAdmin).
+    # Collection and investigation always need their roles under easy_auth, whatever this says.
+    api_require_read_role: bool | None = None
+    # Request limits (per replica, in memory). Bodies over the limit get 413. Mutating calls and the expensive
+    # ones (telemetry collection, investigations, audit verification) are limited per principal and get 429.
+    api_max_body_bytes: int = Field(default=65_536, ge=1_024, le=16_777_216)
+    api_rate_limit_enabled: bool = True
+    api_rate_limit_mutating_per_minute: int = Field(default=30, ge=1, le=10_000)
+    api_rate_limit_expensive_per_minute: int = Field(default=6, ge=1, le=10_000)
 
     # Observability
     log_level: str = "INFO"
@@ -120,6 +143,35 @@ class Settings(BaseSettings):
                     "ORQENTIS_FOUNDRY_PROJECT_ENDPOINT and ORQENTIS_FOUNDRY_MODEL"
                 )
         return self
+
+    def check_bind_host(self, host: str) -> None:
+        """Refuse to serve ``dev_headers`` (self-asserted identities and roles) on a non-loopback address."""
+        if (
+            self.api_auth_mode is ApiAuthMode.DEV_HEADERS
+            and not self.dev_headers_allow_remote
+            and not _is_loopback(host)
+        ):
+            raise ValueError(
+                f"Refusing to serve ORQENTIS_API_AUTH_MODE=dev_headers on {host!r}: any caller could choose its own "
+                "roles. Bind to 127.0.0.1, use ORQENTIS_API_AUTH_MODE=easy_auth, or set "
+                "ORQENTIS_DEV_HEADERS_ALLOW_REMOTE=true for a throwaway local test container."
+            )
+
+    @property
+    def read_role_required(self) -> bool:
+        """Whether read endpoints need a FabricOps role (default: yes under easy_auth, no under dev_headers)."""
+        if self.api_require_read_role is not None:
+            return self.api_require_read_role
+        return self.api_auth_mode is ApiAuthMode.EASY_AUTH
+
+    @property
+    def action_roles_required(self) -> bool:
+        """Whether collection and investigation need their roles. Under easy_auth this cannot be turned off.
+
+        ``api_require_read_role=false`` only opens the read endpoints. Locally (dev_headers) the roles apply
+        when ``api_require_read_role=true`` asks for the production role model.
+        """
+        return self.api_auth_mode is ApiAuthMode.EASY_AUTH or self.api_require_read_role is True
 
     @property
     def event_store_path(self) -> Path:

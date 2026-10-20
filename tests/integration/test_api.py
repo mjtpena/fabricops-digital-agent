@@ -34,7 +34,10 @@ def investigated(client: TestClient) -> dict[str, object]:
 
 def test_health_and_openapi(client: TestClient) -> None:
     health = client.get("/health").json()
-    assert health["status"] == "ok" and health["fabric_mode"] == "mock" and health["write_actions_enabled"] is False
+    assert health["status"] == "ok" and health["fabric_mode"] == "mock"
+    # The anonymous answer does not disclose the write capability; the authenticated one does.
+    assert "write_actions_enabled" not in health
+    assert client.get("/system/info", headers=VIEWER).json()["write_actions_enabled"] is False
     paths = client.get("/openapi.json").json()["paths"]
     for path in (
         "/health",
@@ -123,12 +126,16 @@ def test_unknown_incident_and_conflicts(client: TestClient) -> None:
 
 def test_easy_auth_principal(tmp_path: Path) -> None:
     settings = make_settings(tmp_path, api_auth_mode=ApiAuthMode.EASY_AUTH)
+    # A delegated user token as Easy Auth forwards it. A principal with only oid, name and roles is ambiguous
+    # (it could be an app-only token) and is refused; see tests/integration/test_api_identity.py.
     principal = {
         "auth_typ": "aad",
         "name_typ": "name",
         "role_typ": "roles",
         "claims": [
             {"typ": "http://schemas.microsoft.com/identity/claims/objectidentifier", "val": "oid-123"},
+            {"typ": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier", "val": "pairwise-123"},
+            {"typ": "http://schemas.microsoft.com/identity/claims/scope", "val": "FabricOps.Access"},
             {"typ": "name", "val": "Olivia"},
             {"typ": "roles", "val": "FabricOps.Operator"},
         ],

@@ -12,12 +12,19 @@ from orqentis.domain.taxonomy import Severity
 
 
 class Health(BaseModel):
+    """Anonymous liveness answer. Deliberately without capability flags (see ``SystemInfo``)."""
+
     status: str
     version: str
     fabric_mode: str
     reasoner: str
-    write_actions_enabled: bool
     time: datetime
+
+
+class SystemInfo(Health):
+    """What an authenticated caller may learn about the deployment, including whether writes are enabled."""
+
+    write_actions_enabled: bool
 
 
 class IncidentSummary(BaseModel):

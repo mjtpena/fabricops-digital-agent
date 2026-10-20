@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Query, Response
 
-from orqentis.api.auth import CurrentPrincipal
+from orqentis.api.authz import InvestigatePrincipal, ReadPrincipal
 from orqentis.api.deps import ContainerDep
 from orqentis.api.schemas import IncidentSummary, InvestigationResult
 from orqentis.domain.actions import Recommendation
@@ -22,7 +22,7 @@ router = APIRouter(prefix="/incidents", tags=["incidents"])
 @router.get("", response_model=list[IncidentSummary])
 async def list_incidents(
     c: ContainerDep,
-    _: CurrentPrincipal,
+    _: ReadPrincipal,
     status: list[IncidentStatus] | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
 ) -> list[IncidentSummary]:
@@ -31,12 +31,12 @@ async def list_incidents(
 
 
 @router.get("/{incident_id}", response_model=Incident)
-async def get_incident(incident_id: str, c: ContainerDep, _: CurrentPrincipal) -> Incident:
+async def get_incident(incident_id: str, c: ContainerDep, _: ReadPrincipal) -> Incident:
     return await c.incidents.get(incident_id)
 
 
 @router.post("/{incident_id}/investigate", response_model=InvestigationResult)
-async def investigate(incident_id: str, c: ContainerDep, principal: CurrentPrincipal) -> InvestigationResult:
+async def investigate(incident_id: str, c: ContainerDep, principal: InvestigatePrincipal) -> InvestigationResult:
     incident, trace = await c.investigations.investigate(incident_id, actor=principal)
     return InvestigationResult(
         incident=IncidentSummary.of(incident),
@@ -49,12 +49,12 @@ async def investigate(incident_id: str, c: ContainerDep, principal: CurrentPrinc
 
 
 @router.get("/{incident_id}/evidence", response_model=list[Evidence])
-async def get_evidence(incident_id: str, c: ContainerDep, _: CurrentPrincipal) -> list[Evidence]:
+async def get_evidence(incident_id: str, c: ContainerDep, _: ReadPrincipal) -> list[Evidence]:
     return (await c.incidents.get(incident_id)).evidence
 
 
 @router.get("/{incident_id}/recommendations", response_model=list[Recommendation])
-async def get_recommendations(incident_id: str, c: ContainerDep, _: CurrentPrincipal) -> list[Recommendation]:
+async def get_recommendations(incident_id: str, c: ContainerDep, _: ReadPrincipal) -> list[Recommendation]:
     return (await c.incidents.get(incident_id)).recommended_actions
 
 
@@ -62,7 +62,7 @@ async def get_recommendations(incident_id: str, c: ContainerDep, _: CurrentPrinc
 async def get_report(
     incident_id: str,
     c: ContainerDep,
-    _: CurrentPrincipal,
+    _: ReadPrincipal,
     format: Literal["json", "markdown"] = "json",
 ) -> IncidentReport | Response:
     report = c.reports.build(await c.incidents.get(incident_id))

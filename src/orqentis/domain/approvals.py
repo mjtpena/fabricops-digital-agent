@@ -36,3 +36,6 @@ class ApprovalRequest(DomainModel):
     rejected_at: AwareDatetime | None = None
     decision_comment: str | None = None
     policy_decision_id: str | None = None
+    # Optimistic-concurrency counter. Every state change goes through ApprovalProvider.transition, which stores
+    # the change only if the stored revision is still the one the caller read, and then bumps it.
+    revision: int = 0
