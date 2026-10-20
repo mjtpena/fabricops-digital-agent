@@ -131,6 +131,10 @@ class EnvironmentResolver:
     """Resolves workspace, item and capacity environments from declarations, falling back to name inference."""
 
     def __init__(self, declarations: Sequence[EnvironmentDeclaration] = ()) -> None:
+        self.replace(declarations)
+
+    def replace(self, declarations: Sequence[EnvironmentDeclaration]) -> None:
+        """Adopt a new set of declarations in place (a contracts reload). No ``await``: all or nothing."""
         self._by_workspace_id: dict[str, tuple[Environment, int]] = {}
         self._by_item_id: dict[str, tuple[Environment, int]] = {}
         self._by_capacity_id: dict[str, tuple[Environment, int]] = {}

@@ -74,6 +74,7 @@ class Runtime:
         container, self._container = self._container, None
         if container is None:
             return
+        await container.replica_sync.stop()
         await container.scheduler.stop()
         await container.investigation_jobs.shutdown()
         if self._injected is None:
@@ -101,5 +102,7 @@ class Runtime:
         await container.investigation_jobs.start()
         if self._settings.scheduler_enabled:
             await container.scheduler.start()
+            if self._settings.scheduler_catalog_refresh_enabled:
+                await container.replica_sync.start()
         else:
             _log.info("scheduler disabled (ORQENTIS_SCHEDULER_ENABLED=false)")

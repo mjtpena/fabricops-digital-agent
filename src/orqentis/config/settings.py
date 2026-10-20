@@ -89,7 +89,12 @@ class Settings(BaseSettings):
     fixtures_dir: Path = Path("fixtures")
     runbooks_dir: Path = Path("runbooks")
     policy_path: Path | None = None
+    # The estate contracts file. Local/mock runs read ``contracts_path``; with the postgres storage backend the file is
+    # a blob (``contracts_container``/``contracts_blob_name`` in the evidence account) that a person uploads. An
+    # explicit ``contracts_path`` wins over the blob (a developer machine pointing at a file).
     contracts_path: Path | None = None
+    contracts_container: str = Field(default="contracts", pattern=r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
+    contracts_blob_name: str = "estate.json"
     scenario: str = "schema_drift"
     clock: ClockMode = ClockMode.SCENARIO
 
@@ -256,6 +261,14 @@ class Settings(BaseSettings):
                 "must be a resource URI ending in /.default, e.g. https://api.fabric.microsoft.com/.default"
             )
         return scope
+
+    @field_validator("contracts_blob_name")
+    @classmethod
+    def _valid_blob_name(cls, value: str) -> str:
+        name = value.strip()
+        if not name or len(name) > 1024 or name.startswith("/") or "\\" in name or ".." in name.split("/"):
+            raise ValueError("must be a relative blob name without '..' segments or backslashes, e.g. estate.json")
+        return name
 
     @model_validator(mode="after")
     def _guard_rails(self) -> Settings:

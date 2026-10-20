@@ -22,8 +22,14 @@ from orqentis.approvals.provider import ApprovalProvider, LocalApprovalProvider
 from orqentis.approvals.service import ApprovalService
 from orqentis.config.clock import Clock, FixedClock, SystemClock
 from orqentis.config.settings import ClockMode, FabricMode, PostgresAuth, ReasonerKind, Settings, StorageBackend
-from orqentis.contracts import ContractsNotConfiguredError, EstateContracts, load_contracts
+from orqentis.contracts import ContractsNotConfiguredError, EstateContracts
 from orqentis.contracts.lineage import LineageScanner
+from orqentis.contracts.source import (
+    ContractsHolder,
+    ContractsSource,
+    FileContractsSource,
+    load_contracts_from,
+)
 from orqentis.domain.incidents import Incident
 from orqentis.fabric.fixtures import ScenarioFixture, load_estate, load_history, load_scenario
 from orqentis.fabric.mock import MockFabricClient
@@ -51,6 +57,7 @@ from orqentis.runtime.investigations import AutoInvestigationTask, Investigation
 from orqentis.runtime.job_store import JobStore
 from orqentis.runtime.lease import InProcessLeaderLease, LeaderLease
 from orqentis.runtime.mutex import InProcessMutex, Mutex
+from orqentis.runtime.replica_sync import ReplicaCatalogSync
 from orqentis.runtime.scheduler import JobContext, JobSpec, Scheduler
 from orqentis.storage.dependency_store import SqliteDependencyStore
 from orqentis.storage.event_store import EventStore, LocalEventStore
@@ -109,6 +116,7 @@ class Container:
     scenario: ScenarioFixture | None
     collection: CollectionService
     catalog_refresher: CatalogRefresher
+    replica_sync: ReplicaCatalogSync
     sla_sweeper: SLASweeper
     investigation_jobs: InvestigationJobRunner
     lease: LeaderLease
@@ -143,6 +151,8 @@ class _Storage:
     mutex: Mutex
     # None: the investigation runner keeps its jobs in memory (one process).
     jobs: JobStore | None = None
+    # Set with PostgreSQL: the contracts file as a blob (read-only for the app).
+    contracts: ContractsSource | None = None
     # Set with PostgreSQL: where the audit head is anchored, and the chain that is anchored.
     anchors: AuditAnchorStore | None = None
     audit_head: AnchorableAudit | None = None
@@ -218,6 +228,8 @@ async def open_postgres_session(
             evidence_prefix=settings.evidence_path_prefix,
             anchor_container=settings.audit_anchor_container,
             anchor_prefix=settings.audit_anchor_path_prefix,
+            contracts_container=settings.contracts_container,
+            contracts_blob_name=settings.contracts_blob_name,
         )
         track.append(blob.close)
 
@@ -277,6 +289,7 @@ async def _build_postgres_storage(
         mutex=pg.mutex,
         jobs=pg.jobs,
         anchors=blob.anchors,
+        contracts=blob.contracts,
         audit_head=pg.audit,
         closers=session._closers,
     )
@@ -324,18 +337,30 @@ def _build_reasoner(settings: Settings) -> tuple[Reasoner, Reasoner | None]:
     return AgentFrameworkReasoner(factory, model=model), rule_based
 
 
-async def _build_fabric(settings: Settings) -> tuple[FabricClient, EstateContracts, ScenarioFixture | None]:
+def _contracts_source(settings: Settings, from_storage: ContractsSource | None) -> ContractsSource:
+    """An explicit ``ORQENTIS_CONTRACTS_PATH`` wins; otherwise the storage backend's contracts blob (deployed)."""
+    if settings.contracts_path is not None:
+        return FileContractsSource(settings.contracts_path)
+    if from_storage is not None:
+        return from_storage
+    raise ContractsNotConfiguredError()
+
+
+async def _build_fabric(
+    settings: Settings, contracts_from_storage: ContractsSource | None
+) -> tuple[FabricClient, EstateContracts, ScenarioFixture | None, ContractsHolder | None]:
     if settings.fabric_mode is FabricMode.MOCK:
         estate = load_estate(settings.fixtures_dir)
         scenario = load_scenario(settings.fixtures_dir, settings.scenario)
-        return MockFabricClient(estate, scenario), estate, scenario
-    if settings.contracts_path is None:
-        raise ContractsNotConfiguredError()
+        return MockFabricClient(estate, scenario), estate, scenario, None
+    source = _contracts_source(settings, contracts_from_storage)
     from orqentis.fabric.rest.auth import build_token_provider
     from orqentis.fabric.rest.client import RestFabricClient
 
-    contracts = load_contracts(settings.contracts_path)  # ContractsError names the path and every violation
-    return RestFabricClient.from_settings(settings, contracts, build_token_provider(settings)), contracts, None
+    # A ContractsError names where the document came from and every violation; the build is retried until it loads.
+    contracts, document = await load_contracts_from(source)
+    client = RestFabricClient.from_settings(settings, contracts, build_token_provider(settings))
+    return client, contracts, None, ContractsHolder(source, contracts, document, client.apply_contracts)
 
 
 async def build_discovery_client(settings: Settings) -> FabricClient:
@@ -408,7 +433,15 @@ async def _build_container(
         reset_local_state(settings)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
-    fabric, contracts, scenario = await _build_fabric(settings)
+    storage: _Storage | None = None
+    if settings.fabric_mode is FabricMode.REST:
+        # The contracts file may live in the storage backend (a blob), so storage comes first. A real tenant is
+        # always on the system clock, so nothing here waits for the scenario.
+        clock = clock if clock is not None else SystemClock()
+        storage = await _build_storage(settings, clock, cleanup)
+    fabric, contracts, scenario, contracts_holder = await _build_fabric(
+        settings, storage.contracts if storage else None
+    )
     cleanup.append(fabric.aclose)
     if clock is None:
         clock = (
@@ -416,15 +449,18 @@ async def _build_container(
             if scenario is not None and settings.clock is ClockMode.SCENARIO
             else SystemClock()
         )
-
-    storage = await _build_storage(settings, clock, cleanup)
+    if storage is None:
+        storage = await _build_storage(settings, clock, cleanup)
     event_store, repository = storage.events, storage.incidents
     evidence_store, audit = storage.evidence, storage.audit
 
     recorder: EnvironmentChangeRecorder | None = None
-    if contracts.source_sha256 is not None:  # rest mode: say which declared environments change a classification
+    if contracts.source_sha256 is not None and contracts_holder is not None:
+        # rest mode: say which declared environments change a classification, tied to the contracts version in force
         recorder = EnvironmentChangeRecorder(
-            contracts_sha256=contracts.source_sha256, contracts_path=settings.contracts_path
+            contracts_sha256=contracts.source_sha256,
+            contracts_path=contracts_holder.document.location,
+            contracts_version=contracts_holder.document.version,
         )
         await recorder.bind(audit)
         observe = getattr(fabric, "observe_environment_changes", None)  # the REST adapter; the mock has no contracts
@@ -535,7 +571,18 @@ async def _build_container(
     # Autonomous runtime: the scheduler is built here but started by the API lifespan (see runtime/service.py).
     detection_runner = DetectionRunner(event_store, detection, mutex=storage.mutex)
     collection = CollectionService(ingestor, detection_runner)
-    catalog_refresher = CatalogRefresher(fabric, contracts, catalog, graph, dependency_store, incidents, audit, clock)
+    catalog_refresher = CatalogRefresher(
+        fabric,
+        contracts,
+        catalog,
+        graph,
+        dependency_store,
+        incidents,
+        audit,
+        clock,
+        contracts_holder=contracts_holder,
+        recorder=recorder,
+    )
     sla_sweeper = SLASweeper(
         catalog, SLAEvaluator(event_store, clock), graph, repository, event_store, detection_runner, clock
     )
@@ -634,6 +681,13 @@ async def _build_container(
         audit=audit,
     )
 
+    # Every replica keeps its own memory (catalog, graph, contracts) current; the leader's scheduled job does it there.
+    replica_sync = ReplicaCatalogSync(
+        catalog_refresher,
+        lambda: scheduler.is_leader,
+        timedelta(minutes=settings.scheduler_catalog_refresh_interval_minutes),
+    )
+
     _log.info(
         "container ready",
         extra={
@@ -666,6 +720,7 @@ async def _build_container(
         scenario=scenario,
         collection=collection,
         catalog_refresher=catalog_refresher,
+        replica_sync=replica_sync,
         sla_sweeper=sla_sweeper,
         investigation_jobs=investigation_jobs,
         lease=lease,

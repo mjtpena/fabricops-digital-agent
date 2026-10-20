@@ -79,6 +79,7 @@ from tests.support.app_fixtures import app_storage  # noqa: E402, F401
 from tests.support.service_fixtures import (  # noqa: E402, F401
     azurite_server,
     blob_anchors,
+    blob_contracts_container,
     blob_evidence,
     blob_service,
     pg,

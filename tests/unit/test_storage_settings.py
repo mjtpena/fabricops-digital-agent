@@ -93,3 +93,21 @@ async def test_the_container_refuses_a_deployed_environment_on_local_storage_bef
 async def test_resetting_local_files_is_refused_for_the_postgres_backend(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="reset deletes local files only"):
         await build_container(make_settings(tmp_path, **POSTGRES), reset=True)
+
+
+def test_the_contracts_blob_defaults_to_one_file_in_its_own_container(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, **POSTGRES)
+    assert settings.contracts_path is None
+    assert (settings.contracts_container, settings.contracts_blob_name) == ("contracts", "estate.json")
+    custom = make_settings(tmp_path, **POSTGRES, contracts_container="estate-reviewed", contracts_blob_name="a/b.json")
+    assert (custom.contracts_container, custom.contracts_blob_name) == ("estate-reviewed", "a/b.json")
+
+
+@pytest.mark.security
+def test_a_contracts_blob_location_that_could_escape_its_container_is_refused(tmp_path: Path) -> None:
+    for name in ("../estate.json", "a/../b.json", "/estate.json", r"a\b.json", "", "x" * 1025):
+        with pytest.raises(ValueError, match="contracts_blob_name"):
+            make_settings(tmp_path, **POSTGRES, contracts_blob_name=name)
+    for container in ("Contracts", "co", "-contracts", "contracts-", "a_b", "x" * 64):
+        with pytest.raises(ValueError, match="contracts_container"):
+            make_settings(tmp_path, **POSTGRES, contracts_container=container)

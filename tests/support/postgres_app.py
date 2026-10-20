@@ -19,7 +19,7 @@ from azure.core.credentials_async import AsyncTokenCredential
 from azure.storage.blob.aio import BlobServiceClient
 
 from orqentis.config.settings import Settings
-from orqentis.storage.blob import BlobAuditAnchorStore, BlobEvidenceStore, BlobStorage
+from orqentis.storage.blob import BlobAuditAnchorStore, BlobContractsSource, BlobEvidenceStore, BlobStorage
 from tests.conftest import make_settings
 from tests.support.service_fixtures import drop_schema
 from tests.support.services import AzuriteServer, PostgresServer
@@ -34,6 +34,7 @@ class AppStorage:
     schema: str
     evidence_container: str
     anchor_container: str
+    contracts_container: str
 
     def settings(self, tmp_path: Path, **overrides: object) -> Settings:
         values: dict[str, object] = {
@@ -48,6 +49,7 @@ class AppStorage:
             "evidence_blob_url": self.azurite.url,
             "evidence_container": self.evidence_container,
             "audit_anchor_container": self.anchor_container,
+            "contracts_container": self.contracts_container,
             "postgres_pool_max": 6,
         }
         values.update(overrides)
@@ -65,6 +67,8 @@ def azurite_blob_storage(azurite: AzuriteServer) -> Any:
         evidence_prefix: str = "",
         anchor_container: str = "audit-anchors",
         anchor_prefix: str = "",
+        contracts_container: str = "contracts",
+        contracts_blob_name: str = "estate.json",
     ) -> BlobStorage:
         service = BlobServiceClient(
             azurite.url, credential={"account_name": azurite.account, "account_key": azurite.key}
@@ -73,6 +77,7 @@ def azurite_blob_storage(azurite: AzuriteServer) -> Any:
             service=service,
             evidence=BlobEvidenceStore(service.get_container_client(evidence_container), path_prefix=evidence_prefix),
             anchors=BlobAuditAnchorStore(service.get_container_client(anchor_container), path_prefix=anchor_prefix),
+            contracts=BlobContractsSource(service.get_container_client(contracts_container), contracts_blob_name),
         )
 
     return open_
@@ -82,9 +87,10 @@ async def make_app_storage(
     server: PostgresServer, azurite: AzuriteServer, service: BlobServiceClient, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[AppStorage]:
     suffix = secrets.token_hex(5)
-    storage = AppStorage(server, azurite, f"t_{suffix}", f"ev-{suffix}", f"an-{suffix}")
+    storage = AppStorage(server, azurite, f"t_{suffix}", f"ev-{suffix}", f"an-{suffix}", f"co-{suffix}")
     await service.create_container(storage.evidence_container)
     await service.create_container(storage.anchor_container)
+    await service.create_container(storage.contracts_container)
     monkeypatch.setattr(BlobStorage, "open", staticmethod(azurite_blob_storage(azurite)))
     yield storage
     await drop_schema(server, storage.schema)

@@ -175,10 +175,39 @@ of the database backup); `orqentis db reseed-counters` raises them above every i
 
 PostgreSQL Flexible Server (B1ms default; `passwordAuth` disabled; Entra administrator group; PITR retention 7-35 days;
 public access with firewall rules for dev or VNet integration), an evidence storage account (shared key disabled,
-versioning, soft delete, account-level version-level immutability, an `evidence` and an `audit-anchors` container),
-reader-identity role assignments scoped to those two containers only, and `minReplicas`/`maxReplicas` (1 in dev, 2 in
-test and prod). **Azure Files, the storage key and the SMB mount are removed.** The estate contracts file, which lived on
-the share, becomes a Container App secret mounted read-only. See `infra/bicep/README.md`.
+versioning, soft delete, account-level version-level immutability, an `evidence`, an `audit-anchors` and a `contracts`
+container), reader-identity role assignments scoped to those containers only (Blob Data Contributor on the first two,
+Blob Data **Reader** on `contracts`), and `minReplicas`/`maxReplicas` (1 in dev, 2 in test and prod). **Azure Files, the
+storage key and the SMB mount are removed.** The estate contracts file, which lived on the share, becomes a blob
+(section 12). See `infra/bicep/README.md`.
+
+### 12. The estate contracts file is a blob the app can only read
+
+* **Where.** `contracts/estate.json` in the evidence account (`ORQENTIS_CONTRACTS_CONTAINER`,
+  `ORQENTIS_CONTRACTS_BLOB_NAME`; Bicep `contractsContainerName` / `contractsBlobName`). `ORQENTIS_CONTRACTS_PATH` stays
+  for local and mock runs and, when set, wins over the blob. A container secret was rejected: it is copied into every
+  revision, is not versioned or immutable, and its value would have to pass through CI as a variable.
+* **Who.** The app's identity has Storage Blob Data **Reader** on that container only; it cannot change what it reads.
+  A person with Storage Blob Data Contributor on that container alone uploads the reviewed file
+  (`az storage blob upload --auth-mode login --overwrite`). The container has versioning, soft delete and the account's
+  retention, so every upload stays readable. The environment declarations in this file are a trust decision (a workspace
+  declared DEV lowers severity and stops production-only policy rules), hence the narrow, separate, audited write path.
+* **Loading.** `orqentis.contracts.source` has two sources (`FileContractsSource`, and `BlobContractsSource` in the Blob
+  adapter package) and one loader, so both raise the same typed `ContractsError` naming where the document came from and
+  every violation, never echoing values from it. The SHA-256 of the **bytes** is the file's identity.
+* **Not ready, not a crash loop.** A missing or invalid blob at start-up fails the container build with the typed error;
+  the process stays up, `/health` answers, `/health/ready` is 503 with `build_failed` and the exception *type* only, and
+  the build is retried with backoff until the upload fixes it. Nothing restarts.
+* **Reload without a restart.** The catalog refresh re-reads the source first. An unchanged SHA-256 is a no-op; a changed
+  one is validated, applied in place (REST client, environment resolver, catalog) and audited as `contracts.loaded` with
+  the new SHA-256, blob path and version. **An invalid or missing blob on a reload keeps the last good contracts in
+  force** and fails the refresh visibly (the scheduled job reports `failed`, the log says why); the app does not go
+  not-ready at runtime, because that would turn a bad upload into an outage of a system that is monitoring production.
+* **Every replica.** The catalog, the dependency graph and the contracts live in each process's memory, and
+  investigations run on whichever replica claims them. The `catalog-refresh` job runs on the leader only, so a follower
+  would have kept the start-up estate indefinitely. `ReplicaCatalogSync` refreshes each replica's own memory on the same
+  interval (the leader skips it: its job does the same and, once per change, the shared effects: the dependency table,
+  the audit of the diff, the incident annotations). A failing run is logged on the change of health and retried.
 
 ## Consequences
 
@@ -208,7 +237,9 @@ the share, becomes a Container App secret mounted read-only. See `infra/bicep/RE
    deployed environment; the fallback is a revision suffix.
 2. Account-level version-level immutability can only be enabled when the account is created, so an environment created
    by the old template needs a new evidence account (it is a new account in the template).
-3. Moving rate limiting to a shared store (ADR-0015 follow-up) is not done here.
+3. Moving rate limiting to a shared store (ADR-0015 follow-up) is not done here. Replacing the contracts blob by an
+   overwrite relies on the same Blob behaviour as question 1 (an overwrite of a current version under retention creates a
+   new version); if the service refuses it, the fallback is a new `contractsBlobName` per release.
 4. `Locked` immutability is irreversible and is the owner's call for `prod`.
 
 ## Alternatives considered

@@ -6,15 +6,17 @@ them they are skipped, and in CI (``ORQENTIS_REQUIRE_SERVICES=1``) a missing ser
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from azure.storage.blob.aio import ContainerClient
 from tests.conftest import REPO
 
 from orqentis.approvals.provider import ApprovalProvider, LocalApprovalProvider
 from orqentis.config.clock import SystemClock
+from orqentis.contracts.source import ContractsSource, FileContractsSource
 from orqentis.domain.actions import Action, ActionType, RiskLevel
 from orqentis.domain.approvals import ApprovalRequest
 from orqentis.domain.events import EventType, OperationalEvent
@@ -24,6 +26,7 @@ from orqentis.observability.anchors import AuditAnchorStore, LocalAuditAnchorSto
 from orqentis.observability.audit import AuditTrail, LocalAuditLog
 from orqentis.runtime.job_store import InMemoryJobStore, JobStore
 from orqentis.runtime.lease import InProcessLeaderLease, LeaderLease, LeaseTable
+from orqentis.storage.blob import BlobContractsSource
 from orqentis.storage.dependency_store import SqliteDependencyStore
 from orqentis.storage.event_store import EventStore, LocalEventStore
 from orqentis.storage.evidence_store import EvidenceStore, LocalEvidenceStore
@@ -136,6 +139,49 @@ def anchor_store(evidence_backend: str, request: pytest.FixtureRequest, tmp_path
     if evidence_backend == "blob":
         return request.getfixturevalue("blob_anchors")  # type: ignore[no-any-return]
     return LocalAuditAnchorStore(tmp_path / "anchors")
+
+
+class ContractsPublisher:
+    """What a person does to the contracts file (put a new version, take it away) and the source the app reads."""
+
+    def __init__(
+        self,
+        source: ContractsSource,
+        put: Callable[[bytes], Awaitable[None]],
+        remove: Callable[[], Awaitable[None]],
+    ) -> None:
+        self.source = source
+        self.put = put
+        self.remove = remove
+
+
+@pytest.fixture(params=[LOCAL, "blob"])
+def contracts_backend(request: pytest.FixtureRequest) -> str:
+    return str(request.param)
+
+
+@pytest.fixture
+def contracts_publisher(contracts_backend: str, request: pytest.FixtureRequest, tmp_path: Path) -> ContractsPublisher:
+    if contracts_backend == "blob":
+        container: ContainerClient = request.getfixturevalue("blob_contracts_container")
+
+        async def put_blob(data: bytes) -> None:
+            await container.upload_blob("estate.json", data, overwrite=True)
+
+        async def remove_blob() -> None:
+            await container.delete_blob("estate.json")
+
+        return ContractsPublisher(BlobContractsSource(container, "estate.json"), put_blob, remove_blob)
+
+    path = tmp_path / "estate.json"
+
+    async def put_file(data: bytes) -> None:
+        path.write_bytes(data)
+
+    async def remove_file() -> None:
+        path.unlink()
+
+    return ContractsPublisher(FileContractsSource(path), put_file, remove_file)
 
 
 # -------------------------------------------------------------------------------------------- sample objects

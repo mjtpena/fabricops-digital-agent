@@ -20,6 +20,11 @@ section does not match.
   Blob evidence/report and audit-anchor adapters (write-once, version-level immutability, OneLake by URL).
   `ORQENTIS_STORAGE_BACKEND=postgres` is required in `dev`/`test`/`prod`; `local` stays the default for development,
   tests, mock mode and `make demo`.
+- The estate contracts file is a blob in deployed environments (`contracts/estate.json` in the evidence account,
+  read-only for the app, uploaded with `az storage blob upload --auth-mode login`): reloaded on every replica by the
+  catalog refresh without a restart, SHA-256 and blob version audited on every (re)load (`contracts.loaded`), a bad
+  upload keeps the last good contracts, and a missing or invalid blob at start-up leaves the app not ready (typed error,
+  no crash loop). `ORQENTIS_CONTRACTS_PATH` stays for local and mock runs.
 - Fenced writes: scheduled jobs run under the lease generation and every PostgreSQL write transaction checks it, so a
   deposed leader's late write is refused. Detection runs under a cross-replica mutex.
 - Audit anchors: the chain head is written to an immutable blob every 15 minutes and `orqentis audit` verifies against

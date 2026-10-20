@@ -203,8 +203,9 @@ for review, `TRIGGERS` edges from observed pipeline runs, placeholders for owner
 `schemas/contracts.schema.json` gives editors completion. A workspace's **environment** can be declared by id
 or name pattern and then overrides the name-based guess, which drives incident severity and policy. A Fabric
 tenant in another Entra tenant is reached with a service principal whose secret is a Key Vault reference,
-and sovereign clouds are configuration (`ORQENTIS_AUTHORITY_HOST` and the token scopes). See
-[Development](docs/development.md#contracts-workflow) and the [Bicep guide](infra/bicep/README.md).
+and sovereign clouds are configuration (`ORQENTIS_AUTHORITY_HOST` and the token scopes). In a deployed environment the
+file is a blob that a person uploads and the app only reads, and a running app reloads it without a restart (Bicep
+guide, step 4). See [Development](docs/development.md#contracts-workflow) and the [Bicep guide](infra/bicep/README.md).
 
 The operating identity needs read permissions only (see [docs/security.md](docs/security.md)).
 Fabric has no public API for capacity utilisation or Delta schema history, so those signals arrive

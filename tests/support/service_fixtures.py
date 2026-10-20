@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Iterator
 
 import asyncpg
 import pytest
-from azure.storage.blob.aio import BlobServiceClient
+from azure.storage.blob.aio import BlobServiceClient, ContainerClient
 
 from orqentis.config.clock import SystemClock
 from orqentis.storage.blob import BlobAuditAnchorStore, BlobEvidenceStore
@@ -91,3 +91,10 @@ async def blob_anchors(blob_service: BlobServiceClient) -> BlobAuditAnchorStore:
     name = f"an-{secrets.token_hex(5)}"
     await blob_service.create_container(name)
     return BlobAuditAnchorStore(blob_service.get_container_client(name))
+
+
+@pytest.fixture
+async def blob_contracts_container(blob_service: BlobServiceClient) -> ContainerClient:
+    name = f"co-{secrets.token_hex(5)}"
+    await blob_service.create_container(name)
+    return blob_service.get_container_client(name)

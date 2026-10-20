@@ -83,6 +83,14 @@ adapter resolves it once, so detection severity and the policy engine see the sa
 contracts file through the read-only `FabricClient` port; the draft is reviewed and never applied
 automatically.
 
+Where the file comes from depends on the storage backend (ADR-0017 section 12): `ORQENTIS_CONTRACTS_PATH` (a file) for
+local and mock runs, otherwise, in a deployed environment, the `contracts/estate.json` **blob** that a person uploads and
+the app can only read (`ContractsSource` in `contracts/source.py`; the Blob implementation is in the Blob adapter
+package). The catalog refresh re-reads it on every replica: an unchanged SHA-256 is a no-op, a changed one is validated,
+applied in place and audited (`contracts.loaded` with the SHA-256 and blob version), and an invalid or missing one raises
+the typed error while the last good contracts stay in force. At start-up a missing or invalid blob leaves the app not
+ready (`/health/ready` 503, `build_failed`), retried with backoff, never a crash loop.
+
 ## 4. Domain model
 
 All models are Pydantic v2 with `extra="forbid"` (`orqentis.domain`). The core models:

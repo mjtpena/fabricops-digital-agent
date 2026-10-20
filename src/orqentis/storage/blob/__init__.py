@@ -9,9 +9,10 @@ from azure.core.credentials_async import AsyncTokenCredential
 from azure.storage.blob.aio import BlobServiceClient
 
 from orqentis.storage.blob.anchors import BlobAuditAnchorStore
+from orqentis.storage.blob.contracts import BlobContractsSource
 from orqentis.storage.blob.evidence import BlobEvidenceStore
 
-__all__ = ["BlobAuditAnchorStore", "BlobEvidenceStore", "BlobStorage"]
+__all__ = ["BlobAuditAnchorStore", "BlobContractsSource", "BlobEvidenceStore", "BlobStorage"]
 
 
 @dataclass
@@ -21,6 +22,7 @@ class BlobStorage:
     service: BlobServiceClient
     evidence: BlobEvidenceStore
     anchors: BlobAuditAnchorStore
+    contracts: BlobContractsSource
 
     @classmethod
     def open(
@@ -32,6 +34,8 @@ class BlobStorage:
         evidence_prefix: str = "",
         anchor_container: str = "audit-anchors",
         anchor_prefix: str = "",
+        contracts_container: str = "contracts",
+        contracts_blob_name: str = "estate.json",
     ) -> Self:
         """Build the clients (no network traffic yet). ``credential`` is an Entra token credential, never a key."""
         service = BlobServiceClient(account_url, credential=credential)
@@ -39,6 +43,7 @@ class BlobStorage:
             service=service,
             evidence=BlobEvidenceStore(service.get_container_client(evidence_container), path_prefix=evidence_prefix),
             anchors=BlobAuditAnchorStore(service.get_container_client(anchor_container), path_prefix=anchor_prefix),
+            contracts=BlobContractsSource(service.get_container_client(contracts_container), contracts_blob_name),
         )
 
     async def close(self) -> None:

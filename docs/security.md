@@ -140,6 +140,11 @@ not served under Easy Auth (they would answer callers with no role).
   paths, ids and positions and never echo values from the file. `contracts scaffold` redacts and
   sanitises what it reads from Fabric (names, data source descriptions) and drops credentials, user info
   and query strings from data source URLs.
+* In a deployed environment the contracts file is a blob in a versioned, soft-deleted container that the app can only
+  read. The SHA-256 and blob version of the contracts in force are written to the audit trail on every (re)load
+  (`contracts.loaded`), so a change to the declared environments is attributable to an upload. A missing, unreadable
+  or invalid blob is a typed error that names the blob's address and the violations, never its content; at start-up it
+  leaves the app not ready, and on a reload it keeps the last good contracts.
 * **A declared environment is a trust decision.** Declaring a PROD workspace as DEV lowers incident
   severity and stops production-only policy rules (`POL-002`, `POL-020`) from matching it. Therefore: only
   *reviewed* entries are enforced (a scaffold draft marked `inferred`, or an `UNKNOWN` entry, never overrides the
@@ -395,8 +400,8 @@ refreshes.
 | Resource | Who can do what | Notes |
 |---|---|---|
 | PostgreSQL Flexible Server | Authentication is Microsoft Entra only (`passwordAuth` disabled). The Entra administrator **group** (parameter) can administer and run `scripts/postgres-bootstrap.sql`; the **reader managed identity** is a database role that owns one schema and may connect, with no superuser, no `CREATE` on the database and nothing in other schemas | The actor (write) identity has no access. The server is reachable over public access with explicit firewall rules (or VNet integration with a private DNS zone); TLS is required and the app verifies the certificate chain and host name |
-| Evidence storage account | Shared-key access disabled, Entra only. The reader identity has **Storage Blob Data Contributor on the `evidence` and `audit-anchors` containers only**, never on the account | Versioning, soft delete and account-level version-level immutability (retention parameter; `Unlocked` until the owner chooses `Locked`, which is irreversible). Blob public access off, TLS 1.2+, no cross-tenant replication |
-| Container App | Has no volume and no storage key. The estate contracts file is a Container App secret mounted read-only | Rate limiting and in-memory caches are per replica |
+| Evidence storage account | Shared-key access disabled, Entra only. The reader identity has **Storage Blob Data Contributor on the `evidence` and `audit-anchors` containers only** and **Storage Blob Data Reader on the `contracts` container only**, never a role on the account. Whoever uploads the contracts file needs Contributor on the `contracts` container alone | Versioning, soft delete and account-level version-level immutability (retention parameter; `Unlocked` until the owner chooses `Locked`, which is irreversible). Blob public access off, TLS 1.2+, no cross-tenant replication |
+| Container App | Has no volume and no storage key. The estate contracts file is read from the `contracts` blob (read-only for the app) | Rate limiting and in-memory caches are per replica |
 
 Encryption at rest is the platform default for both services (Microsoft-managed keys); in transit is TLS. The audit
 anchors make the audit trail verifiable even against someone with full rights on the database, but not against someone

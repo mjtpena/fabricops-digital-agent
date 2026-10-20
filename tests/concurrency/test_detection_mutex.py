@@ -64,6 +64,7 @@ async def test_detection_on_two_instances_at_once_opens_one_incident_for_one_fai
             f"{app_storage.schema}_{round_}",
             app_storage.evidence_container,
             app_storage.anchor_container,
+            app_storage.contracts_container,
         )
         containers: list[Container] = [
             await build_container(sub.settings(tmp_path / f"{round_}-a")),

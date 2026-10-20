@@ -246,7 +246,9 @@ The contracts file is reviewed like code. Tools draft and check it; a person dec
    declarations are checked only against a catalog that has capacities. Refresh it with
    `scaffold --catalog-output` whenever the estate changes.
 
-4. **Deploy** the file to `ORQENTIS_CONTRACTS_PATH` (for Azure, see the Bicep README, step 4).
+4. **Deploy** the file: locally to `ORQENTIS_CONTRACTS_PATH`; in Azure upload it to the `contracts` blob (see the
+   Bicep README, step 4). A running app picks up the new version on its next catalog refresh (SHA-256 audited as
+   `contracts.loaded`); an invalid upload keeps the previous contracts in force and fails the refresh visibly.
 
 The JSON Schema is generated from the model: after changing `EstateContracts` run
 `orqentis contracts schema --output schemas/contracts.schema.json`; `orqentis contracts schema --check

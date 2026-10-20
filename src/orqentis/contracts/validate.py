@@ -29,7 +29,7 @@ from orqentis.topology.environment import EnvironmentResolver, infer_environment
 
 @dataclass(frozen=True)
 class ValidationReport:
-    path: Path | None
+    path: Path | str | None
     violations: tuple[ContractViolation, ...]
     contracts: EstateContracts | None  # None when the file is not valid JSON or does not match the schema
     catalog_checked: bool = False
@@ -374,7 +374,7 @@ def check_contracts(
 
 def validate_text(
     text: str,
-    path: Path | None = None,
+    path: Path | str | None = None,
     *,
     catalog: CatalogSnapshot | None = None,
     tenant_id: str | None = None,
