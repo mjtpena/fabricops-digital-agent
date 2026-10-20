@@ -13,6 +13,17 @@ section does not match.
 
 ### Added
 
+- Notifications and a web UI (ADR-0018, implements ADR-0010). A `Notifier` port with a Microsoft Teams Workflows webhook adapter (an
+  Adaptive Card with a link and no buttons), a generic JSON webhook adapter (optional HMAC-SHA256 signature) and a null adapter; incident
+  opened / escalated, approval requested and action executed / failed are announced with deep links. Delivery is in the background:
+  de-duplicated by event id, a bounded outbox, retries with back-off and jitter, one audit record per attempt, never blocking detection or
+  an investigation. Content is sanitised, redacted and length-limited. Webhook URLs are Key Vault references; every call passes an SSRF
+  guard (https, host allow list, public addresses after DNS, connection pinned to the checked address, no redirects).
+- A server-rendered UI under `/ui` (Jinja2, no script): incident list with filters, incident detail, the report with FACT / INFERENCE /
+  RECOMMENDATION labels, approvals with approve / reject / execute and a comment, audit verification. Same guards and services as the API;
+  CSRF form tokens, strict Content-Security-Policy and security headers.
+- `orqentis notify-test`, `docs/teams-notifications.md`, and Bicep parameters `notifierKind`, `notify*SecretUri`, `notifyAllowedHosts`,
+  `publicBaseUrl`, `uiEnabled`, `uiSignInClientSecretUri` (interactive Easy Auth sign-in with a Key Vault client secret) and `uiCsrfSecretUri`.
 - Delivery pipeline (ADR-0016): `cd.yml` runs CI first, then builds the image once, scans it with Trivy, generates an SPDX
   SBOM, pushes it to the shared registry by digest, tags it (`<git sha>` for `main`, `dryrun-<git sha>` otherwise) only
   after the scan gate passes, deploys `dev` and smoke-tests it, then promotes the same digest to `test` and `prod`
@@ -31,6 +42,12 @@ section does not match.
   protect `main` and the release tags.
 - `scripts/pip_audit_gate.py` and `.pip-audit-allowlist.toml`: dependency audit with justified, owned, expiring
   exceptions. `.trivyignore.yaml` for image scan exceptions. `scripts/release_tools.py` for release notes and evidence.
+
+### Security
+
+- Every state-changing request, API and UI, passes a cross-origin guard (`Origin`, `Sec-Fetch-Site`; `Referer` on `/ui`), and the API accepts
+  JSON bodies only (415 otherwise). An ID-token browser session is a person, so without this a foreign page could
+  `POST /approvals/{id}/approve` (ledger R6).
 
 ### Changed
 
