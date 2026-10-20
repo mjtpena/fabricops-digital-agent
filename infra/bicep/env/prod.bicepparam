@@ -1,5 +1,5 @@
 // Parameters for the PROD environment (resource group rg-fabricops-prod). Used by .github/workflows/cd.yml (after the
-// `prod` GitHub environment's required reviewers approve) and whatif.yml; see docs/delivery.md.
+// `prod` GitHub environment's required reviewers approve) and bicep-diff.yml; see docs/delivery.md.
 // Contains no secrets and must never contain any.
 //
 //   Values supplied by the pipeline (GitHub environment/repository variables, all identifiers, none secret):

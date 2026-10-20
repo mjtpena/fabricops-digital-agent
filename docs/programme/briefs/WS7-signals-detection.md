@@ -8,7 +8,7 @@ pipeline job instances, activity runs and semantic-model refreshes, but refreshe
 Spark job definition / Dataflow jobs are not collected, schema-change events have no producer, and capacity CU
 utilisation is unavailable. Decisions: [ADR-0009](../../adr/0009-capacity-and-schema-signals.md) (capacity from the
 Capacity Metrics semantic model via `executeQueries`, confirmed by a spike; schema drift from Delta `_delta_log` over
-OneLake for contract-declared tables) and **D9** (semantic-model refresh failures: {{D9_DECISION}}).
+OneLake for contract-declared tables) and **D9** (semantic-model refresh failures: the reader never gets write; read them from Fabric **workspace monitoring** (semantic-model logs in the monitoring Eventhouse, read with workspace Viewer), validated by a spike in this workstream; pipeline-triggered refreshes also surface as pipeline activity failures; the read-only admin API is a fallback only with the owner's further approval).
 
 Live findings from WS5 (see `docs/security.md` and `infra/bicep/README.md` §5, `docs/live-environment.md`):
 * workspace **Viewer** reads workspaces, items, job instances, activity runs; job instances come back **newest first**;
