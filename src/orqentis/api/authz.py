@@ -59,6 +59,11 @@ async def _refuse(request: Request, principal: Principal, code: str, message: st
     raise ApiError(status.HTTP_403_FORBIDDEN, code, message)
 
 
+async def refuse(request: Request, principal: Principal, code: str, message: str) -> NoReturn:
+    """Refuse an authenticated request from another guard (the UI's CSRF check): logged, audited with a bound, 403."""
+    await _refuse(request, principal, code, message, audit=True)
+
+
 def _charge(request: Request, principal: Principal, request_class: RequestClass) -> None:
     """Spend one token of the authenticated principal's budget (429 when it is empty)."""
     limits: RateLimits | None = getattr(request.app.state, "rate_limits", None)

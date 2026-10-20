@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Report {{ report.incident_id }}{% endblock %}
+{% block content %}
+<h1>Incident report {{ report.incident_id }}</h1>
+<p><a href="{{ paths.incident_path(report.incident_id) }}">Back to the incident</a></p>
+<p>
+  <span class="badge kind-FACT">FACT</span> observed or computed by code ·
+  <span class="badge kind-INFERENCE">INFERENCE</span> a conclusion drawn from cited evidence ·
+  <span class="badge kind-RECOMMENDATION">RECOMMENDATION</span> proposed, never done without a human
+</p>
+<dl class="facts">
+  <dt>Title</dt><dd>{{ report.title }}</dd>
+  <dt>Severity / status</dt><dd>{{ report.severity }} / {{ report.status }}</dd>
+  <dt>Category</dt><dd>{{ report.category }}</dd>
+  <dt>Environment</dt><dd>{{ report.environment }}</dd>
+  <dt>Primary item</dt><dd>{{ report.primary_item }}</dd>
+  <dt>Detected</dt><dd>{{ report.detected_at_local }}</dd>
+  <dt>Report generated</dt><dd>{{ report.generated_at_local }}</dd>
+  <dt>Confidence</dt><dd>{% if report.confidence_level %}{{ report.confidence_level }} ({{ "%.2f"|format(report.confidence_score) }}){% else %}-{% endif %}</dd>
+  <dt>Reasoner</dt><dd>{{ report.reasoner or "-" }}</dd>
+</dl>
+{% for section in report.sections %}
+<h2>{{ section.title }}</h2>
+{% for s in section.statements %}
+  <p class="statement"><span class="badge kind-{{ s.kind.value }}">{{ s.kind.value }}</span>{{ s.text }}
+    {% if s.evidence_ids %}<span class="evidence-ids">evidence: {% for e in s.evidence_ids %}<code>{{ e }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}</p>
+{% endfor %}
+{% if section.table %}
+<table>
+  <thead><tr>{% for column in section.table[0].keys() %}<th>{{ column }}</th>{% endfor %}</tr></thead>
+  <tbody>
+  {% for row in section.table %}
+    <tr>{% for value in row.values() %}<td>{{ value }}</td>{% endfor %}</tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endfor %}
+{% endblock %}
