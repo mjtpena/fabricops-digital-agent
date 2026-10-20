@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Summarise `az deployment group what-if --no-pretty-print` output as Markdown, WITHOUT property values.
 
-    python scripts/whatif_summary.py whatif.json > summary.md
+    python scripts/whatif_summary.py whatif.json [environment] > summary.md
 
 The summary lists every resource that would change and the property paths that would change. It never prints a
 property value: the template reads keys with listKeys(), so a what-if payload can contain storage and workspace keys.
-Used by .github/workflows/whatif.yml, which uploads only this summary.
+Used by .github/workflows/deploy-environment.yml, which publishes only this summary.
 """
 
 from __future__ import annotations
@@ -31,10 +31,10 @@ def _paths(deltas: list[dict[str, Any]], prefix: str = "") -> list[tuple[str, st
     return found
 
 
-def summarise(result: dict[str, Any]) -> str:
+def summarise(result: dict[str, Any], environment: str = "") -> str:
     changes: list[dict[str, Any]] = result.get("changes") or result.get("properties", {}).get("changes") or []
     counts = Counter(str(change.get("changeType", "?")) for change in changes)
-    lines = ["### Bicep what-if (dev)", ""]
+    lines = [f"### Bicep what-if ({environment})" if environment else "### Bicep what-if", ""]
     if not changes:
         lines.append("No changes reported.")
     else:
@@ -52,11 +52,11 @@ def summarise(result: dict[str, Any]) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
+    if len(argv) not in (2, 3):
         sys.stderr.write(__doc__ or "")
         return 2
     with open(argv[1], encoding="utf-8") as handle:
-        sys.stdout.write(summarise(json.load(handle)))
+        sys.stdout.write(summarise(json.load(handle), argv[2] if len(argv) == 3 else ""))
     return 0
 
 

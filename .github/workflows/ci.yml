@@ -149,6 +149,9 @@ jobs:
     name: Bicep build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      # Same pin as .github/workflows/bicep-diff.yml: `snapshot` needs a recent Bicep CLI.
+      BICEP_VERSION: v0.45.15
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -156,7 +159,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Bicep
-        run: az bicep install
+        run: az bicep install --version "$BICEP_VERSION"
 
       - name: Build main.bicep
         run: az bicep build --file infra/bicep/main.bicep --stdout > /dev/null
@@ -166,6 +169,10 @@ jobs:
 
       - name: Build every environment parameter file and check the prod write switch
         run: bash scripts/validate-bicep.sh
+
+      # The offline snapshot behind the pull-request Bicep diff: running it on every push keeps that diff from rotting.
+      - name: Snapshot every environment (offline)
+        run: bash scripts/bicep-snapshot.sh "$RUNNER_TEMP/snapshots"
 
   docker:
     name: Docker image build

@@ -64,8 +64,7 @@ and `environment:release`. A **deploy** identity per environment (`fabricops-dep
 by an ABAC condition to assigning `AcrPull` and `Cognitive Services OpenAI User` to service principals only and unable
 to delete any assignment, and a custom role with only `Microsoft.Resources/deployments/*` on the shared resource group
 (the registry and OpenAI role modules are deployed there as nested deployments). No environment identity can touch another
-environment, and no identity that pushes images can deploy. Pull requests use a fourth identity (`fabricops-whatif`,
-subject `pull_request`) that can only simulate deployments of `dev`. The smoke-test identity is the environment's deploy
+environment, and no identity that pushes images can deploy. Pull requests use no Azure identity at all (see below). The smoke-test identity is the environment's deploy
 service principal holding the `FabricOps.Automation` app role on that environment's API registration (WS3); the token comes
 from `az account get-access-token`, so no secret exists anywhere.
 
@@ -79,12 +78,21 @@ latest revision is the latest ready one, serves 100% of traffic and runs exactly
 failed rollout hides behind the previous revision still answering. Then `/health` (anonymous: the deployment excludes it
 from authentication), an anonymous `/incidents` that must be 401, and an authenticated `/incidents` that must be 200.
 
-**What-if on pull requests (`whatif.yml`).** Read-only `az deployment group what-if` against `dev`, skipped for forks,
-when unconfigured, and when the resource group does not exist. Its identity has rights on the dev resource group only;
-the cross-resource-group `AcrPull` module is left out of the simulation (empty `containerRegistryResourceId`) so that a
-pull-request identity needs nothing on the shared registry's resource group. The uploaded summary lists changed resources
-and property paths only. Values are omitted on purpose: the template reads storage and workspace keys with `listKeys()`,
-and what-if payloads can contain them.
+**Previewing infrastructure changes.** ARM what-if performs the same authorization checks as a deployment, so previewing a
+change to a resource needs the permission to write it (`InvalidTemplateDeployment ... does not have permission to perform
+action '...workspaces/write'`, for every resource and every nested deployment). The first design gave pull requests a
+"read-only" identity (`fabricops-whatif`: `Reader` plus a custom role with `deployments/whatif/action`); it failed on every
+pull request, and the only way to make it work would have been to give a pull-request identity deploy rights, which is
+unacceptable for an identity that code from a branch can use. Two previews replace it. On pull requests, `bicep-diff.yml`
+takes an offline `bicep snapshot` of `main.bicep` with each `env/*.bicepparam` (fixed placeholders for everything the
+pipeline would supply) for the base branch and for the pull request merged into it, and posts the per-environment diff as
+a job summary and artifact; it has no `azure/login`, no `id-token` permission and no variable, and a test enforces that.
+At deployment, `deploy-environment.yml` runs the real `az deployment group what-if` with the environment's own deploy
+identity immediately before `az deployment group create`, and records resources and property paths (never values: the
+template reads keys with `listKeys()` and what-if payloads can contain them) in the job summary and as an artifact. It runs
+after the environment's approval, so it is a record, not a gate, and a failing preview is reported without stopping the
+deployment, which validates the template itself. The offline diff cannot see live drift; the recorded what-if cannot
+block. The review of an infrastructure change is the pull request.
 
 **Releases (`release.yml`).** A `vMAJOR.MINOR.PATCH` tag on a commit that is on `main` must match the package version
 and have a non-empty `CHANGELOG.md` section. The workflow does not rebuild: it takes the digest and SBOM from the

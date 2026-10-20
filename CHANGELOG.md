@@ -17,8 +17,10 @@ section does not match.
   SBOM, pushes it to the shared registry by digest, tags it (`<git sha>` for `main`, `dryrun-<git sha>` otherwise) only
   after the scan gate passes, deploys `dev` and smoke-tests it, then promotes the same digest to `test` and `prod`
   through GitHub environments with required reviewers. Azure access is OIDC only, with separate build, per-environment
-  deploy and what-if identities whose federated-credential subjects use the repository's immutable-subject prefix.
-- `whatif.yml`: read-only Bicep what-if on pull requests, uploaded as a values-free summary.
+  and deploy identities whose federated-credential subjects use the repository's immutable-subject prefix.
+- `bicep-diff.yml`: an offline diff of what each environment would deploy on pull requests (`bicep snapshot` of the base
+  and the merged pull request, no Azure access, no credentials), and a recorded `az deployment group what-if` in each
+  deploy job, run with the environment's own deploy identity before it deploys.
 - `release.yml`: version-tag releases in a dedicated `release` environment, with notes from this file, the SBOM, the scan
   report and the image digest of the successful CD run of that commit on `main`.
 - `infra/bicep/env/{dev,test,prod}.bicepparam` (production writes disabled) and `scripts/validate-bicep.sh`.
