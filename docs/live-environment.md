@@ -88,6 +88,63 @@ previous 24 hour window (a contracts change alone reads as MET); it now also run
 (2) Since WS1 the refresh collector's error key carries the model id (`semantic-model-refreshes:<id>`); the live test was
 adjusted. (3) The refresh-failure and SLA-breach gaps are as expected until WS7. (4) The notebook failure stays `UNKNOWN`.
 
+## WS7 workspace-monitoring live checks (2026-10-21)
+
+The live checklist of `docs/spikes/workspace-monitoring.md` section 10, run against `prod/ws7-signals-detection` (PR #19, commit
+`3e7c8c0`, not modified). Every query ran as the Viewer-only test principal `fabricops-live-reader` in a separate Azure CLI
+profile (`AZURE_CONFIG_DIR`, removed afterwards); the owner session did setup and clean-up only. Capacity `fabricdemocap2026`
+was Paused at the start: resumed 07:05:05Z, suspend requested 07:41:31Z, Paused confirmed 07:49:29Z.
+
+**Headline.** Workspace monitoring could not be switched on from here, so the steps that need real `SemanticModelLogs` rows
+(0, 5, 9, 10, 12) were **not run**, and the monitoring database was never seen. What does not depend on the monitoring item itself
+was checked against a stand-in: an Eventhouse `fabricops-monitoring-standin` (with its default KQL database) in the Consumer
+workspace, created with `POST /v1/workspaces/{id}/eventhouses`, holding a synthetic `SemanticModelLogs` table written with
+`.set-or-replace` from ten synthetic rows that follow the column list of the spike, section 3 (a failed refresh with its `Error`
+row, a succeeded one, a running one, one DAX query, one non-refresh command). The adapter ran with `database_name` set to the
+stand-in's name. Both the table and the Eventhouse were deleted afterwards. The stand-in proves transport, token audience, the
+query text and the response parser; it proves nothing about the values the real table holds. One adapter defect was found (8c)
+and one discovery risk recorded.
+
+| Step | Result | Evidence (ids and hosts redacted) |
+|---|---|---|
+| 0 Setup: monitoring on, failing and succeeding refresh, pipeline refresh | **BLOCKED** | The only route found is the portal (Workspace settings > Monitoring), which needs the owner's sign-in: the built-in browser is signed out, the Chrome extension is not connected, and no credential may be typed here. The items API accepts `{"type":"Monitoring"}` (undocumented) and created a `Monitoring` item plus an Activator `<item>_Activator` ("Activator (Data Activator) backing a Workspace Monitoring artifact"), but **no Eventhouse and no KQL database appeared in 21 minutes** (07:06 to 07:28Z), while an ordinary `Eventhouse` create through the same API took 16 s. Neither the Fabric nor the Power BI workspace object has a monitoring field; `/workspaces/{id}/monitoring` and `/settings` answer 404. The probe was deleted (07:28:43Z; deleting the `Monitoring` item also removed its Activator). No refresh was run: there is no backfill, so nothing would have been captured. The refresh-failure injector was not used |
+| 1 `GET .../kqlDatabases` | PASS on the stand-in; monitoring database **unverified** | Viewer principal: HTTP 200. Each entry carries `properties.queryServiceUri`, `ingestionServiceUri`, `parentEventhouseItemId` and `databaseType` (`ReadWrite` for a user database), so no per-database GET is needed. `displayName` is the Kusto database name (`db` = display name, hyphens included, answered 200). `items?type=` shows one `Eventhouse` and one `KQLDatabase`, no `Monitoring`. The real monitoring database's `displayName` and `databaseType` are unknown |
+| 2 `/v1/rest/auth/metadata` | PASS | No token needed. `AzureAD.KustoServiceResourceId` = `https://kusto.kusto.windows.net`, so `/.default` equals `PUBLIC_KUSTO_SCOPE`. The query host is `<cluster>.kusto.fabric.microsoft.com`, inside the adapter's trusted `*.fabric.microsoft.com` (the adapter accepted it) |
+| 3 Token | PASS | `az account get-access-token --resource https://kusto.kusto.windows.net` as the principal: issued (`aud` = that resource, application token). The Fabric audience sent to the same endpoint: HTTP 401 |
+| 4 Viewer can query | PASS on the stand-in; monitoring database **unverified** | Viewer-only principal: `print ok=1` HTTP 200 on a KQL database of the workspace, so a Viewer can query a user KQL database. The Contributor-versus-Viewer contradiction in the monitoring documentation is **not settled** for the monitoring database. `SemanticModelLogs \| take 1` before the table existed: see 8c |
+| 5 Raw events, `Status`/`Level` values, `Error` row, ids | **NOT RUN** | Needs real events |
+| 6 Production query body | PASS (shape); real rows unverified | HTTP 200: `request_readonly`, `servertimeout` and `declare query_parameters` (string and long parameters) are accepted. v1 response: four tables, the primary one found by its columns; `datetime` is an ISO string with seven fraction digits, `duration_ms` is `long`; an unfinished refresh has null `ended_at` and empty strings for `status`, `level`, `error_text`, `error_code`. Synthetic data: 3 rows (failed, succeeded, running); the DAX query and the non-refresh command are excluded. Before the table existed the same body gave 400 (8c) |
+| 7 `list_semantic_model_refreshes` | PASS on the stand-in | Returned FAILED (engine text kept, `<oii>` privacy markers stripped, code `-1056`), SUCCEEDED and IN_PROGRESS (no end time); `source == "fabric.workspace-monitoring"`. Request log: `GET .../kqlDatabases` 200 and `POST .../v1/rest/query` 200, nothing else (plus the harness's own workspace list) |
+| 8a Workspace without monitoring | PASS | `[TEST]` (no KQL database): `FabricCapabilityUnavailableError`, `error_code == "WorkspaceMonitoringNotEnabled"`, after a 200 listing with no match |
+| 8b Monitoring on, no query rights | PARTIAL | A principal that is Viewer on the workspace but cannot query needs a second identity (Entra changes are out of scope): not run. A token of the wrong audience gave Kusto HTTP 401 and `FabricAuthError` (2 attempts). The 403 path stays covered by unit tests only |
+| 8c Monitoring on, table absent | **FAIL: defect** | Kusto answers 400 with `error.code` `General_BadRequest` and the generic `error.message` "Request is invalid and cannot be executed."; the text that names the table is only in `error["@message"]`: "Semantic error: 'where' operator: Failed to resolve table or column expression named 'SemanticModelLogs'" (production query). `parse_error_body` keeps `error.message` only, so `_table_missing` never matches and the adapter **raised `FabricError` (HTTP 400) instead of returning `[]`**. With the change below applied in process only, the same call returned `[]` |
+| 9 Ingestion latency | **NOT RUN** | Needs real monitoring |
+| 10 Pipeline-triggered refresh, inside versus before the engine | **NOT RUN** | Needs real monitoring |
+| 11 Running refresh | PASS (synthetic) | A Begin-only operation gave `IN_PROGRESS` with no end time; a real running refresh was not exercised |
+| 12 Fixtures, `docs/security.md` section 11 | **NOT DONE** | The stand-in rows are synthetic, so recording them as `doc_monitoring_*` fixtures would record nothing real; section 11 lives on the PR #19 branch |
+
+**Adapter changes WS7 needs.**
+
+1. `_table_missing` (defect, 8c). Keep Kusto's `@message`: in `parse_error_body`, when `error` has a string `@message`, store a
+   capped, redacted copy in `details["kusto_message"]`; `_table_missing` then tests `f"{error.message} {error.details.get('kusto_message', '')}"`
+   for `semanticmodellogs` and `resolve`. Verified live in process (unpatched: `FabricError`; patched: `[]`). Add a unit test with
+   the JSON body above (`Content-Type: application/json`; the same 400 as plain text carries no table name at all).
+2. Discovery by name (risk). The documentation names a new monitoring item's database `<workspace name> + <monitoring item name> +
+   _Database`, so one `workspace_monitoring_database` value cannot match workspaces with different names, and the legacy default
+   `Monitoring KQL database` may exist nowhere. Settle it from the real `kqlDatabases` list of a portal-enabled workspace (a name
+   pattern, or following the monitoring item to its Eventhouse). Meanwhile put the number of visible KQL databases in the
+   `WorkspaceMonitoringNotEnabled` details, so a name mismatch can be told from monitoring being off.
+3. No change needed for the Kusto scope default, the host check, the `properties` on the list entries, `request_readonly`,
+   `servertimeout`, `declare query_parameters`, the v1 parser and the FAILED, SUCCEEDED and IN_PROGRESS mapping (all verified on the
+   stand-in).
+
+**To finish the live checks (owner action).** Workspace monitoring is still **off** in every sandbox workspace, so there is nothing
+to undo and "leave monitoring on" was not achieved. In the portal, signed in as the owner, open `FabricOps Sandbox Consumer`, Workspace
+settings > Monitoring, add the Eventhouse (workspace admin; capacity Active; the discovery snapshot records the tenant setting
+*Workspace monitoring* as on). Then steps 0, 1, 4 to 7, 8b and 9 to 12 can be run as written. Undo of monitoring, to be confirmed by
+whoever enables it: turn it off on the same page, or `DELETE /v1/workspaces/{id}/items/{monitoringItemId}`; what Fabric does with the
+monitoring Eventhouse of a portal-created item is not verified (in the probe, deleting the `Monitoring` item removed its Activator).
+
 ## Change log
 
 | Date (UTC) | Change | Why | Approved | Undo |
@@ -138,3 +195,7 @@ adjusted. (3) The refresh-failure and SLA-breach gaps are as expected until WS7.
 | 2026-10-20 19:37Z | Owner granted **Storage Blob Data Contributor on the `contracts` container only** of `stevfabricopsdev6ycuq6qn`; uploaded `estate.json` (sandbox contracts, validated, 0 errors; version 2026-10-20T19:37:02Z) | Contracts for rest mode (WS6 §4) | Owner (B1) | Upload the previous blob version; `MSYS_NO_PATHCONV=1 az role assignment delete --assignee <owner object id> --role "Storage Blob Data Contributor" --scope <container scope>` |
 | 2026-10-20 19:50Z | **Dev switched to `rest` mode** (run 39485001993): ready, scheduler leader; discovered the four sandbox workspaces; on its first collection opened and investigated INC-2026-0043 (SCHEMA_DRIFT, PROD), -0044 (UNKNOWN, notebook), -0045 (PIPELINE_TIMEOUT), -0046 (AUTH_FAILURE) within ~1 min, approvals PENDING. Pending `test` promotions cancelled | Autonomous operation against the live tenant (DoD 2, 3) | Owner, in chat | `gh variable delete FABRIC_MODE --repo mjtpena/fabricops-digital-agent --env dev` and redeploy |
 | 2026-10-20 | Alert observation in dev after the live run: `fabricops-dev-collector-errors` (Sev 2) **fired** at 19:59Z on the permanent 403 for semantic-model refresh history (D9: by design) and stays fired; `fabricops-dev-collection-heartbeat` fired and resolved at 12:40Z and 13:20Z during deploy transitions; pausing the capacity at 20:32Z did not stop collection (Fabric metadata/job APIs answer on a paused capacity), so the heartbeat stayed healthy | DoD 6 test fire (partial) | Owner (B7) | n/a |
+| 2026-10-21 07:05Z | Capacity `fabricdemocap2026` **resumed** 07:05:05Z (was Paused; Active 07:05:21Z) and **suspended** (request 07:41:31Z, Paused confirmed 07:49:29Z): 44 minutes, about USD 0.62 at F4's USD 0.84/h; shared with four non-programme workspaces | WS7 workspace-monitoring live checks (results above) | Orchestrator brief (WS7 live task); D8 | `POST .../capacities/fabricdemocap2026/suspend` or `/resume` (api-version 2023-11-01) |
+| 2026-10-21 07:06Z to 07:29Z | Probe in `FabricOps Sandbox Consumer`: `POST /v1/workspaces/{id}/items` with `{"displayName":"fabricops-monitoring-probe","type":"Monitoring"}` created a `Monitoring` item and an Activator `fabricops-monitoring-probe_Activator`; no Eventhouse or KQL database followed in 21 minutes. Read-only look at both (`getDefinition`: `MonitoringProperties.json` holds only a `$schema`). Both deleted 07:28:43Z (the Activator went with the `Monitoring` item) | Turn workspace monitoring on without the portal | Orchestrator brief (items inside sandbox workspaces) | Nothing to undo (deleted) |
+| 2026-10-21 07:32Z to 07:41Z | Stand-in in `FabricOps Sandbox Consumer`: Eventhouse `fabricops-monitoring-standin` and its default KQL database created 07:32:21Z (ready 07:32:37Z); a synthetic `SemanticModelLogs` table (ten synthetic rows, Kusto `.set-or-replace` with the owner token) created about 07:37Z and dropped about 07:39Z; Eventhouse and database deleted 07:40:43Z (`kqlDatabases` empty again 07:41:10Z) | Check the monitoring adapter's transport, token audience, query and parser without a monitoring database (results above) | Orchestrator brief (items inside sandbox workspaces, synthetic data only) | Nothing to undo (deleted) |
+| 2026-10-21 07:34Z to 07:41Z | A separate Azure CLI profile (`AZURE_CONFIG_DIR`) signed in as `fabricops-live-reader` (credentials from `~/.fabricops/live-reader.env`, never printed) ran steps 1 to 8; logged out and the profile directory deleted about 07:41Z. The Viewer role is unchanged; no grant was made or changed | Run the checklist as the Viewer-only principal | Orchestrator brief | Nothing to undo |
