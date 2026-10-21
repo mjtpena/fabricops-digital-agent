@@ -1,0 +1,36 @@
+{
+  "label": "doc_capacity_metrics_forbidden",
+  "description": "Built from the documented schema, not recorded live: executeQueries without dataset Build permission. The status and body are copied from the 403 the same principal received from the refresh-history endpoint (WS5); what executeQueries really answers to a caller without Build is not verified.",
+  "entries": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1.0/myorg/groups/00000000-0000-4000-8000-0000000000a1/datasets/00000000-0000-4000-8000-0000000000a2/executeQueries",
+        "query": {},
+        "json": {
+          "queries": [
+            {
+              "query": "EVALUATE\nTOPN(\n    21000,\n    SUMMARIZECOLUMNS(\n        'TimePoints'[TimePoint],\n        TREATAS({\"00000000-0000-4000-8000-0000000000a0\"}, 'Capacities'[capacityId]),\n        FILTER(ALL('TimePoints'[TimePoint]), 'TimePoints'[TimePoint] >= (DATE(2026, 10, 21) + TIME(12, 0, 0)) && 'TimePoints'[TimePoint] <= (DATE(2026, 10, 21) + TIME(12, 30, 0))),\n        \"CuPercent\", [CU %],\n        \"InteractiveDelayPercent\", [Interactive delay %],\n        \"BackgroundRejectionPercent\", [Background rejection %]\n    ),\n    'TimePoints'[TimePoint], DESC\n)\nORDER BY 'TimePoints'[TimePoint] ASC"
+            }
+          ],
+          "serializerSettings": {
+            "includeNulls": true
+          }
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-0000000000ab"
+        },
+        "json": {
+          "error": {
+            "code": "Unauthorized",
+            "message": "Api accessed by user <eupi>00000000-0000-4000-8000-0000000000aa</eupi> with insufficient privileges. request is unauthorized, identity None."
+          }
+        }
+      }
+    }
+  ]
+}

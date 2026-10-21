@@ -20,7 +20,9 @@ name                                  kind       attributes
 ``collector.duration`` (s)            histogram  collector
 ``collector.runs``                    counter    collector, outcome = ok | error
 ``collector.errors``                  counter    collector (one per failed collector or scope)
-``events.ingested``                   counter    collector (events that were new to the event store)
+``collector.unavailable``             counter    collector (a documented permission gap or a capability the platform
+                                                 does not expose: seen, counted, but not an error)
+``events.ingested``                 counter    collector (events that were new to the event store)
 ``collection.runs``                   counter    outcome = success | degraded | failed | cancelled
 ``collection.heartbeat`` (s, epoch)   gauge      time of the last successful collection (see below)
 ``incidents.opened``                  counter    category, severity, environment
@@ -101,6 +103,11 @@ class Metrics:
         )
         self._collector_errors = meter.create_counter(
             "orqentis.collector.errors", description="Failed collector runs, or failed scopes of a scoped collector"
+        )
+        self._collector_unavailable = meter.create_counter(
+            "orqentis.collector.unavailable",
+            description="Collector runs (or scopes) that could not observe by design: a documented permission gap "
+            "or a capability the platform does not expose. Not an error.",
         )
         self._events_ingested = meter.create_counter(
             "orqentis.events.ingested", description="Events that were new to the event store, by collector"
@@ -207,6 +214,10 @@ class Metrics:
             self._collector_errors.add(errors, attrs)
         if new_events:
             self._events_ingested.add(new_events, attrs)
+
+    def collector_unavailable(self, collector: str) -> None:
+        """A collector (or one of its scopes) could not observe because the deployment does not allow it, by design."""
+        self._collector_unavailable.add(1, {"collector": label(collector)})
 
     def collection_run(self, outcome: str, *, at: datetime | None = None) -> None:
         """Record a finished collection run. ``at`` (when the run succeeded or degraded) advances the heartbeat."""

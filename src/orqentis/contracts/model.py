@@ -6,7 +6,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from orqentis.domain.estate import DataProduct, EnvironmentDeclaration, ExternalSource
+from orqentis.domain.estate import DataProduct, DeltaTableDeclaration, EnvironmentDeclaration, ExternalSource
 from orqentis.domain.sla import SLA
 from orqentis.domain.topology import Dependency
 
@@ -47,6 +47,11 @@ class EstateContracts(BaseModel):
         default_factory=list, description="Lineage and control-flow edges between estate nodes."
     )
     slas: list[SLA] = Field(default_factory=list, description="Availability deadlines of data products.")
+    delta_tables: list[DeltaTableDeclaration] = Field(
+        default_factory=list,
+        description="Delta tables whose _delta_log FabricOps reads to detect schema changes (needs a OneLake "
+        "data access role with Read on exactly these tables).",
+    )
 
     _source_sha256: str | None = PrivateAttr(default=None)
 
@@ -66,4 +71,5 @@ CONTRACT_SECTIONS: tuple[str, ...] = (
     "data_products",
     "dependencies",
     "slas",
+    "delta_tables",
 )

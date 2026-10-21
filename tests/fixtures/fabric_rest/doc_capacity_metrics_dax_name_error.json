@@ -1,0 +1,56 @@
+{
+  "label": "doc_capacity_metrics_dax_name_error",
+  "description": "Built from the documented schema, not recorded live: executeQueries answers HTTP 400 when the DAX names a measure the model no longer has (the app was updated). The body shape (error.pbi.error.details) is the one Microsoft's error handling is known for; the wording of the message is an assumption.",
+  "entries": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1.0/myorg/groups/00000000-0000-4000-8000-0000000000a1/datasets/00000000-0000-4000-8000-0000000000a2/executeQueries",
+        "query": {},
+        "json": {
+          "queries": [
+            {
+              "query": "EVALUATE\nTOPN(\n    21000,\n    SUMMARIZECOLUMNS(\n        'TimePoints'[TimePoint],\n        TREATAS({\"00000000-0000-4000-8000-0000000000a0\"}, 'Capacities'[capacityId]),\n        FILTER(ALL('TimePoints'[TimePoint]), 'TimePoints'[TimePoint] >= (DATE(2026, 10, 21) + TIME(12, 0, 0)) && 'TimePoints'[TimePoint] <= (DATE(2026, 10, 21) + TIME(12, 30, 0))),\n        \"CuPercent\", [CU %],\n        \"InteractiveDelayPercent\", [Interactive delay %],\n        \"BackgroundRejectionPercent\", [Background rejection %]\n    ),\n    'TimePoints'[TimePoint], DESC\n)\nORDER BY 'TimePoints'[TimePoint] ASC"
+            }
+          ],
+          "serializerSettings": {
+            "includeNulls": true
+          }
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-0000000000a9"
+        },
+        "json": {
+          "error": {
+            "code": "DatasetExecuteQueriesError",
+            "pbi.error": {
+              "code": "DatasetExecuteQueriesError",
+              "parameters": {},
+              "details": [
+                {
+                  "code": "DetailsMessage",
+                  "detail": {
+                    "type": 1,
+                    "value": "Query (11, 9) Failed to resolve name 'Interactive delay %'. It is not a valid table, variable, or function name."
+                  }
+                },
+                {
+                  "code": "AnalysisServicesErrorCode",
+                  "detail": {
+                    "type": 1,
+                    "value": "-1055784932"
+                  }
+                }
+              ],
+              "exceptionCulprit": 1
+            }
+          }
+        }
+      }
+    }
+  ]
+}

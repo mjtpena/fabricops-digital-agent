@@ -73,6 +73,7 @@ Attribute values are bounded: enum members and our own collector, job and tool n
 | `orqentis.collector.duration` (s) | histogram | `collector` | Time one collector took in one run |
 | `orqentis.collector.runs` | counter | `collector`, `outcome` = `ok`/`error` | `error` when the collector, or any of its scopes, raised a Fabric error |
 | `orqentis.collector.errors` | counter | `collector` | Failed collector runs or failed scopes (one per failing pipeline or model) |
+| `orqentis.collector.unavailable` | counter | `collector` | A collector (or scope) that could not observe **by design**: a permission gap the deployment documents (`ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS`) or a capability the platform does not expose. Not an error and never alerts; `/health/ready` lists the collector names under `unavailable` |
 | `orqentis.events.ingested` | counter | `collector` | Events that were new to the event store |
 | `orqentis.collection.runs` | counter | `outcome` = `success`/`degraded`/`failed`/`cancelled` | One per collect + detect run (below) |
 | `orqentis.collection.heartbeat` (s) | gauge | none | Unix time of the last successful collection |

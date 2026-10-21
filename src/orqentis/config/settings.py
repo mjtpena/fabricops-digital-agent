@@ -17,6 +17,10 @@ from orqentis.notifications.urlcheck import UnsafeDestinationError, check_webhoo
 # Token scopes of the public cloud. Sovereign clouds use other resources (see docs/development.md).
 PUBLIC_FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 PUBLIC_POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
+# Azure Storage (OneLake speaks the ADLS Gen2 API) and Kusto/Eventhouse (workspace monitoring). Public cloud values.
+PUBLIC_STORAGE_SCOPE = "https://storage.azure.com/.default"
+PUBLIC_KUSTO_SCOPE = "https://kusto.kusto.windows.net/.default"
+PUBLIC_ONELAKE_BASE_URL = "https://onelake.dfs.fabric.microsoft.com"
 # Azure Database for PostgreSQL (public cloud). Sovereign clouds use another resource (ORQENTIS_POSTGRES_SCOPE).
 PUBLIC_POSTGRES_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
 
@@ -24,6 +28,28 @@ PUBLIC_POSTGRES_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
 class FabricMode(StrEnum):
     MOCK = "mock"
     REST = "rest"
+
+
+class RefreshSource(StrEnum):
+    """Where semantic model refresh outcomes come from (decision D9, ADR-0020)."""
+
+    WORKSPACE_MONITORING = "workspace_monitoring"  # the monitoring Eventhouse of each workspace: needs workspace Viewer
+    POWERBI_API = "powerbi_api"  # the Power BI refresh history: needs dataset Write, which the reader never gets
+    BOTH = "both"
+    NONE = "none"
+
+
+# The collectors that exist, for validating ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS (a typo must not pass silently).
+COLLECTOR_NAMES: tuple[str, ...] = (
+    "pipeline-runs",
+    "notebook-runs",
+    "spark-job-runs",
+    "dataflow-runs",
+    "semantic-model-refreshes",
+    "workspace-monitoring-refreshes",
+    "delta-schema-changes",
+    "capacity-metrics",
+)
 
 
 class ReasonerKind(StrEnum):
@@ -152,6 +178,34 @@ class Settings(BaseSettings):
     # Incremental collection: since (watermark - overlap), never further back than the maximum lookback.
     collection_max_lookback_hours: int = Field(default=168, ge=1, le=24 * 90)
     collection_overlap_minutes: int = Field(default=15, ge=0, le=24 * 60)
+
+    # Signal sources beyond pipelines (ADR-0020). Each reads with the reader identity's proven minimum grants only
+    # (docs/security.md section 11); none can write.
+    # Job instances of notebooks, Spark job definitions and Dataflows (workspace Viewer).
+    collect_item_jobs: bool = True
+    # The _delta_log of the tables declared in the contracts (a OneLake data access role with Read on those tables).
+    collect_schema_changes: bool = True
+    delta_log_max_commits: int = Field(default=50, ge=1, le=1000)
+    delta_log_max_commit_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+    onelake_base_url: str = PUBLIC_ONELAKE_BASE_URL
+    onelake_scope: str = PUBLIC_STORAGE_SCOPE
+    # Semantic model refresh outcomes. Workspace monitoring is the default in rest mode because the reader never gets
+    # dataset Write; mock mode defaults to powerbi_api (the synthetic scenarios replay a Power BI shaped history).
+    refresh_source: RefreshSource = RefreshSource.WORKSPACE_MONITORING
+    workspace_monitoring_database: str = Field(default="Monitoring KQL database", min_length=1, max_length=256)
+    kusto_scope: str = PUBLIC_KUSTO_SCOPE
+    # The Fabric Capacity Metrics app (rest mode): the workspace it is installed in and its semantic model.
+    # Both or neither.
+    capacity_metrics_workspace_id: str | None = Field(default=None, pattern=r"^[0-9a-fA-F-]{36}$")
+    capacity_metrics_dataset_id: str | None = Field(default=None, pattern=r"^[0-9a-fA-F-]{36}$")
+    # Comma-separated collector names for which an HTTP 403 is expected and documented (for example
+    # ``semantic-model-refreshes`` when ORQENTIS_REFRESH_SOURCE includes powerbi_api). Reported as "capability
+    # unavailable", not as a collector error. Any other 401/403 stays an error.
+    expected_forbidden_collectors: str = ""
+    # A breach is declared only if the collector observing the freshness item completed a pass this recently
+    # (0: no check).
+    # Unset: 30 in rest mode, 0 in mock mode (synthetic telemetry has no collector watermarks to be stale).
+    sla_max_telemetry_lag_minutes: int = Field(default=0, ge=0, le=24 * 60)
 
     # Storage (ADR-0008, ADR-0017). ``local``: SQLite files, filesystem evidence and a JSONL audit log under data_dir.
     # ``postgres``: the PostgreSQL system of record and Blob evidence, safe at two or more replicas. Deployed
@@ -350,7 +404,24 @@ class Settings(BaseSettings):
             raise ValueError("must be an absolute path on this host such as /.auth/login/aad")
         return path
 
-    @field_validator("fabric_scope", "powerbi_scope", "postgres_scope")
+    @field_validator("expected_forbidden_collectors")
+    @classmethod
+    def _known_collectors(cls, value: str) -> str:
+        names = [n.strip() for n in value.split(",") if n.strip()]
+        unknown = sorted(set(names) - set(COLLECTOR_NAMES))
+        if unknown:
+            raise ValueError(f"unknown collector(s) {', '.join(unknown)}; known: {', '.join(COLLECTOR_NAMES)}")
+        return ",".join(dict.fromkeys(names))
+
+    @field_validator("onelake_base_url")
+    @classmethod
+    def _valid_onelake_base_url(cls, value: str) -> str:
+        parts = urlsplit(value.strip())
+        if parts.scheme != "https" or not parts.hostname or parts.path.strip("/") or parts.query or parts.fragment:
+            raise ValueError("must be an https origin such as https://onelake.dfs.fabric.microsoft.com")
+        return f"https://{parts.netloc}"
+
+    @field_validator("fabric_scope", "powerbi_scope", "postgres_scope", "kusto_scope", "onelake_scope")
     @classmethod
     def _valid_scope(cls, value: str) -> str:
         scope = value.strip()
@@ -397,6 +468,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ORQENTIS_INVESTIGATION_CLAIM_TTL_SECONDS must be at least three times "
                 "ORQENTIS_INVESTIGATION_POLL_INTERVAL_SECONDS"
+            )
+        if "refresh_source" not in self.model_fields_set:
+            # Synthetic telemetry has no monitoring database: its refresh history is replayed in the Power BI shape.
+            self.refresh_source = (
+                RefreshSource.WORKSPACE_MONITORING if self.fabric_mode is FabricMode.REST else RefreshSource.POWERBI_API
+            )
+        if "sla_max_telemetry_lag_minutes" not in self.model_fields_set:
+            self.sla_max_telemetry_lag_minutes = 30 if self.fabric_mode is FabricMode.REST else 0
+        if (self.capacity_metrics_workspace_id is None) != (self.capacity_metrics_dataset_id is None):
+            raise ValueError(
+                "ORQENTIS_CAPACITY_METRICS_WORKSPACE_ID and ORQENTIS_CAPACITY_METRICS_DATASET_ID go together: "
+                "set both (the Capacity Metrics app is read through that one semantic model) or neither"
             )
         if self.storage_backend is StorageBackend.POSTGRES:
             self._check_postgres()
@@ -499,6 +582,10 @@ class Settings(BaseSettings):
                 "roles. Bind to 127.0.0.1, use ORQENTIS_API_AUTH_MODE=easy_auth, or set "
                 "ORQENTIS_DEV_HEADERS_ALLOW_REMOTE=true for a throwaway local test container."
             )
+
+    @property
+    def expected_forbidden_collector_names(self) -> tuple[str, ...]:
+        return tuple(n for n in self.expected_forbidden_collectors.split(",") if n)
 
     @property
     def read_role_required(self) -> bool:

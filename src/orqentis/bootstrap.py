@@ -21,7 +21,15 @@ from orqentis.agents.rule_based import RuleBasedReasoner
 from orqentis.approvals.provider import ApprovalProvider, LocalApprovalProvider
 from orqentis.approvals.service import ApprovalService
 from orqentis.config.clock import Clock, FixedClock, SystemClock
-from orqentis.config.settings import ClockMode, FabricMode, PostgresAuth, ReasonerKind, Settings, StorageBackend
+from orqentis.config.settings import (
+    ClockMode,
+    FabricMode,
+    PostgresAuth,
+    ReasonerKind,
+    RefreshSource,
+    Settings,
+    StorageBackend,
+)
 from orqentis.contracts import ContractsNotConfiguredError, EstateContracts
 from orqentis.contracts.lineage import LineageScanner
 from orqentis.contracts.source import (
@@ -30,6 +38,7 @@ from orqentis.contracts.source import (
     FileContractsSource,
     load_contracts_from,
 )
+from orqentis.domain.common import ItemType
 from orqentis.domain.incidents import Incident
 from orqentis.fabric.fixtures import ScenarioFixture, load_estate, load_history, load_scenario
 from orqentis.fabric.mock import MockFabricClient
@@ -74,8 +83,11 @@ from orqentis.telemetry.collectors import (
     CapacityCollector,
     Collector,
     IngestionResult,
+    ItemJobCollector,
+    MonitoringRefreshCollector,
     PipelineRunCollector,
     RefreshCollector,
+    SchemaChangeCollector,
     StaticEventCollector,
     TelemetryIngestor,
 )
@@ -611,10 +623,27 @@ async def _build_container(
     )
     investigations = InvestigationService([workflow], incidents, evidence_store, audit, clock)
 
-    collectors: list[Collector] = [PipelineRunCollector(fabric, catalog), RefreshCollector(fabric, catalog)]
+    # Pipelines first: their activity failures are stored before the notebook / refresh failures they caused, which is
+    # what lets detection see that a pipeline incident already covers them (incidents/detection.py, ADR-0020).
+    collectors: list[Collector] = [PipelineRunCollector(fabric, catalog)]
+    if settings.collect_item_jobs:
+        collectors += [
+            ItemJobCollector(fabric, catalog, item_type)
+            for item_type in (ItemType.NOTEBOOK, ItemType.SPARK_JOB_DEFINITION, ItemType.DATAFLOW)
+        ]
+    if settings.refresh_source in (RefreshSource.POWERBI_API, RefreshSource.BOTH):
+        collectors.append(RefreshCollector(fabric, catalog))
+    if settings.refresh_source in (RefreshSource.WORKSPACE_MONITORING, RefreshSource.BOTH):
+        collectors.append(
+            MonitoringRefreshCollector(fabric, catalog, database_name=settings.workspace_monitoring_database)
+        )
+    if settings.collect_schema_changes:
+        collectors.append(SchemaChangeCollector(fabric, catalog, max_commits=settings.delta_log_max_commits))
     if scenario is not None:
-        # Capacity metrics and Delta schema events have no public REST API; in mock mode they are replayed.
+        # Capacity metrics and the scenario's own events are replayed in mock mode.
         collectors += [CapacityCollector(fabric, catalog), StaticEventCollector(scenario.events)]
+    elif settings.capacity_metrics_dataset_id is not None:
+        collectors.append(CapacityCollector(fabric, catalog))  # the Capacity Metrics app, through executeQueries
     ingestor = TelemetryIngestor(
         collectors,
         event_store,
@@ -622,6 +651,7 @@ async def _build_container(
         lookback=timedelta(hours=settings.collection_max_lookback_hours),
         overlap=timedelta(minutes=settings.collection_overlap_minutes),
         metrics=metrics,
+        expected_forbidden=settings.expected_forbidden_collector_names,
     )
     detection = DetectionEngine(incidents, clock, events=event_store)
 
@@ -642,7 +672,18 @@ async def _build_container(
         metrics=metrics,
     )
     sla_sweeper = SLASweeper(
-        catalog, SLAEvaluator(event_store, clock), graph, repository, event_store, detection_runner, clock
+        catalog,
+        SLAEvaluator(event_store, clock),
+        graph,
+        repository,
+        event_store,
+        detection_runner,
+        clock,
+        max_telemetry_lag=(
+            timedelta(minutes=settings.sla_max_telemetry_lag_minutes)
+            if settings.sla_max_telemetry_lag_minutes
+            else None
+        ),
     )
     investigation_timeout = timedelta(seconds=settings.investigation_timeout_seconds)
     investigation_jobs = InvestigationJobRunner(

@@ -46,6 +46,8 @@ class ItemType(StrEnum):
     WAREHOUSE = "Warehouse"
     SEMANTIC_MODEL = "SemanticModel"
     REPORT = "Report"
+    SPARK_JOB_DEFINITION = "SparkJobDefinition"
+    DATAFLOW = "Dataflow"
     # Logical (non-Fabric) nodes: declared by platform teams, not discovered from Fabric.
     DATA_PRODUCT = "DataProduct"
     EXTERNAL_SOURCE = "ExternalSource"

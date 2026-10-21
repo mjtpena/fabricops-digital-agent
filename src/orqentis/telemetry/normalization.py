@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import datetime
 
 from orqentis.domain.common import Environment, ItemType
-from orqentis.domain.estate import Capacity
+from orqentis.domain.delta import SchemaChange
+from orqentis.domain.estate import Capacity, DeltaTableDeclaration
 from orqentis.domain.events import EventSeverity, EventType, OperationalEvent
 from orqentis.domain.runs import ActivityRun, CapacitySnapshot, PipelineRun, Refresh, RunStatus
 from orqentis.observability.redaction import redact_text
+from orqentis.telemetry.delta import clip
 
 CAPACITY_SATURATION_PERCENT = 100.0
 
@@ -105,6 +107,138 @@ def refresh_event(refresh: Refresh, *, display_name: str, environment: Environme
             "status": refresh.status.value,
             "duration_seconds": refresh.duration_seconds,
             "error_message": message,
+        },
+    )
+
+
+# Item types whose job instances are collected next to pipelines (ADR-0020): (succeeded, failed) event types, the noun
+# used in summaries and the prefix of ids and dedupe keys.
+JOB_EVENTS: dict[ItemType, tuple[EventType, EventType, str, str]] = {
+    ItemType.NOTEBOOK: (EventType.NOTEBOOK_RUN_SUCCEEDED, EventType.NOTEBOOK_RUN_FAILED, "Notebook", "notebook-run"),
+    ItemType.SPARK_JOB_DEFINITION: (
+        EventType.SPARK_JOB_SUCCEEDED,
+        EventType.SPARK_JOB_FAILED,
+        "Spark job definition",
+        "spark-job",
+    ),
+    ItemType.DATAFLOW: (
+        EventType.DATAFLOW_REFRESH_SUCCEEDED,
+        EventType.DATAFLOW_REFRESH_FAILED,
+        "Dataflow",
+        "dataflow-refresh",
+    ),
+}
+
+# What Fabric reports as the invoke type of a job a person or a schedule started. Anything else (a pipeline's notebook
+# activity, a notebook calling another) was started by another item, whose own failure is the incident.
+_DIRECT_INVOKE_TYPES = frozenset({"manual", "scheduled"})
+
+
+def launched_by_item(invoke_type: str | None) -> bool:
+    return invoke_type is not None and invoke_type.strip().lower() not in _DIRECT_INVOKE_TYPES
+
+
+def item_job_event(
+    run: PipelineRun, *, item_type: ItemType, display_name: str, environment: Environment
+) -> OperationalEvent:
+    """A finished job instance of a notebook, Spark job definition or Dataflow as an event."""
+    succeeded_type, failed_type, noun, prefix = JOB_EVENTS[item_type]
+    failed = run.status.is_failure
+    message = redact_text(run.failure.message) if run.failure else None
+    return OperationalEvent(
+        event_id=f"evt-{prefix}-{run.id}",
+        event_type=failed_type if failed else succeeded_type,
+        tenant_id=run.tenant_id,
+        workspace_id=run.workspace_id,
+        item_id=run.item_id,
+        item_type=item_type,
+        display_name=display_name,
+        environment=environment,
+        timestamp=_event_time(run.start_time, run.end_time),
+        severity=EventSeverity.ERROR if failed else EventSeverity.INFO,
+        summary=f"{noun} {display_name} run {run.id} {run.status.value}" + (f": {message}" if message else ""),
+        correlation_id=run.id,
+        dedupe_key=f"{prefix}:{run.id}:{run.status.value}",
+        source=run.source,
+        payload={
+            "run_id": run.id,
+            "status": run.status.value,
+            "invoke_type": run.invoke_type,
+            "launched_by_item": launched_by_item(run.invoke_type),
+            "job_type": run.metadata.get("job_type"),
+            "start_time": run.start_time.isoformat() if run.start_time else None,
+            "end_time": run.end_time.isoformat() if run.end_time else None,
+            "duration_seconds": run.duration_seconds,
+            "error_code": run.failure.error_code if run.failure else None,
+            "error_message": message,
+            "root_activity_id": run.correlation_id,
+        },
+    )
+
+
+_MAX_LISTED_COLUMNS = 100
+
+
+def schema_change_event(
+    change: SchemaChange,
+    *,
+    declaration: DeltaTableDeclaration,
+    tenant_id: str,
+    workspace_id: str,
+    lakehouse_name: str,
+    environment: Environment,
+    timestamp: datetime,
+    source: str,
+    user_metadata: str | None = None,
+    truncated: bool = False,
+) -> OperationalEvent:
+    """A schema change of a declared Delta table. Every name in it came from the table's log: untrusted, bounded."""
+    removed = [c.name for c in change.removed][:_MAX_LISTED_COLUMNS]
+    added = [c.name for c in change.added][:_MAX_LISTED_COLUMNS]
+    parts: list[str] = []
+    if change.renames:
+        parts.append("renamed " + ", ".join(f"{r.before} -> {r.after}" for r in change.renames[:10]))
+    if removed:
+        parts.append("removed " + ", ".join(removed[:10]))
+    if added:
+        parts.append("added " + ", ".join(added[:10]))
+    if change.type_changes:
+        parts.append(
+            "type changed " + ", ".join(f"{t.column} ({t.before} -> {t.after})" for t in change.type_changes[:10])
+        )
+    table = change.table
+    return OperationalEvent(
+        event_id=f"evt-schema-{declaration.id}-v{change.to_version}",
+        event_type=EventType.SCHEMA_CHANGED,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        item_id=declaration.item_id,
+        item_type=ItemType.LAKEHOUSE,
+        display_name=lakehouse_name,
+        environment=environment,
+        timestamp=timestamp,
+        severity=EventSeverity.WARNING if change.is_breaking else EventSeverity.INFO,
+        summary=clip(
+            f"Schema change on {lakehouse_name}.{table} (Delta version {change.from_version} -> {change.to_version}): "
+            + "; ".join(parts),
+            600,
+        ),
+        dedupe_key=f"schema:{declaration.item_id}:{declaration.schema_name or ''}:{table}:{change.to_version}",
+        source=source,
+        payload={
+            "table": table,
+            "schema": declaration.schema_name,
+            "previous_version": change.from_version,
+            "current_version": change.to_version,
+            "removed_columns": removed,
+            "added_columns": added,
+            "type_changes": [t.model_dump() for t in change.type_changes[:_MAX_LISTED_COLUMNS]],
+            "renamed_columns": [r.model_dump() for r in change.renames[:_MAX_LISTED_COLUMNS]],
+            "removed_count": len(change.removed),
+            "added_count": len(change.added),
+            "operation": change.operation,
+            "user_metadata": user_metadata,
+            "log_truncated": truncated,
         },
     )
 

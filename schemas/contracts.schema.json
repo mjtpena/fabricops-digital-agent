@@ -75,6 +75,74 @@
       "title": "DataProduct",
       "type": "object"
     },
+    "DeltaTableDeclaration": {
+      "additionalProperties": false,
+      "description": "A Delta table whose ``_delta_log`` FabricOps reads to detect schema changes (ADR-0009, ADR-0020).\n\nThe table lives in the lakehouse ``item_id``. FabricOps reads only the JSON commits of that table's log through the\nOneLake ADLS Gen2 API, with a OneLake data access role that gives ``Read`` on exactly this table (docs/security.md\nsection 11). Declaring a table is how a platform team says \"watch this one\"; nothing is discovered.",
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "item_id": {
+          "description": "The Lakehouse item that holds the table.",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Item Id",
+          "type": "string"
+        },
+        "table": {
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+          "title": "Table",
+          "type": "string"
+        },
+        "schema_name": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The lakehouse schema, for lakehouses with schemas enabled (Tables/<schema>/<table>).",
+          "title": "Schema Name"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "source": {
+          "default": "declared",
+          "title": "Source",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "item_id",
+        "table"
+      ],
+      "title": "DeltaTableDeclaration",
+      "type": "object"
+    },
     "Dependency": {
       "additionalProperties": false,
       "properties": {
@@ -485,6 +553,14 @@
         "$ref": "#/$defs/SLA"
       },
       "title": "Slas",
+      "type": "array"
+    },
+    "delta_tables": {
+      "description": "Delta tables whose _delta_log FabricOps reads to detect schema changes (needs a OneLake data access role with Read on exactly these tables).",
+      "items": {
+        "$ref": "#/$defs/DeltaTableDeclaration"
+      },
+      "title": "Delta Tables",
       "type": "array"
     }
   },

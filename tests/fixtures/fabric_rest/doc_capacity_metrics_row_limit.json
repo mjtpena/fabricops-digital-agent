@@ -1,0 +1,52 @@
+{
+  "label": "doc_capacity_metrics_row_limit",
+  "description": "Built from the documented schema, not recorded live: Microsoft documents that a query over the row limit answers HTTP 200 with limited data and a response error such as 'More than {allowed number} rows in a query result'. Where the error sits (result or table) is not documented; the adapter reads both.",
+  "entries": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1.0/myorg/groups/00000000-0000-4000-8000-0000000000a1/datasets/00000000-0000-4000-8000-0000000000a2/executeQueries",
+        "query": {},
+        "json": {
+          "queries": [
+            {
+              "query": "EVALUATE\nTOPN(\n    21000,\n    SUMMARIZECOLUMNS(\n        'TimePoints'[TimePoint],\n        TREATAS({\"00000000-0000-4000-8000-0000000000a0\"}, 'Capacities'[capacityId]),\n        FILTER(ALL('TimePoints'[TimePoint]), 'TimePoints'[TimePoint] >= (DATE(2026, 10, 21) + TIME(12, 0, 0)) && 'TimePoints'[TimePoint] <= (DATE(2026, 10, 21) + TIME(12, 30, 0))),\n        \"CuPercent\", [CU %],\n        \"InteractiveDelayPercent\", [Interactive delay %],\n        \"BackgroundRejectionPercent\", [Background rejection %]\n    ),\n    'TimePoints'[TimePoint], DESC\n)\nORDER BY 'TimePoints'[TimePoint] ASC"
+            }
+          ],
+          "serializerSettings": {
+            "includeNulls": true
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-0000000000ac"
+        },
+        "json": {
+          "results": [
+            {
+              "error": {
+                "code": "DatasetExecuteQueriesError",
+                "message": "More than 100000 rows in a query result"
+              },
+              "tables": [
+                {
+                  "rows": [
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:00:30",
+                      "[CuPercent]": 58.1,
+                      "[InteractiveDelayPercent]": 0.0,
+                      "[BackgroundRejectionPercent]": 0.0
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

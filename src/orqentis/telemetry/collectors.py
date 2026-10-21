@@ -3,26 +3,32 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from orqentis.config.clock import Clock
-from orqentis.domain.common import ItemType
+from orqentis.domain.common import Environment, ItemType
+from orqentis.domain.delta import DeltaCommitRef, DeltaTableRef
+from orqentis.domain.estate import GenericItem
 from orqentis.domain.events import OperationalEvent
 from orqentis.domain.runs import RunStatus
-from orqentis.fabric.errors import FabricError
+from orqentis.fabric.errors import FabricAuthError, FabricCapabilityUnavailableError, FabricError
 from orqentis.fabric.ports import FabricClient
 from orqentis.observability.logging import get_logger
 from orqentis.observability.metrics import DISABLED, Metrics
 from orqentis.storage.event_store import COLLECTOR_SCOPE, EventStore
+from orqentis.telemetry.delta import ParsedCommit, SchemaSnapshot, parse_commit, schema_change
 from orqentis.telemetry.normalization import (
+    JOB_EVENTS,
     activity_failure_event,
     capacity_events,
     is_reportable,
+    item_job_event,
     pipeline_run_event,
     refresh_event,
+    schema_change_event,
 )
 from orqentis.topology.catalog import EstateCatalog
 
@@ -123,6 +129,201 @@ class RefreshCollector:
         return events
 
 
+class ItemJobCollector:
+    """Job instances of notebooks, Spark job definitions or Dataflows (one collector per item type, ADR-0020).
+
+    Same shape as :class:`PipelineRunCollector` without the activity runs: per-item watermarks, ``since`` filtering
+    after reading, and only finished runs.
+    """
+
+    COLLECTOR_NAMES = {
+        ItemType.NOTEBOOK: "notebook-runs",
+        ItemType.SPARK_JOB_DEFINITION: "spark-job-runs",
+        ItemType.DATAFLOW: "dataflow-runs",
+    }
+
+    def __init__(self, fabric: FabricClient, catalog: EstateCatalog, item_type: ItemType) -> None:
+        if item_type not in JOB_EVENTS:
+            raise ValueError(f"no job collector for {item_type.value} items")
+        self._fabric = fabric
+        self._catalog = catalog
+        self._item_type = item_type
+        self.name = self.COLLECTOR_NAMES[item_type]
+
+    def scopes(self) -> list[str]:
+        return [i.id for i in self._catalog.items.values() if i.item_type is self._item_type]
+
+    async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]:
+        item = self._catalog.items.get(scope)
+        if item is None or item.item_type is not self._item_type:
+            return []  # removed from the estate since the scopes were listed
+        runs = await self._fabric.jobs.list_job_instances(
+            item.workspace_id, item.id, limit=_JOB_INSTANCE_LIMIT, since=since
+        )
+        events: list[OperationalEvent] = []
+        for run in runs:
+            when = run.end_time or run.start_time
+            if not is_reportable(run.status) or when is None or not since <= when <= until:
+                continue
+            events.append(
+                item_job_event(
+                    run, item_type=self._item_type, display_name=item.display_name, environment=item.environment
+                )
+            )
+        return events
+
+    async def collect(self, *, since: datetime, until: datetime) -> list[OperationalEvent]:
+        events: list[OperationalEvent] = []
+        for scope in self.scopes():
+            events.extend(await self.collect_scope(scope, since=since, until=until))
+        return events
+
+
+class MonitoringRefreshCollector:
+    """Semantic model refresh outcomes from Fabric workspace monitoring (decision D9, ADR-0020).
+
+    One scope per workspace that has a monitoring database in the catalog, so a workspace without monitoring costs no
+    call. A workspace whose monitoring turns out to be unreadable is reported as *capability unavailable*, not as an
+    error.
+    """
+
+    name = "workspace-monitoring-refreshes"
+
+    def __init__(self, fabric: FabricClient, catalog: EstateCatalog, *, database_name: str) -> None:
+        self._fabric = fabric
+        self._catalog = catalog
+        self._database_name = database_name.strip().lower()
+
+    def scopes(self) -> list[str]:
+        return sorted(
+            {
+                i.workspace_id
+                for i in self._catalog.items.values()
+                if isinstance(i, GenericItem)
+                and i.fabric_type == "KQLDatabase"
+                and i.display_name.strip().lower() == self._database_name
+            }
+        )
+
+    async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]:
+        workspace = self._catalog.workspaces.get(scope)
+        fallback = workspace.environment if workspace else Environment.UNKNOWN
+        events: list[OperationalEvent] = []
+        for refresh in await self._fabric.monitoring.list_semantic_model_refreshes(scope, since=since, until=until):
+            when = refresh.end_time or refresh.start_time
+            if not is_reportable(refresh.status) or when is None or not since <= when <= until:
+                continue
+            model = self._catalog.items.get(refresh.item_id)
+            events.append(
+                refresh_event(
+                    refresh,
+                    display_name=model.display_name if model else refresh.item_id,
+                    environment=model.environment if model else fallback,
+                )
+            )
+        return events
+
+    async def collect(self, *, since: datetime, until: datetime) -> list[OperationalEvent]:
+        events: list[OperationalEvent] = []
+        for scope in self.scopes():
+            events.extend(await self.collect_scope(scope, since=since, until=until))
+        return events
+
+
+class SchemaChangeCollector:
+    """Schema changes of the Delta tables declared in the contracts, read from their ``_delta_log`` (ADR-0009).
+
+    One scope per declared table. A scope reads the JSON commits written since the watermark and compares each schema
+    it finds with the one before it; the first commit read has no predecessor in the window, so a few older commits
+    are read to find one. Only a difference in the columns or their types produces an event: re-written but identical
+    schemas (a table property changed, an overwrite with the same columns) produce nothing.
+    """
+
+    name = "delta-schema-changes"
+    SOURCE = "orqentis.collectors.delta-log"
+
+    def __init__(
+        self, fabric: FabricClient, catalog: EstateCatalog, *, max_commits: int = 50, max_backscan: int = 20
+    ) -> None:
+        if max_commits < 1 or max_backscan < 0:
+            raise ValueError("max_commits must be >= 1 and max_backscan >= 0")
+        self._fabric = fabric
+        self._catalog = catalog
+        self._max_commits = max_commits
+        self._max_backscan = max_backscan
+
+    def scopes(self) -> list[str]:
+        return sorted(
+            t.id
+            for t in self._catalog.delta_tables.values()
+            if (item := self._catalog.items.get(t.item_id)) is not None and item.item_type is ItemType.LAKEHOUSE
+        )
+
+    async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]:
+        declaration = self._catalog.delta_tables.get(scope)
+        lakehouse = self._catalog.items.get(declaration.item_id) if declaration else None
+        if declaration is None or lakehouse is None:
+            return []
+        table = DeltaTableRef(
+            id=declaration.id,
+            item_id=declaration.item_id,
+            workspace_id=lakehouse.workspace_id,
+            table=declaration.table,
+            schema_name=declaration.schema_name,
+        )
+        commits = await self._fabric.delta_logs.list_commits(table)
+        fresh = [c for c in commits if c.modified_at is None or c.modified_at >= since][-self._max_commits :]
+        if not fresh:
+            return []
+        previous = await self._baseline(table, [c for c in commits if c.version < fresh[0].version])
+        events: list[OperationalEvent] = []
+        for ref in fresh:
+            parsed = parse_commit(await self._fabric.delta_logs.read_commit(table, ref.version))
+            if parsed.schema is None:
+                continue
+            if previous is not None:
+                change = schema_change(declaration.table, previous, (ref.version, parsed.schema), parsed)
+                if change is not None:
+                    when = parsed.committed_at or ref.modified_at or until
+                    events.append(
+                        schema_change_event(
+                            change,
+                            declaration=declaration,
+                            tenant_id=lakehouse.tenant_id,
+                            workspace_id=lakehouse.workspace_id,
+                            lakehouse_name=lakehouse.display_name,
+                            environment=lakehouse.environment,
+                            timestamp=min(when, until),
+                            source=self.SOURCE,
+                            user_metadata=parsed.user_metadata,
+                            truncated=parsed.truncated,
+                        )
+                    )
+            previous = (ref.version, parsed.schema)
+        return events
+
+    async def _baseline(
+        self, table: DeltaTableRef, earlier: Sequence[DeltaCommitRef]
+    ) -> tuple[int, SchemaSnapshot] | None:
+        """The schema in force before the first commit read: the newest earlier commit that carries one."""
+        candidates = earlier[-self._max_backscan :] if self._max_backscan else []
+        for ref in reversed(candidates):
+            parsed: ParsedCommit = parse_commit(await self._fabric.delta_logs.read_commit(table, ref.version))
+            if parsed.schema is not None:
+                return ref.version, parsed.schema
+        return None
+
+    async def collect(self, *, since: datetime, until: datetime) -> list[OperationalEvent]:
+        events: list[OperationalEvent] = []
+        for scope in self.scopes():
+            events.extend(await self.collect_scope(scope, since=since, until=until))
+        return events
+
+
+# The Capacity Metrics model has 30 second timepoints; a day of 10 minute buckets is plenty of context and bounded.
+_CAPACITY_MAX_LOOKBACK = timedelta(hours=24)
+
+
 class CapacityCollector:
     name = "capacity-metrics"
 
@@ -138,7 +339,8 @@ class CapacityCollector:
         if capacity is None:
             return []
         events: list[OperationalEvent] = []
-        for snapshot in await self._fabric.capacities.get_capacity_metrics(capacity.id, start=since, end=until):
+        start = max(since, until - _CAPACITY_MAX_LOOKBACK)
+        for snapshot in await self._fabric.capacities.get_capacity_metrics(capacity.id, start=start, end=until):
             events.extend(capacity_events(snapshot, capacity))
         return events
 
@@ -166,10 +368,15 @@ class IngestionResult:
     new_events: list[OperationalEvent] = field(default_factory=list)
     collected: int = 0
     errors: dict[str, str] = field(default_factory=dict)
+    # Collectors (or scopes) that cannot observe what they are meant to because the deployment does not give them the
+    # means, by design: a documented, configured permission gap, or a capability the platform does not expose. Not a
+    # failure: nothing is retried differently and nothing alerts, but it is visible (metric, readiness, API).
+    unavailable: dict[str, str] = field(default_factory=dict)
     # Units of work: a whole collector, or one scope of a scoped collector. ``Metrics`` and ``CollectionService`` use
     # the split to tell "some failed" (degraded) from "everything failed" (blind).
     units_ok: int = 0
     units_failed: int = 0
+    units_unavailable: int = 0
     # The (since, until) window each collector (or, for scoped collectors, each ``collector:scope``) was asked for;
     # ones that failed are listed too.
     windows: dict[str, tuple[datetime, datetime]] = field(default_factory=dict)
@@ -203,6 +410,7 @@ class TelemetryIngestor:
         lookback: timedelta = timedelta(days=7),
         overlap: timedelta = timedelta(minutes=15),
         metrics: Metrics = DISABLED,
+        expected_forbidden: Collection[str] = (),
     ) -> None:
         if lookback <= timedelta(0):
             raise ValueError("lookback must be positive")
@@ -214,6 +422,17 @@ class TelemetryIngestor:
         self._lookback = lookback
         self._overlap = overlap
         self._metrics = metrics
+        # Collectors whose HTTP 403 the deployment expects and documents (ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS):
+        # for these a 403 is "capability unavailable". Any other 401/403 stays an error.
+        self._expected_forbidden = frozenset(expected_forbidden)
+
+    def _unavailable_reason(self, collector: str, exc: FabricError) -> str | None:
+        """Why this failure is a known capability gap rather than a fault, or ``None`` when it is a fault."""
+        if isinstance(exc, FabricCapabilityUnavailableError):
+            return exc.message
+        if isinstance(exc, FabricAuthError) and exc.status_code == 403 and collector in self._expected_forbidden:
+            return f"forbidden (HTTP 403), which this deployment expects for {collector}: {exc.message}"
+        return None
 
     def _window_start(self, watermark: datetime | None, until: datetime, label: str) -> tuple[datetime, bool]:
         """``(since, clock_repair_needed)`` for one watermark."""
@@ -254,6 +473,12 @@ class TelemetryIngestor:
     def _seconds_since(self, started: datetime) -> float:
         return (self._clock.now() - started).total_seconds()
 
+    def _note_unavailable(self, result: IngestionResult, collector: str, label: str, reason: str) -> None:
+        result.unavailable[label] = reason
+        result.units_unavailable += 1
+        self._metrics.collector_unavailable(collector)
+        _log.info("collector capability unavailable", extra={"collector": label, "reason": reason})
+
     async def _run_whole(self, collector: Collector, until: datetime, result: IngestionResult) -> None:
         started = self._clock.now()
         watermarks = await self._event_store.get_watermarks(collector.name)
@@ -262,6 +487,9 @@ class TelemetryIngestor:
         try:
             events = await collector.collect(since=since, until=until)
         except FabricError as exc:
+            if (reason := self._unavailable_reason(collector.name, exc)) is not None:
+                self._note_unavailable(result, collector.name, collector.name, reason)
+                return
             # One failing collector must not blind the others, and its watermark stays where it was.
             result.errors[collector.name] = exc.message
             result.units_failed += 1
@@ -293,6 +521,9 @@ class TelemetryIngestor:
                 try:
                     events = await collector.collect_scope(scope, since=since, until=until)
                 except FabricError as exc:
+                    if (reason := self._unavailable_reason(collector.name, exc)) is not None:
+                        self._note_unavailable(result, collector.name, label, reason)
+                        continue
                     result.errors[label] = exc.message
                     result.units_failed += 1
                     failed_scopes += 1

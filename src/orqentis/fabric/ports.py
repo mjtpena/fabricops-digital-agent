@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from orqentis.domain.actions import Action
 from orqentis.domain.approvals import ApprovalRequest
 from orqentis.domain.common import ItemType
+from orqentis.domain.delta import DeltaCommitFile, DeltaCommitRef, DeltaTableRef
 from orqentis.domain.deployment import DeploymentState
 from orqentis.domain.estate import Capacity, FabricItem, Workspace
 from orqentis.domain.runs import ActivityRun, CapacitySnapshot, PipelineRun, Refresh
@@ -63,6 +64,36 @@ class CapacityService(Protocol):
     ) -> list[CapacitySnapshot]: ...
 
 
+class MonitoringService(Protocol):
+    """Item logs from Fabric *workspace monitoring* (the monitoring Eventhouse of a workspace), read-only.
+
+    The source of semantic model refresh outcomes when the Power BI refresh history is unavailable to the reader
+    (it needs dataset Write; docs/security.md section 11, ADR-0020).
+    """
+
+    async def list_semantic_model_refreshes(
+        self, workspace_id: str, *, since: datetime, until: datetime
+    ) -> list[Refresh]:
+        """Refreshes that ended (or, if unfinished, started) in ``[since, until]``, newest first.
+
+        Raises :class:`~orqentis.fabric.errors.FabricCapabilityUnavailableError` when the workspace has no readable
+        monitoring database (monitoring not enabled, or not visible to the reader).
+        """
+        ...
+
+
+class DeltaLogService(Protocol):
+    """Read-only access to a declared Delta table's ``_delta_log`` (OneLake ADLS Gen2 API)."""
+
+    async def list_commits(self, table: DeltaTableRef) -> list[DeltaCommitRef]:
+        """The JSON commit files in the table's log, by ascending version (checkpoints are not commits)."""
+        ...
+
+    async def read_commit(self, table: DeltaTableRef, version: int) -> DeltaCommitFile:
+        """The ``metaData`` / ``commitInfo`` / ``protocol`` action lines of one commit, size-capped."""
+        ...
+
+
 class DeploymentService(Protocol):
     async def get_deployment_states(self, item_id: str) -> list[DeploymentState]:
         """Deployment state of the logical item behind ``item_id`` in every stage."""
@@ -96,6 +127,12 @@ class FabricClient(Protocol):
 
     @property
     def deployments(self) -> DeploymentService: ...
+
+    @property
+    def monitoring(self) -> MonitoringService: ...
+
+    @property
+    def delta_logs(self) -> DeltaLogService: ...
 
     @property
     def dependencies(self) -> DependencyService: ...

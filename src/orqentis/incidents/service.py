@@ -51,6 +51,9 @@ class IncidentCandidate(BaseModel):
     rule_id: str
     trigger_event_id: str
     symptoms: list[Symptom] = Field(default_factory=list)
+    # Set by rules for failures that a pipeline usually explains: when a failed pipeline activity that targets this item
+    # was recorded at about the same time, that pipeline's incident already covers the failure and none is opened.
+    covered_by_activity_target: str | None = None
 
 
 class IncidentService:

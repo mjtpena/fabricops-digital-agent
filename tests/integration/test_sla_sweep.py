@@ -114,11 +114,18 @@ async def test_a_detection_rule_can_open_incidents_from_the_recorded_sla_events(
     assert again == []  # each breach is seen once
 
 
-async def test_the_default_rules_ignore_sla_events(container: Container) -> None:
+async def test_the_default_rules_open_one_incident_per_breached_sla(container: Container) -> None:
+    """WS1 recorded SLA states and deliberately opened nothing; the default SLA rule (WS7) opens one per breach."""
     clock = container.clock
     assert isinstance(clock, FixedClock)
+    _, none_yet = await container.sla_sweeper.sweep()
+    assert none_yet == []  # nothing is breached yet: only ON_TRACK / MET events are recorded
     clock.advance(timedelta(hours=1))
-    before = len(await container.incidents.repository.list())
     _, created = await container.sla_sweeper.sweep()
-    assert created == [] and len(await container.incidents.repository.list()) == before
-    assert len(await sla_events(container)) >= 1
+    breached = {e.payload["sla_id"] for e in await sla_events(container) if e.payload["state"] == "BREACHED"}
+    assert len(created) == len(breached) >= 1
+    assert {i.category for i in created} == {IncidentCategory.SLA_BREACH}
+    assert {i.metadata["detection_rule"] for i in created} == {"DET-SLA-BREACHED"}
+    assert {i.correlation_id for i in created} == {f"sla:{sla_id}:2026-10-05" for sla_id in breached}
+    _, again = await container.sla_sweeper.sweep()
+    assert again == []  # each breach is seen once

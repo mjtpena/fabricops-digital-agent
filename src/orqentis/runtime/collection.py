@@ -44,10 +44,20 @@ class CollectionService:
         self._metrics = metrics
         self._clock = clock or SystemClock()
         self._lock = asyncio.Lock()
+        self._unavailable: dict[str, str] = {}
 
     @property
     def running(self) -> bool:
         return self._lock.locked()
+
+    @property
+    def unavailable(self) -> list[str]:
+        """Collectors that, in the last run, could not observe by design (a documented permission gap, no capability).
+
+        Names of our own collectors only (never a scope or a message), so the unauthenticated readiness probe may
+        show them.
+        """
+        return sorted({label.split(":", 1)[0] for label in self._unavailable})
 
     async def run(self) -> tuple[IngestionResult, list[Incident]]:
         async with self._lock:
@@ -69,6 +79,7 @@ class CollectionService:
             except BaseException as exc:
                 self._metrics.collection_run("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed")
                 raise
+            self._unavailable = dict(ingestion.unavailable)
             self._metrics.collection_run(self._outcome(ingestion), at=self._clock.now())
             return ingestion, created
 

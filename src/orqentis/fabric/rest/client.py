@@ -17,19 +17,19 @@ import inspect
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote
 
 import httpx
 
 from orqentis.config.clock import Clock, SystemClock
-from orqentis.config.settings import Settings
+from orqentis.config.settings import PUBLIC_KUSTO_SCOPE, PUBLIC_ONELAKE_BASE_URL, PUBLIC_STORAGE_SCOPE, Settings
 from orqentis.contracts.model import EstateContracts
 from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.deployment import DeploymentState
 from orqentis.domain.estate import (
     Capacity,
+    Dataflow,
     FabricItem,
     GenericItem,
     Lakehouse,
@@ -37,6 +37,7 @@ from orqentis.domain.estate import (
     Pipeline,
     Report,
     SemanticModel,
+    SparkJobDefinition,
     Warehouse,
     Workspace,
 )
@@ -51,7 +52,14 @@ from orqentis.fabric.errors import (
 from orqentis.fabric.ports import FabricClient
 from orqentis.fabric.rest.auth import FABRIC_SCOPE, POWERBI_SCOPE, TokenProvider
 from orqentis.fabric.rest.budget import FabricCallBudget
+from orqentis.fabric.rest.capacity_metrics import CapacityMetricsReader
 from orqentis.fabric.rest.http import FabricHttp, JsonObject, strip_privacy_tags
+from orqentis.fabric.rest.monitoring import RestMonitoringService
+from orqentis.fabric.rest.onelake import DEFAULT_MAX_COMMIT_BYTES, RestDeltaLogService
+from orqentis.fabric.rest.util import clean as _clean
+from orqentis.fabric.rest.util import iso as _iso
+from orqentis.fabric.rest.util import parse_datetime
+from orqentis.fabric.rest.util import segment as _segment
 from orqentis.observability.logging import get_logger
 from orqentis.topology.environment import (
     EnvironmentChange,
@@ -95,12 +103,21 @@ _REFRESH_STATUS = {
     "Cancelled": RunStatus.CANCELLED,
     "Disabled": RunStatus.CANCELLED,
 }
-_JOB_ITEM_TYPES = {"Pipeline": ItemType.DATA_PIPELINE, "RunNotebook": ItemType.NOTEBOOK}
+# Fabric job types by item (lower case: the API's casing is not documented to be stable).
+# "Refresh" is a Dataflow refresh.
+_JOB_ITEM_TYPES = {
+    "pipeline": ItemType.DATA_PIPELINE,
+    "runnotebook": ItemType.NOTEBOOK,
+    "sparkjob": ItemType.SPARK_JOB_DEFINITION,
+    "refresh": ItemType.DATAFLOW,
+}
 
-_ItemClass = type[Pipeline | Notebook | Lakehouse | Warehouse | SemanticModel | Report]
+_ItemClass = type[Pipeline | Notebook | SparkJobDefinition | Dataflow | Lakehouse | Warehouse | SemanticModel | Report]
 _ITEM_CLASSES: dict[str, _ItemClass] = {
     ItemType.DATA_PIPELINE.value: Pipeline,
     ItemType.NOTEBOOK.value: Notebook,
+    ItemType.SPARK_JOB_DEFINITION.value: SparkJobDefinition,
+    ItemType.DATAFLOW.value: Dataflow,
     ItemType.LAKEHOUSE.value: Lakehouse,
     ItemType.WAREHOUSE.value: Warehouse,
     ItemType.SEMANTIC_MODEL.value: SemanticModel,
@@ -115,32 +132,6 @@ _MAX_ACTIVITY_PAGES = 50
 
 
 # ----------------------------------------------------------------------------------------- helpers
-def parse_datetime(value: Any) -> datetime | None:
-    """Fabric/Power BI timestamps (``Z`` suffix, 7 fractional digits, or naive UTC) as aware UTC datetimes."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.strip())
-    except ValueError:
-        return None
-    if parsed.year <= 1:  # .NET DateTime.MinValue placeholder for "not set"
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
-def _iso(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
-def _clean(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
 def _required(raw: JsonObject, key: str, what: str) -> str:
     value = _clean(raw.get(key))
     if value is None:
@@ -237,12 +228,6 @@ def _item_type(fabric_type: str | None) -> ItemType:
     if fabric_type in _ITEM_CLASSES:
         return ItemType(fabric_type)
     return ItemType.OTHER
-
-
-def _segment(value: str) -> str:
-    if not value or value in (".", ".."):
-        raise FabricError(f"Invalid Fabric identifier {value!r}", error_code="InvalidIdentifier")
-    return quote(value, safe="")
 
 
 EnvironmentObserver = Callable[[EnvironmentChange], Awaitable[None]]
@@ -408,7 +393,7 @@ class RestJobService:
             tenant_id=self._ctx.tenant_id,
             workspace_id=workspace_id,
             item_id=run_item_id,
-            item_type=_JOB_ITEM_TYPES.get(job_type or "Pipeline", ItemType.OTHER),
+            item_type=_JOB_ITEM_TYPES.get((job_type or "Pipeline").lower(), ItemType.OTHER),
             # The item's own environment: its workspace's, unless an item_id declaration says otherwise.
             environment=self._ctx.environments.item(run_item_id, self._workspaces.known_environment(workspace_id)),
             status=_status(fabric_status, _JOB_STATUS),
@@ -564,8 +549,9 @@ class RestSemanticModelService:
 
 
 class RestCapacityService:
-    def __init__(self, ctx: _Context) -> None:
+    def __init__(self, ctx: _Context, metrics: CapacityMetricsReader | None = None) -> None:
         self._ctx = ctx
+        self._metrics = metrics
 
     async def list_capacities(self) -> list[Capacity]:
         capacities: list[Capacity] = []
@@ -595,9 +581,13 @@ class RestCapacityService:
         return capacities
 
     async def get_capacity_metrics(self, capacity_id: str, *, start: datetime, end: datetime) -> list[CapacitySnapshot]:
+        if self._metrics is not None:
+            return await self._metrics.get_capacity_metrics(capacity_id, start=start, end=end)
         raise FabricCapabilityUnavailableError(
-            "Capacity CU utilisation is not exposed by any public Fabric REST API. Ingest the Fabric "
-            "Capacity Metrics data into the Eventhouse event store and query it from there instead.",
+            "Capacity CU utilisation is not exposed by any public Fabric REST API. Configure the Capacity Metrics "
+            "app's workspace and semantic model (ORQENTIS_CAPACITY_METRICS_WORKSPACE_ID and "
+            "ORQENTIS_CAPACITY_METRICS_DATASET_ID) to read it through executeQueries, or ingest the capacity "
+            "events into an Eventhouse (the ADR-0009 fallback).",
             error_code="CapacityMetricsUnavailable",
             details={"capacity_id": capacity_id, "start": start.isoformat(), "end": end.isoformat()},
         )
@@ -793,6 +783,13 @@ class RestFabricClient:
         clock: Clock | None = None,
         budget: FabricCallBudget | None = None,
         job_instances_max_pages: int = 10,
+        onelake_base_url: str = PUBLIC_ONELAKE_BASE_URL,
+        onelake_scope: str = PUBLIC_STORAGE_SCOPE,
+        delta_log_max_commit_bytes: int = DEFAULT_MAX_COMMIT_BYTES,
+        monitoring_database_name: str = "Monitoring KQL database",
+        kusto_scope: str = PUBLIC_KUSTO_SCOPE,
+        capacity_metrics_workspace_id: str | None = None,
+        capacity_metrics_dataset_id: str | None = None,
     ) -> None:
         self._token_provider = token_provider
         self._http = FabricHttp(
@@ -806,7 +803,27 @@ class RestFabricClient:
         self._jobs = RestJobService(ctx, self._workspaces, max_pages=job_instances_max_pages)
         self._pipelines = RestPipelineService(ctx, self._jobs, clock or SystemClock())
         self._semantic_models = RestSemanticModelService(ctx)
-        self._capacities = RestCapacityService(ctx)
+        metrics = (
+            CapacityMetricsReader(
+                self._http,
+                powerbi_base_url=powerbi_base_url,
+                workspace_id=capacity_metrics_workspace_id,
+                dataset_id=capacity_metrics_dataset_id,
+            )
+            if capacity_metrics_workspace_id and capacity_metrics_dataset_id
+            else None
+        )
+        self._capacities = RestCapacityService(ctx, metrics)
+        self._monitoring = RestMonitoringService(
+            self._http,
+            fabric_base_url=fabric_base_url,
+            tenant_id=tenant_id,
+            database_name=monitoring_database_name,
+            kusto_scope=kusto_scope,
+        )
+        self._delta_logs = RestDeltaLogService(
+            self._http, base_url=onelake_base_url, scope=onelake_scope, max_commit_bytes=delta_log_max_commit_bytes
+        )
         self._deployments = RestDeploymentService(ctx)
         self._dependencies = DeclaredDependencyService(contracts)
 
@@ -828,6 +845,13 @@ class RestFabricClient:
                 burst=settings.fabric_rate_burst,
             ),
             job_instances_max_pages=settings.fabric_job_instances_max_pages,
+            onelake_base_url=settings.onelake_base_url,
+            onelake_scope=settings.onelake_scope,
+            delta_log_max_commit_bytes=settings.delta_log_max_commit_bytes,
+            monitoring_database_name=settings.workspace_monitoring_database,
+            kusto_scope=settings.kusto_scope,
+            capacity_metrics_workspace_id=settings.capacity_metrics_workspace_id,
+            capacity_metrics_dataset_id=settings.capacity_metrics_dataset_id,
         )
 
     @property
@@ -861,6 +885,14 @@ class RestFabricClient:
     @property
     def dependencies(self) -> DeclaredDependencyService:
         return self._dependencies
+
+    @property
+    def monitoring(self) -> RestMonitoringService:
+        return self._monitoring
+
+    @property
+    def delta_logs(self) -> RestDeltaLogService:
+        return self._delta_logs
 
     def apply_contracts(self, contracts: EstateContracts) -> None:
         """Adopt reloaded contracts: declared environments and declared dependencies (the next listing uses them)."""

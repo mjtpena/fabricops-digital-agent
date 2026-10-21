@@ -217,8 +217,12 @@ class FabricHttp:
         scope: str,
         params: QueryParams | None = None,
         json: Any = None,
+        headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        """Send one logical request (with retries). Returns a 2xx response or raises a FabricError."""
+        """Send one logical request (with retries). Returns a 2xx response or raises a FabricError.
+
+        ``headers`` adds to (or, for ``Accept``, replaces) the defaults; it can never replace ``Authorization``.
+        """
         method = method.upper()
         correlation_id = str(uuid4())
         parts = urlsplit(url)
@@ -227,12 +231,18 @@ class FabricHttp:
         while True:
             attempt += 1
             token = await self._tokens.get_token(scope)
-            headers = {"Authorization": f"Bearer {token}", CLIENT_REQUEST_ID_HEADER: correlation_id}
+            request_headers = {
+                **(headers or {}),
+                "Authorization": f"Bearer {token}",
+                CLIENT_REQUEST_ID_HEADER: correlation_id,
+            }
             started = time.perf_counter()
             try:
                 # The budget covers the network round trip only: backoff sleeps below never hold a slot.
                 async with self._budget.slot() if self._budget else contextlib.nullcontext():
-                    response = await self._client.request(method, url, params=params, json=json, headers=headers)
+                    response = await self._client.request(
+                        method, url, params=params, json=json, headers=request_headers
+                    )
             except httpx.TransportError as exc:
                 will_retry = attempt <= self._max_retries
                 self._log(

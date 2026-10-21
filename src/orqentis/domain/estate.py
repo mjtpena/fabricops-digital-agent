@@ -73,6 +73,14 @@ class Notebook(_ItemBase):
     default_lakehouse_id: str | None = None
 
 
+class SparkJobDefinition(_ItemBase):
+    item_type: Literal[ItemType.SPARK_JOB_DEFINITION] = ItemType.SPARK_JOB_DEFINITION
+
+
+class Dataflow(_ItemBase):
+    item_type: Literal[ItemType.DATAFLOW] = ItemType.DATAFLOW
+
+
 class Lakehouse(_ItemBase):
     item_type: Literal[ItemType.LAKEHOUSE] = ItemType.LAKEHOUSE
     tables: list[str] = Field(default_factory=list)
@@ -106,7 +114,16 @@ class GenericItem(_ItemBase):
 
 
 FabricItem = Annotated[
-    Pipeline | Notebook | Lakehouse | Warehouse | SemanticModel | Report | ExternalSource | GenericItem,
+    Pipeline
+    | Notebook
+    | SparkJobDefinition
+    | Dataflow
+    | Lakehouse
+    | Warehouse
+    | SemanticModel
+    | Report
+    | ExternalSource
+    | GenericItem,
     Field(discriminator="item_type"),
 ]
 """Any item in the estate catalog, discriminated on ``item_type``."""
@@ -124,6 +141,27 @@ class DataProduct(DomainModel):
     environment: Environment = Environment.UNKNOWN
     backing_item_ids: list[str] = Field(default_factory=list)
     item_type: Literal[ItemType.DATA_PRODUCT] = ItemType.DATA_PRODUCT
+    source: str = "declared"
+    metadata: Metadata = Field(default_factory=dict)
+
+
+class DeltaTableDeclaration(DomainModel):
+    """A Delta table whose ``_delta_log`` FabricOps reads to detect schema changes (ADR-0009, ADR-0020).
+
+    The table lives in the lakehouse ``item_id``. FabricOps reads only the JSON commits of that table's log through the
+    OneLake ADLS Gen2 API, with a OneLake data access role that gives ``Read`` on exactly this table (docs/security.md
+    section 11). Declaring a table is how a platform team says "watch this one"; nothing is discovered.
+    """
+
+    id: str = Field(min_length=1, max_length=128)
+    item_id: str = Field(min_length=1, max_length=128, description="The Lakehouse item that holds the table.")
+    table: str = Field(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
+    schema_name: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+        description="The lakehouse schema, for lakehouses with schemas enabled (Tables/<schema>/<table>).",
+    )
+    description: str | None = Field(default=None, max_length=300)
     source: str = "declared"
     metadata: Metadata = Field(default_factory=dict)
 

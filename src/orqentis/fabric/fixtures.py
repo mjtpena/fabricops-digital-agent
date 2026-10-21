@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
@@ -37,6 +38,22 @@ class ScenarioInfo(_Fixture):
     expected_runbook_id: str | None = None
 
 
+class DeltaCommitFixture(_Fixture):
+    version: int = Field(ge=0)
+    committed_at: AwareDatetime | None = None
+    # The Delta actions of the commit, as JSON objects ({"commitInfo": {...}}, {"metaData": {...}}, {"add": {...}}).
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class DeltaLogFixture(_Fixture):
+    """The ``_delta_log`` of one declared table, replayed by the mock Fabric client."""
+
+    item_id: str
+    table: str
+    schema_name: str | None = None
+    commits: list[DeltaCommitFixture] = Field(default_factory=list)
+
+
 class ScenarioFixture(_Fixture):
     scenario: ScenarioInfo
     pipeline_runs: list[PipelineRun] = Field(default_factory=list)
@@ -45,6 +62,8 @@ class ScenarioFixture(_Fixture):
     capacity_snapshots: list[CapacitySnapshot] = Field(default_factory=list)
     # Events emitted by collectors that have no Fabric REST equivalent (e.g. a Delta-log schema watcher).
     events: list[OperationalEvent] = Field(default_factory=list)
+    # Delta logs of declared tables (contracts ``delta_tables``): read by the schema-change collector.
+    delta_logs: list[DeltaLogFixture] = Field(default_factory=list)
 
 
 class HistoryFixture(_Fixture):

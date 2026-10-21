@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from orqentis.contracts.model import EstateContracts
 from orqentis.domain.common import Environment, ItemType
-from orqentis.domain.estate import Capacity, DataProduct, FabricItem, Workspace
+from orqentis.domain.estate import Capacity, DataProduct, DeltaTableDeclaration, FabricItem, Workspace
 from orqentis.domain.sla import SLA
 from orqentis.fabric.ports import FabricClient
 from orqentis.observability.logging import get_logger
@@ -48,6 +48,7 @@ class CatalogDiff(BaseModel):
     data_products: EntityDiff = Field(default_factory=EntityDiff)
     slas: EntityDiff = Field(default_factory=EntityDiff)
     dependencies: EntityDiff = Field(default_factory=EntityDiff)
+    delta_tables: EntityDiff = Field(default_factory=EntityDiff)
 
     @property
     def is_empty(self) -> bool:
@@ -111,6 +112,7 @@ class EstateCatalog:
     data_products: dict[str, DataProduct] = field(default_factory=dict)
     slas: dict[str, SLA] = field(default_factory=dict)
     capacities: dict[str, Capacity] = field(default_factory=dict)
+    delta_tables: dict[str, DeltaTableDeclaration] = field(default_factory=dict)
 
     @classmethod
     async def load(cls, fabric: FabricClient, contracts: EstateContracts) -> EstateCatalog:
@@ -125,6 +127,7 @@ class EstateCatalog:
             catalog.items.setdefault(source.id, source)
         catalog.data_products = {dp.id: dp for dp in contracts.data_products}
         catalog.slas = {s.id: s for s in contracts.slas}
+        catalog.delta_tables = {t.id: t for t in contracts.delta_tables}
         _log.info(
             "estate catalog loaded",
             extra={
@@ -178,6 +181,7 @@ class EstateCatalog:
             capacities=diff_entities(self.capacities, other.capacities),
             data_products=diff_entities(self.data_products, other.data_products),
             slas=diff_entities(self.slas, other.slas),
+            delta_tables=diff_entities(self.delta_tables, other.delta_tables),
         )
 
     def apply(self, other: EstateCatalog) -> None:
@@ -192,3 +196,4 @@ class EstateCatalog:
         self.data_products = other.data_products
         self.slas = other.slas
         self.capacities = other.capacities
+        self.delta_tables = other.delta_tables

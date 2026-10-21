@@ -4,13 +4,22 @@ The sweep only *observes*. It appends one ``SLA_ASSESSED`` event each time an SL
 deadline day (``ON_TRACK`` -> ``AT_RISK`` -> ``BREACHED`` -> ...), so the event store holds a compact history and a
 detection rule sees each transition exactly once. Opening an incident for a breach is a detection rule's job (a later
 workstream adds it): the rule matches ``event_type == SLA_ASSESSED`` and ``payload["state"] == "BREACHED"`` and finds
-everything it needs in the payload, which is the full :class:`~orqentis.domain.sla.SLAAssessment`.
+everything it needs in the payload, which is the full :class:`~orqentis.domain.sla.SLAAssessment` plus a ``declared``
+object (what the contracts say about the data product and the item that refreshes it: environment, ``criticality``).
+
+**A breach needs fresh telemetry.** "Not refreshed since ..." is only true if FabricOps could see the refresh. When the
+collector that observes the freshness item has no recent watermark (it has been failing, or was never able to run), the
+sweep does not declare a breach: the assessment still returns to the caller, and the event is withheld (and a warning
+logged) until the telemetry is current again. A breach is therefore never declared from blindness (ADR-0013 open
+question 3, ADR-0020).
 """
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from orqentis.config.clock import Clock
-from orqentis.domain.common import Environment
+from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.events import EventSeverity, EventType, OperationalEvent
 from orqentis.domain.incidents import Incident, IncidentStatus
 from orqentis.domain.sla import SLA, SLAAssessment, SLAState
@@ -32,11 +41,24 @@ _SEVERITY = {
 }
 
 
+# The collectors that observe a freshness item, by item type. Semantic models are observed by whichever refresh source
+# is configured; the second name is the workspace-scoped one (its scope is the workspace id, not the model id).
+_FRESHNESS_COLLECTORS: dict[ItemType, tuple[str, ...]] = {
+    ItemType.DATA_PIPELINE: ("pipeline-runs",),
+    ItemType.NOTEBOOK: ("notebook-runs",),
+    ItemType.SPARK_JOB_DEFINITION: ("spark-job-runs",),
+    ItemType.DATAFLOW: ("dataflow-runs",),
+    ItemType.SEMANTIC_MODEL: ("semantic-model-refreshes", "workspace-monitoring-refreshes"),
+}
+
+
 def sla_event(sla: SLA, assessment: SLAAssessment, *, catalog: EstateCatalog) -> OperationalEvent:
     """The event recording ``assessment``. One event per (SLA, deadline day, state): the dedupe key says so."""
     assert assessment.deadline is not None
     day = assessment.deadline.date().isoformat()
     node = catalog.node(sla.freshness_item_id)
+    product = catalog.data_products.get(sla.data_product_id)
+    criticality = product.metadata.get("criticality") if product else None
     return OperationalEvent(
         event_id=f"evt-sla-{sla.id}-{day}-{assessment.state.value.lower()}",
         event_type=EventType.SLA_ASSESSED,
@@ -52,7 +74,14 @@ def sla_event(sla: SLA, assessment: SLAAssessment, *, catalog: EstateCatalog) ->
         correlation_id=f"sla:{sla.id}:{day}",
         dedupe_key=f"{EventType.SLA_ASSESSED.value}:{sla.id}:{day}:{assessment.state.value}",
         source=SLA_SOURCE,
-        payload=assessment.model_dump(mode="json"),
+        payload={
+            **assessment.model_dump(mode="json"),
+            "declared": {
+                "data_product_id": sla.data_product_id,
+                "criticality": criticality if isinstance(criticality, str) else None,
+                "freshness_item_name": node.display_name if node else None,
+            },
+        },
     )
 
 
@@ -66,6 +95,8 @@ class SLASweeper:
         event_store: EventStore,
         detection: DetectionRunner,
         clock: Clock,
+        *,
+        max_telemetry_lag: timedelta | None = None,
     ) -> None:
         self._catalog = catalog
         self._evaluator = evaluator
@@ -74,6 +105,25 @@ class SLASweeper:
         self._events = event_store
         self._detection = detection
         self._clock = clock
+        # None: do not check (tests and mock mode). Otherwise a breach is declared only if the collector that observes
+        # the freshness item completed a pass for it within this long.
+        self._max_lag = max_telemetry_lag
+
+    async def _telemetry_is_current(self, sla: SLA) -> bool:
+        if self._max_lag is None:
+            return True
+        node = self._catalog.node(sla.freshness_item_id)
+        collectors = _FRESHNESS_COLLECTORS.get(node.item_type) if node else None
+        if node is None or collectors is None:
+            return True  # nothing we collect observes this item type, so there is no watermark to wait for
+        now = self._clock.now()
+        for name in collectors:
+            marks = await self._events.get_watermarks(name)
+            # a semantic model is a scope of the Power BI collector, or (by workspace) of workspace monitoring
+            scope = (node.workspace_id or "") if name == "workspace-monitoring-refreshes" else sla.freshness_item_id
+            if (mark := marks.get(scope)) is not None and now - mark <= self._max_lag:
+                return True
+        return False
 
     async def sweep(self) -> tuple[list[SLAAssessment], list[Incident]]:
         """Assess every SLA; returns the assessments and any incidents the detection rules opened from them."""
@@ -100,6 +150,12 @@ class SLASweeper:
             assessments.append(assessment)
             if assessment.state is SLAState.NOT_APPLICABLE:
                 continue  # nothing to observe today
+            if assessment.state is SLAState.BREACHED and not await self._telemetry_is_current(sla):
+                _log.warning(
+                    "sla breach withheld: the collector that observes its freshness item has no recent watermark",
+                    extra={"sla_id": sla.id, "freshness_item_id": sla.freshness_item_id},
+                )
+                continue
             events.append(sla_event(sla, assessment, catalog=self._catalog))
         new_events = await self._events.append(events)
         created = await self._detection.run()  # reads the new events (and anything else pending) from the cursor

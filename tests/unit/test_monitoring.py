@@ -238,6 +238,7 @@ def emitted_attributes() -> dict[str, set[str]]:
     h = MetricsHarness()
     m: Metrics = h.metrics
     m.collector_run("c", seconds=1, errors=1, new_events=1)
+    m.collector_unavailable("c")
     m.collection_run("success", at=__import__("datetime").datetime(2026, 1, 1, tzinfo=__import__("datetime").UTC))
     m.incident_opened(category="X", severity="HIGH", environment="PROD", detection_latency_seconds=1)
     m.investigation_finished(outcome="succeeded", trigger="API", seconds=1)
