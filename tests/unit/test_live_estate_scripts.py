@@ -223,5 +223,6 @@ def test_the_contracts_template_passes_the_contracts_validator_once_ids_are_fill
     contracts = report.contracts
     assert (len(contracts.external_sources), len(contracts.data_products), len(contracts.slas)) == (3, 3, 3)
     assert len(contracts.dependencies) == 17
-    # only the DEV lakehouse carries the OneLake role that lets the reader read a _delta_log (docs/security.md section 11)
+    # only the DEV lakehouse carries the OneLake role that lets the reader read a _delta_log
+    # (docs/security.md, section 11)
     assert [(t.id, t.table) for t in contracts.delta_tables] == [("tbl-sandbox-customers-dev", "customers")]
