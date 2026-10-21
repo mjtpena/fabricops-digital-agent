@@ -413,8 +413,8 @@ param collectItemJobs bool = true
 ])
 param refreshSource string = 'workspace_monitoring'
 
-@description('ORQENTIS_WORKSPACE_MONITORING_DATABASE: display name of the monitoring KQL database in a monitored workspace.')
-param workspaceMonitoringDatabase string = 'Monitoring KQL database'
+@description('ORQENTIS_WORKSPACE_MONITORING_DATABASE: display name of the monitoring KQL database, the same in every monitored workspace. Empty (default): recognised per workspace by the documented naming rules (the legacy "Monitoring KQL database", or "<workspace> <monitoring item>_Database"); set it only when your names follow neither.')
+param workspaceMonitoringDatabase string = ''
 
 @description('ORQENTIS_COLLECT_SCHEMA_CHANGES: read the _delta_log of the Delta tables declared in the contracts (delta_tables). Needs a OneLake data access role with Read on exactly those tables (infra/bicep/README.md section 5).')
 param collectSchemaChanges bool = true
@@ -1079,7 +1079,6 @@ var appEnv = concat(
     { name: 'ORQENTIS_DELTA_LOG_MAX_COMMITS', value: string(deltaLogMaxCommits) }
     { name: 'ORQENTIS_DELTA_LOG_MAX_COMMIT_BYTES', value: string(deltaLogMaxCommitBytes) }
     { name: 'ORQENTIS_REFRESH_SOURCE', value: refreshSource }
-    { name: 'ORQENTIS_WORKSPACE_MONITORING_DATABASE', value: workspaceMonitoringDatabase }
     { name: 'ORQENTIS_SLA_MAX_TELEMETRY_LAG_MINUTES', value: string(slaMaxTelemetryLagMinutes) }
     { name: 'ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS', value: string(collectionMaxLookbackHours) }
     { name: 'ORQENTIS_COLLECTION_OVERLAP_MINUTES', value: string(collectionOverlapMinutes) }
@@ -1106,6 +1105,9 @@ var appEnv = concat(
   empty(fabricScope) ? [] : [{ name: 'ORQENTIS_FABRIC_SCOPE', value: fabricScope }],
   empty(powerbiScope) ? [] : [{ name: 'ORQENTIS_POWERBI_SCOPE', value: powerbiScope }],
   empty(kustoScope) ? [] : [{ name: 'ORQENTIS_KUSTO_SCOPE', value: kustoScope }],
+  empty(workspaceMonitoringDatabase)
+    ? []
+    : [{ name: 'ORQENTIS_WORKSPACE_MONITORING_DATABASE', value: workspaceMonitoringDatabase }],
   empty(onelakeBaseUrl) ? [] : [{ name: 'ORQENTIS_ONELAKE_BASE_URL', value: onelakeBaseUrl }],
   empty(onelakeScope) ? [] : [{ name: 'ORQENTIS_ONELAKE_SCOPE', value: onelakeScope }],
   empty(expectedForbiddenCollectors)

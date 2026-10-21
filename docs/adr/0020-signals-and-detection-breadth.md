@@ -74,8 +74,17 @@ database minutes late (a refresh that just ended can look unfinished; the event 
 A row is used only if its item is a semantic model **of that workspace** in the catalog: the database is written by anyone
 who can run a refresh there, and must not be able to name a model of another workspace (a PROD one) and have an incident
 opened on it. Rows for other ids are counted and logged, not used. A model created after the catalog was built is skipped the
-same way until the catalog catches up. Two databases carrying the monitoring name is a fault, not a missing capability
+same way until the catalog catches up. Two databases that look like the monitoring database is a fault, not a missing capability
 (`WorkspaceMonitoringAmbiguous` is an error).
+
+**The monitoring database is not found by one fixed name.** Nothing in the API marks a KQL database as the monitoring one, and
+its name differs: `Monitoring KQL database` for the legacy monitoring, `<workspace name> <monitoring item name>_Database` for
+the monitoring item that replaced it (documented; not yet observed on a real database). `fabric/monitoring_names.py` recognises
+either form for the workspace in question, and is used both by the collector (against the catalog, no call) and by the adapter
+(against the Fabric listing); `ORQENTIS_WORKSPACE_MONITORING_DATABASE` is now only an override with one exact name. The
+not-enabled error carries the number of KQL databases that were visible, which tells "none" from "some, not recognised". A
+Kusto 400 for a missing `SemanticModelLogs` table (a monitoring database with no semantic model activity yet) is read from the
+error's `@message`, where Kusto puts the cause, and returns no refreshes rather than an error.
 
 **The spike could not settle permissions, and the documentation contradicts itself** (`docs/spikes/workspace-monitoring.md`):
 the workspace monitoring overview says "Workspace users with at least the Contributor role can query the monitoring

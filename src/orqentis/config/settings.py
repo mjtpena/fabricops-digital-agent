@@ -192,7 +192,10 @@ class Settings(BaseSettings):
     # Semantic model refresh outcomes. Workspace monitoring is the default in rest mode because the reader never gets
     # dataset Write; mock mode defaults to powerbi_api (the synthetic scenarios replay a Power BI shaped history).
     refresh_source: RefreshSource = RefreshSource.WORKSPACE_MONITORING
-    workspace_monitoring_database: str = Field(default="Monitoring KQL database", min_length=1, max_length=256)
+    # Empty: a workspace's monitoring database is recognised by the documented naming rules
+    # (fabric/monitoring_names.py).
+    # Set: exactly this display name, in every workspace.
+    workspace_monitoring_database: str = Field(default="", max_length=256)
     kusto_scope: str = PUBLIC_KUSTO_SCOPE
     # The Fabric Capacity Metrics app (rest mode): the workspace it is installed in and its semantic model.
     # Both or neither.

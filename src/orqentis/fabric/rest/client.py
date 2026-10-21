@@ -786,7 +786,7 @@ class RestFabricClient:
         onelake_base_url: str = PUBLIC_ONELAKE_BASE_URL,
         onelake_scope: str = PUBLIC_STORAGE_SCOPE,
         delta_log_max_commit_bytes: int = DEFAULT_MAX_COMMIT_BYTES,
-        monitoring_database_name: str = "Monitoring KQL database",
+        monitoring_database_name: str = "",
         kusto_scope: str = PUBLIC_KUSTO_SCOPE,
         capacity_metrics_workspace_id: str | None = None,
         capacity_metrics_dataset_id: str | None = None,

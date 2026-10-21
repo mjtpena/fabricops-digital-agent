@@ -174,6 +174,25 @@ async def rig() -> AsyncIterator[Rig]:
 
 
 @pytest.fixture
+async def auto_rig() -> AsyncIterator[Rig]:
+    """A deployment that does not name the database: it is recognised by the documented naming rules."""
+    wire, tokens = Wire(), FakeTokens()
+    http = FabricHttp(tokens, transport=wire, max_retries=0, sleep=_no_sleep)
+    service = RestMonitoringService(
+        http, fabric_base_url=FABRIC, tenant_id="tenant-test", database_name="", kusto_scope=KUSTO_SCOPE
+    )
+    yield Rig(wire, tokens, service)
+    await http.aclose()
+
+
+WORKSPACE_PATH = f"/v1/workspaces/{WORKSPACE}"
+
+
+def workspace_named(rig: Rig, name: str) -> None:
+    rig.wire.add("GET", WORKSPACE_PATH, respond(200, {"id": WORKSPACE, "displayName": name, "type": "Workspace"}))
+
+
+@pytest.fixture
 def orqentis_logs(caplog: pytest.LogCaptureFixture) -> Iterator[pytest.LogCaptureFixture]:
     """Capture ``orqentis.*`` records even if configure_logging() has set propagate=False elsewhere."""
     logger = logging.getLogger("orqentis")
@@ -453,7 +472,8 @@ async def test_a_workspace_without_monitoring_is_a_capability_error_not_a_generi
         await rig.refreshes()
 
     assert caught.value.error_code == "WorkspaceMonitoringNotEnabled"
-    assert caught.value.details == {"workspace_id": WORKSPACE}
+    # how many KQL databases the reader could see: "none" and "some, none of them monitoring" are different problems
+    assert caught.value.details == {"workspace_id": WORKSPACE, "visible_kql_databases": 1}
     assert rig.wire.calls("POST", QUERY_PATH) == []  # nothing was queried, no Kusto token was requested
     assert rig.tokens.scopes == [FABRIC_SCOPE]
 
@@ -467,7 +487,92 @@ async def test_two_databases_with_the_monitoring_name_are_refused(rig: Rig) -> N
 
     assert not isinstance(caught.value, FabricCapabilityUnavailableError)  # a fault: it counts as a collector error
     assert caught.value.error_code == "WorkspaceMonitoringAmbiguous"
-    assert caught.value.details == {"workspace_id": WORKSPACE}
+    assert caught.value.details == {"workspace_id": WORKSPACE, "candidates": 2, "visible_kql_databases": 2}
+
+
+# --------------------------------------------------------------- discovery that does not depend on one fixed name
+async def test_the_legacy_database_is_found_without_a_configured_name(auto_rig: Rig) -> None:
+    auto_rig.serve(result(make_row()), listing=discovery(monitoring_database()))
+    workspace_named(auto_rig, "Customers")
+
+    assert len(await auto_rig.refreshes()) == 1
+    assert auto_rig.query_body()["db"] == DATABASE
+
+
+async def test_the_monitoring_item_s_database_is_found_by_the_workspace_name(auto_rig: Rig) -> None:
+    # "<workspace name> <monitoring item name>_Database", the characters Fabric rejects replaced by "_"
+    named = "Sales _PROD_ Monitoring_Database"
+    auto_rig.serve(result(make_row()), listing=discovery(monitoring_database(displayName=named)))
+    workspace_named(auto_rig, "Sales [PROD]")
+
+    assert len(await auto_rig.refreshes()) == 1
+    assert auto_rig.query_body()["db"] == named  # the Kusto database name is the item's display name (unverified)
+    assert len(auto_rig.wire.calls("GET", WORKSPACE_PATH)) == 1
+
+
+async def test_the_workspace_name_is_looked_up_once_per_cache_lifetime(auto_rig: Rig) -> None:
+    auto_rig.serve(result(make_row()), listing=discovery(monitoring_database()))
+    workspace_named(auto_rig, "Customers")
+
+    await auto_rig.refreshes()
+    await auto_rig.refreshes()
+
+    assert len(auto_rig.wire.calls("GET", DISCOVERY_PATH)) == 1 and len(auto_rig.wire.calls("GET", WORKSPACE_PATH)) == 1
+
+
+async def test_a_database_named_for_another_workspace_or_for_nothing_is_not_the_monitoring_database(
+    auto_rig: Rig,
+) -> None:
+    others = [
+        monitoring_database(displayName="Finance Monitoring_Database"),  # another workspace's
+        monitoring_database(displayName="Sales events", id="00000000-0000-4000-8000-000000000096"),
+        monitoring_database(displayName="sales_archive", id="00000000-0000-4000-8000-000000000097"),
+    ]
+    auto_rig.serve(result(), listing=discovery(*others))
+    workspace_named(auto_rig, "Sales")
+
+    with pytest.raises(FabricCapabilityUnavailableError) as caught:
+        await auto_rig.refreshes()
+
+    assert caught.value.error_code == "WorkspaceMonitoringNotEnabled"
+    assert caught.value.details == {"workspace_id": WORKSPACE, "visible_kql_databases": 3}
+    assert auto_rig.wire.calls("POST", QUERY_PATH) == []
+
+
+async def test_a_workspace_with_no_kql_database_at_all_costs_no_workspace_lookup(auto_rig: Rig) -> None:
+    auto_rig.serve(result(), listing=discovery())
+
+    with pytest.raises(FabricCapabilityUnavailableError) as caught:
+        await auto_rig.refreshes()
+
+    assert caught.value.details == {"workspace_id": WORKSPACE, "visible_kql_databases": 0}
+    assert auto_rig.wire.calls("GET", WORKSPACE_PATH) == []
+
+
+async def test_the_legacy_database_and_the_item_s_database_together_are_ambiguous_not_a_choice(auto_rig: Rig) -> None:
+    both = [
+        monitoring_database(),
+        monitoring_database(displayName="Sales Monitoring_Database", id="00000000-0000-4000-8000-000000000098"),
+    ]
+    auto_rig.serve(result(), listing=discovery(*both))
+    workspace_named(auto_rig, "Sales")
+
+    with pytest.raises(FabricError) as caught:
+        await auto_rig.refreshes()
+
+    assert caught.value.error_code == "WorkspaceMonitoringAmbiguous" and caught.value.details["candidates"] == 2
+    assert not isinstance(caught.value, FabricCapabilityUnavailableError)
+    assert auto_rig.wire.calls("POST", QUERY_PATH) == []
+
+
+async def test_a_configured_name_replaces_the_rules_and_needs_no_workspace_lookup(rig: Rig) -> None:
+    item_database = monitoring_database(
+        displayName="Sales Monitoring_Database", id="00000000-0000-4000-8000-000000000099"
+    )
+    rig.serve(result(make_row()), listing=discovery(item_database, monitoring_database()))
+
+    assert len(await rig.refreshes()) == 1  # only the configured name matched, so no ambiguity
+    assert rig.query_body()["db"] == DATABASE and rig.wire.calls("GET", WORKSPACE_PATH) == []
 
 
 async def test_the_database_name_is_matched_ignoring_case(rig: Rig) -> None:
@@ -587,6 +692,31 @@ async def test_no_telemetry_table_yet_means_no_refreshes(rig: Rig) -> None:
     rig.serve(replay("doc_monitoring_06_table_missing"))
 
     assert await rig.refreshes() == []
+
+
+async def test_the_table_name_in_a_kusto_error_s_at_message_is_what_says_the_table_is_missing(rig: Rig) -> None:
+    # The shape the endpoint answered live: the generic message says nothing, the cause is in "@message".
+    rig.serve(replay("live_monitoring_06_table_missing"))
+
+    assert await rig.refreshes() == []
+
+
+async def test_a_kusto_400_about_something_else_keeps_its_at_message_but_is_still_an_error(rig: Rig) -> None:
+    body = {
+        "error": {
+            "code": "General_BadRequest",
+            "message": "Request is invalid and cannot be executed.",
+            "@message": "Semantic error: Failed to resolve scalar expression named 'Timestamp' " + "x" * 5000,
+        }
+    }
+    rig.serve(respond(400, body))
+
+    with pytest.raises(FabricError) as caught:
+        await rig.refreshes()
+
+    kept = caught.value.details["kusto_message"]
+    assert kept.startswith("Semantic error: Failed to resolve scalar expression named 'Timestamp'")
+    assert len(kept) <= 1000  # bounded like every error text from the API
 
 
 async def test_other_bad_requests_are_errors(rig: Rig) -> None:

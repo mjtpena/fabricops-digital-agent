@@ -141,6 +141,9 @@ def parse_error_body(response: httpx.Response) -> tuple[str | None, str | None, 
 
     Fabric: ``{"errorCode", "message", "requestId", "moreDetails", "relatedResource"}``.
     Power BI: ``{"error": {"code", "message", "details", "pbi.error"}}``.
+    Kusto (the workspace monitoring query endpoint): ``{"error": {"code", "message", "@type", "@message", ...}}``,
+    where ``message`` is generic ("Request is invalid and cannot be executed.") and the cause is in ``@message``,
+    kept as ``details["kusto_message"]`` (redacted, length-limited).
     """
     try:
         body = response.json()
@@ -156,6 +159,8 @@ def parse_error_body(response: httpx.Response) -> tuple[str | None, str | None, 
             details["more_details"] = redact(scrub_markers(error["details"]))
         if isinstance(pbi := error.get("pbi.error"), dict):
             details["pbi_error"] = redact(scrub_markers(pbi))
+        if kusto_message := _text(error.get("@message")):
+            details["kusto_message"] = kusto_message
         return _text(error.get("code")), _text(error.get("message")), _text(body.get("requestId")), details
     if body.get("moreDetails"):
         details["more_details"] = redact(scrub_markers(body["moreDetails"]))

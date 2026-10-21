@@ -209,6 +209,26 @@ async def test_monitoring_refreshes_are_collected_from_workspaces_that_have_a_mo
     assert monitoring.calls == [(WS, at(8) - MonitoringRefreshCollector.LATENCY_MARGIN, NOW)]
 
 
+async def test_the_monitoring_item_s_database_is_recognised_by_the_workspace_name_without_a_configured_name() -> None:
+    # the catalog's workspace is "Sales [PROD]": its monitoring item's database is named after it
+    refreshes = [refresh_run("ref-1", "sm-1", RunStatus.FAILED, at(11), at(11, 2), message="cannot access the source")]
+    monitoring = FakeMonitoring(refreshes)
+    named = catalog(model(), monitoring_database("Sales _PROD_ Monitoring_Database"))
+    collector = MonitoringRefreshCollector(FakeFabric(monitoring=monitoring), named)  # type: ignore[arg-type]
+    assert [e.correlation_id for e in await collector.collect_scope(WS, since=at(8), until=NOW)] == ["ref-1"]
+
+    elsewhere = catalog(model(), monitoring_database("Finance Monitoring_Database"))
+    stranger = MonitoringRefreshCollector(FakeFabric(monitoring=monitoring), elsewhere)  # type: ignore[arg-type]
+    with pytest.raises(FabricCapabilityUnavailableError) as caught:
+        await stranger.collect_scope(WS, since=at(8), until=NOW)
+    assert caught.value.details["visible_kql_databases"] == 1  # named for another workspace: not this one's
+
+    # a configured name replaces the rules
+    configured = MonitoringRefreshCollector(FakeFabric(monitoring=monitoring), named, database_name="Something else")  # type: ignore[arg-type]
+    with pytest.raises(FabricCapabilityUnavailableError):
+        await configured.collect_scope(WS, since=at(8), until=NOW)
+
+
 async def test_a_workspace_with_models_and_no_monitoring_database_is_unavailable_and_costs_no_call() -> None:
     monitoring = FakeMonitoring([])
     collector = MonitoringRefreshCollector(
@@ -217,8 +237,9 @@ async def test_a_workspace_with_models_and_no_monitoring_database_is_unavailable
         database_name="Monitoring KQL database",
     )
     assert collector.scopes() == [WS]  # every workspace that holds a semantic model is a scope
-    with pytest.raises(FabricCapabilityUnavailableError):
+    with pytest.raises(FabricCapabilityUnavailableError) as caught:
         await collector.collect_scope(WS, since=at(8), until=NOW)
+    assert caught.value.details == {"workspace_id": WS, "visible_kql_databases": 0}
     assert monitoring.calls == []
     assert MonitoringRefreshCollector(FakeFabric(), catalog(notebook()), database_name="x").scopes() == []  # type: ignore[arg-type]
 

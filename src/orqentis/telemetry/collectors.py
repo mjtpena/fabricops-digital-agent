@@ -15,6 +15,7 @@ from orqentis.domain.estate import DeltaTableDeclaration, FabricItem, GenericIte
 from orqentis.domain.events import EventType, OperationalEvent
 from orqentis.domain.runs import RunStatus
 from orqentis.fabric.errors import FabricAuthError, FabricCapabilityUnavailableError, FabricError
+from orqentis.fabric.monitoring_names import is_monitoring_database
 from orqentis.fabric.ports import FabricClient
 from orqentis.observability.logging import get_logger
 from orqentis.observability.metrics import DISABLED, Metrics
@@ -213,21 +214,30 @@ class MonitoringRefreshCollector:
     # row is found on a later run; the event store de-duplicates by refresh id and status.
     LATENCY_MARGIN = timedelta(minutes=30)
 
-    def __init__(self, fabric: FabricClient, catalog: EstateCatalog, *, database_name: str) -> None:
+    def __init__(self, fabric: FabricClient, catalog: EstateCatalog, *, database_name: str = "") -> None:
         self._fabric = fabric
         self._catalog = catalog
-        self._database_name = database_name.strip().lower()
+        self._database_override = database_name.strip()
 
     def scopes(self) -> list[str]:
         return sorted({i.workspace_id for i in self._catalog.items.values() if i.item_type is ItemType.SEMANTIC_MODEL})
 
-    def _has_monitoring(self, workspace_id: str) -> bool:
-        return any(
-            isinstance(i, GenericItem)
-            and i.workspace_id == workspace_id
-            and i.fabric_type == "KQLDatabase"
-            and i.display_name.strip().lower() == self._database_name
+    def _kql_databases(self, workspace_id: str) -> list[GenericItem]:
+        return [
+            i
             for i in self._catalog.items.values()
+            if isinstance(i, GenericItem) and i.workspace_id == workspace_id and i.fabric_type == "KQLDatabase"
+        ]
+
+    def _has_monitoring(self, workspace_id: str) -> bool:
+        workspace = self._catalog.workspaces.get(workspace_id)
+        return any(
+            is_monitoring_database(
+                d.display_name,
+                workspace_name=workspace.display_name if workspace else None,
+                override=self._database_override,
+            )
+            for d in self._kql_databases(workspace_id)
         )
 
     async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]:
@@ -235,9 +245,9 @@ class MonitoringRefreshCollector:
             raise FabricCapabilityUnavailableError(
                 f"Semantic model refreshes of workspace {scope} cannot be observed: the estate has no KQL database "
                 "named like the workspace monitoring database there (monitoring is not enabled, or the reader cannot "
-                "see it)",
+                "see it, or its name follows neither documented form: ORQENTIS_WORKSPACE_MONITORING_DATABASE names it)",
                 error_code="WorkspaceMonitoringNotEnabled",
-                details={"workspace_id": scope},
+                details={"workspace_id": scope, "visible_kql_databases": len(self._kql_databases(scope))},
             )
         models = {
             i.id: i

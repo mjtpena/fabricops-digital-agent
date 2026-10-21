@@ -480,7 +480,7 @@ Do not stop FabricOps by deleting the Container App or its volume; stop the sche
 | `pipeline-runs` | pipeline job instances and activity runs | workspace Viewer | one per pipeline |
 | `notebook-runs`, `spark-job-runs`, `dataflow-runs` | job instances of those items | workspace Viewer | one per item |
 | `semantic-model-refreshes` | Power BI refresh history (`ORQENTIS_REFRESH_SOURCE` = `powerbi_api` or `both`) | dataset Write (the reader never has it) | one per model |
-| `workspace-monitoring-refreshes` | the monitoring KQL database (default refresh source in rest mode) | to be confirmed live: see `docs/security.md` section 11 | one per workspace that holds a semantic model; one with no monitoring database in the estate is reported as capability unavailable, without an API call |
+| `workspace-monitoring-refreshes` | the monitoring KQL database, recognised per workspace by its documented name (legacy `Monitoring KQL database`, or `<workspace> <item>_Database`; `ORQENTIS_WORKSPACE_MONITORING_DATABASE` overrides) (default refresh source in rest mode) | to be confirmed live: see `docs/security.md` section 11 | one per workspace that holds a semantic model; one with no monitoring database in the estate is reported as capability unavailable, without an API call |
 | `delta-schema-changes` | `_delta_log` of the contracts' `delta_tables` (at most `ORQENTIS_DELTA_LOG_MAX_COMMITS` commits per table per run, oldest first; the schema in force is kept as a `SCHEMA_SNAPSHOT` event) | a OneLake data access role with Read on exactly those tables | one per declared table |
 | `capacity-metrics` | the Capacity Metrics app's model (configured by workspace and model id) | Read and Build on the model (open decision) | one per capacity |
 

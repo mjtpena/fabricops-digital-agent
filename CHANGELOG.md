@@ -35,7 +35,11 @@ section does not match.
   with no monitoring database are *capability unavailable*) and only rows naming a model of that workspace are used;
   only known launcher invoke types suppress a job incident; an ambiguous monitoring database and a Capacity Metrics schema
   mismatch are errors; an unavailable collector still records a run (`outcome=unavailable`); the refresh history tool
-  follows `ORQENTIS_REFRESH_SOURCE`; Bicep parameters for the Delta log caps.
+  follows `ORQENTIS_REFRESH_SOURCE`; Bicep parameters for the Delta log caps. From the first live checks: a Kusto 400
+  for a missing `SemanticModelLogs` table is recognised from the error's `@message` (the generic `message` never named it);
+  the monitoring database is recognised per workspace by its documented names instead of one configured name
+  (`ORQENTIS_WORKSPACE_MONITORING_DATABASE` is now an override, empty by default), and the not-enabled error counts the KQL
+  databases the reader could see.
 
 - Durable storage and a stateless app (ADR-0017, implements ADR-0008): PostgreSQL adapters (asyncpg, Entra token as the
   password, no password setting) for the event store, incidents, dependencies, approvals (compare-and-set), the audit

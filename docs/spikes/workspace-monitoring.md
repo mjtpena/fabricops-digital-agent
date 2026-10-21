@@ -5,6 +5,28 @@ statement below is marked as documented, inferred or unverified. Adapter: `src/o
 (`RestMonitoringService`). Tests: `tests/unit/test_monitoring_adapter.py`, fixtures `tests/fixtures/fabric_rest/doc_monitoring_*.json`
 (built from the documented schemas, not recorded). Context: programme decision D9 and `docs/security.md` section 11.
 
+> **Live status (updated after the orchestrator's first checks; reported to this workstream, not re-run here).** Fabric offers
+> no API to turn workspace monitoring on, and the owner has not yet done it in the portal, so **a real workspace monitoring
+> database has not been observed**. The checks ran as the Viewer-only reader against a **stand-in Eventhouse with a synthetic
+> `SemanticModelLogs` table**. They showed: the Kusto resource id is `https://kusto.kusto.windows.net` (a token is issued; the
+> Fabric audience gets 401 at the Kusto endpoint); a Viewer can query that database; the production query body is accepted;
+> failed, succeeded and in-progress rows map as the adapter expects; a workspace without monitoring answers
+> `WorkspaceMonitoringNotEnabled`; and a query on a missing table answers **400 whose `message` is only "Request is invalid and
+> cannot be executed." while the table name is in `@message`** (the adapter now reads it, `details["kusto_message"]`; the
+> earlier paraphrased fixture had put it in `message`). **Everything about the real monitoring database stays an assumption
+> until the owner enables monitoring and the checks are repeated against it:** its display name (the next point), whether the
+> Kusto `db` equals that name, the table and column names and the `Status`/`Level` vocabulary of real rows, and whether a Viewer
+> may query it (a stand-in is not a monitoring item). Those are re-checked then.
+>
+> **The database is not found by one fixed name.** The legacy monitoring database is `Monitoring KQL database`; the monitoring
+> item's is named after its workspace (section 2, row 2), so one configured value cannot match different workspaces. Nothing in
+> the API marks a KQL database as the monitoring one (the properties are `parentEventhouseItemId`, `queryServiceUri`,
+> `ingestionServiceUri` and `databaseType` = `ReadWrite` or `Shortcut`), so `fabric/monitoring_names.py` recognises it by name:
+> the legacy name, or `<workspace name>…_Database` after the same normalisation Fabric applies. `ORQENTIS_WORKSPACE_MONITORING_DATABASE`
+> is now an override (one exact name for every workspace). Two matches in a workspace are an error, never a choice, and the
+> not-enabled error says how many KQL databases the reader could see. Whether anything other than the name (the parent
+> Eventhouse's name, the item type `Monitoring`) identifies it is part of the live check (step 1).
+
 ## 1. Summary
 
 * **Source.** Semantic model engine events are logged to the table `SemanticModelLogs` of the workspace's monitoring KQL database
@@ -20,7 +42,7 @@ statement below is marked as documented, inferred or unverified. Adapter: `src/o
 * **Discovery and query** are two read-only calls: Fabric `GET .../workspaces/{id}/kqlDatabases`, then `POST {queryServiceUri}/v1/rest/query`
   with the Kusto token audience. The default audience constant is `https://kusto.kusto.windows.net/.default` (already
   `PUBLIC_KUSTO_SCOPE` in `settings.py`); confirm it with the unauthenticated metadata call in checklist step 2.
-* **Nothing in this document has been run.** Section 8 lists what is unverified; section 10 is the checklist for the live run.
+* **Nothing in this document has been run against a real monitoring database** (see the live status above for what the stand-in showed). Section 8 lists what is unverified; section 10 is the checklist for the live run.
 
 ## 2. What was read, and what it established
 
@@ -92,8 +114,9 @@ monitoring database and any other KQL database, so even if the overview is right
 ## 5. Call sequence and token audience
 
 1. `GET https://api.fabric.microsoft.com/v1/workspaces/{workspaceId}/kqlDatabases` (List KQL Databases, which documents `properties` on every entry, so no per-database Get is needed; the brief's "List Items by type, then Get KQL Database" is the fallback) with a token for `https://api.fabric.microsoft.com/.default`
-   (follows `continuationToken`). Pick the entry whose `displayName` equals the configured `database_name` (case-insensitive; default for legacy monitoring
-   "Monitoring KQL database"; for the new monitoring item the name follows the pattern in section 2 row 2, so the setting must be set per estate). Take `properties.queryServiceUri`.
+   (follows `continuationToken`). Pick the entry that `fabric/monitoring_names.py` recognises as the workspace's monitoring database: with `ORQENTIS_WORKSPACE_MONITORING_DATABASE` set, the entry with exactly that `displayName`
+   (case-insensitive); otherwise the legacy name `Monitoring KQL database`, or a name of the form `<workspace name>…_Database` (the workspace's name comes from one `GET .../workspaces/{id}`, cached with the target; no call when the listing is empty).
+   More than one match is `WorkspaceMonitoringAmbiguous` (an error); none is `WorkspaceMonitoringNotEnabled` with `visible_kql_databases`. Take `properties.queryServiceUri`.
    If the list leaves `properties` out, `GET .../kqlDatabases/{id}` returns the same object.
 2. Check the host: https, no credentials, no port, no path, and inside the Fabric API's parent domain (`*.fabric.microsoft.com`). The Kusto bearer token is only ever sent there.
 3. `POST {queryServiceUri}/v1/rest/query` with a token for the Kusto audience. Body:
@@ -190,7 +213,7 @@ caps the message at 2000 and names at 256 characters, never puts a returned valu
 
 1. Whether a **workspace Viewer** (service principal) can query the monitoring database. The documentation conflicts (section 4).
 2. That the **new monitoring item's** KQL database appears in `List KQL Databases` of the monitored workspace under the expected name, with `queryServiceUri`; and what it is called
-   (`Monitoring KQL database` is the legacy default; the new pattern is `<workspace> <monitoring item>_Database`). With **central monitoring** the database lives in the *destination* workspace;
+   (`Monitoring KQL database` is the legacy default; the new pattern is `<workspace> <monitoring item>_Database`; **the matching rules in `monitoring_names.py` rest on exactly this and are untested against a real database**, and the monitoring item's own name is not known). With **central monitoring** the database lives in the *destination* workspace;
    the adapter looks only in the queried workspace and would report "not enabled".
 3. That the Kusto database name is the item's `displayName`.
 4. The **token audience** Fabric's Kusto endpoint accepts (three candidates, section 5).
@@ -232,7 +255,7 @@ Redact ids before pasting anything into the ledger. `<ws>` is a sandbox workspac
 
 1. `az rest --method get --resource https://api.fabric.microsoft.com --url "https://api.fabric.microsoft.com/v1/workspaces/<ws>/kqlDatabases"`.
    Expect HTTP 200 and an entry for the monitoring database with `properties.queryServiceUri` and `databaseType`. Pass: present. If missing, also try `.../items?type=KQLDatabase`, `...?type=Monitoring`
-   and `...?type=Eventhouse`, and record what exists (this decides how discovery must change). Record `displayName` exactly: it is `database_name` and the Kusto `db`.
+   and `...?type=Eventhouse`, and record what exists (this decides how discovery must change). Record `displayName` exactly: it is the Kusto `db`, and it must be recognised by `is_monitoring_database` for that workspace's name (if not, fix the rules in `monitoring_names.py`, or set the override). Also record anything other than the name that sets it apart (the parent Eventhouse's `displayName`, any `Monitoring` item in `...?type=Monitoring`): a structural signal would replace the name rules.
 2. `curl -s "<qs>/v1/rest/auth/metadata"` (no token). Record `AzureAD.KustoServiceResourceId`. Expected `https://kusto.kusto.windows.net`. Pass: the value plus `/.default` equals the configured Kusto scope; otherwise change the setting default.
 3. Token: `az account get-access-token --resource <that value> --query accessToken -o tsv` (as the reader). Pass: a token is issued. If the value is rejected, try `https://api.kusto.windows.net`, then `<qs>`.
 
@@ -254,7 +277,7 @@ Redact ids before pasting anything into the ledger. `<ws>` is a sandbox workspac
 7. Through the Python adapter, with the real settings and token provider: `RestMonitoringService.list_semantic_model_refreshes(<ws>, since, until)`. Pass: a `Refresh` with `RunStatus.FAILED`, `error.message` equal to the engine text (privacy markers gone) and the succeeded one;
    `source == "fabric.workspace-monitoring"`; the request log shows only `GET .../kqlDatabases` and `POST .../v1/rest/query`.
 8. Negative cases. (a) A sandbox workspace without monitoring: expect `FabricCapabilityUnavailableError` with `error_code == "WorkspaceMonitoringNotEnabled"` (the collector raises it from the catalog, with no API call, when the estate holds no KQL database named like the monitoring database in that workspace; the adapter raises it when the Fabric listing has none). (b) Monitoring on, a principal without query rights: expect `FabricAuthError` (403). (c) Monitoring on, no semantic model activity ever:
-   expect `[]` (and record the real 400 wording if the adapter raised instead; fix `_table_missing`).
+   expect `[]`. The stand-in's 400 is known (generic `message`, the table in `@message`, handled); confirm a real monitoring database answers the same way.
 
 **Latency, coverage, scale.**
 

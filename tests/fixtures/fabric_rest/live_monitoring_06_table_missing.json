@@ -1,0 +1,59 @@
+{
+  "label": "live_monitoring_06_table_missing",
+  "description": "The shape the Kusto query endpoint answered LIVE (reported by the orchestrator's check against a stand-in Eventhouse, as the Viewer-only reader) when the SemanticModelLogs table does not exist: HTTP 400 whose error.message is generic ('Request is invalid and cannot be executed.') and whose cause, the table name, is only in error['@message']. The earlier paraphrase (doc_monitoring_06_table_missing) put the table in error.message, which is why a match on the message alone never fired. Ids and hosts are synthetic. It is a stand-in database, not a real workspace monitoring database, which has not been observed yet.",
+  "entries": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/rest/query",
+        "query": {},
+        "json": {
+          "db": "Monitoring KQL database",
+          "csl": "<REFRESHES_KQL from orqentis.fabric.rest.monitoring>",
+          "properties": {
+            "Options": {
+              "request_readonly": true,
+              "servertimeout": "00:00:30"
+            },
+            "Parameters": {
+              "workspace_id": "00000000-0000-4000-8000-000000000080",
+              "window_start": "2026-10-20T00:00:00Z",
+              "window_end": "2026-10-20T02:00:00Z",
+              "max_rows": 1000
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "json": {
+          "error": {
+            "code": "General_BadRequest",
+            "message": "Request is invalid and cannot be executed.",
+            "@type": "Kusto.Data.Exceptions.SemanticException",
+            "@message": "Semantic error: 'take' operator: Failed to resolve table or column expression named 'SemanticModelLogs'",
+            "@context": {
+              "timestamp": "2026-10-20T02:00:01.0000000Z",
+              "serviceAlias": "TRD-EXAMPLE",
+              "machineName": "KEngine000000",
+              "processName": "Kusto.WinSvc.Svc",
+              "processId": 1234,
+              "threadId": 5678,
+              "appDomainName": "Kusto.WinSvc.Svc.exe",
+              "clientRequestId": "00000000-0000-4000-8000-0000000000c0",
+              "activityId": "00000000-0000-4000-8000-0000000000c1",
+              "subActivityId": "00000000-0000-4000-8000-0000000000c2",
+              "activityType": "PO-OWIN-CallContext",
+              "parentActivityId": "00000000-0000-4000-8000-0000000000c3",
+              "activityStack": "(Activity stack: CRID=00000000-0000-4000-8000-0000000000c0)"
+            },
+            "@permanent": true
+          }
+        }
+      }
+    }
+  ]
+}
