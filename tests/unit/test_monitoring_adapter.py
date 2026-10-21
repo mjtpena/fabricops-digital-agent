@@ -462,9 +462,10 @@ async def test_two_databases_with_the_monitoring_name_are_refused(rig: Rig) -> N
     other = monitoring_database(id="00000000-0000-4000-8000-000000000095")
     rig.serve(result(), listing=discovery(monitoring_database(), other))
 
-    with pytest.raises(FabricCapabilityUnavailableError) as caught:
+    with pytest.raises(FabricError) as caught:
         await rig.refreshes()
 
+    assert not isinstance(caught.value, FabricCapabilityUnavailableError)  # a fault: it counts as a collector error
     assert caught.value.error_code == "WorkspaceMonitoringAmbiguous"
     assert caught.value.details == {"workspace_id": WORKSPACE}
 

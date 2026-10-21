@@ -121,6 +121,8 @@ async def test_a_refresh_that_fails_inside_a_pipeline_is_one_incident_in_the_sam
     assert incident.matched_runbooks[0].runbook_id == "RB-SM-REFRESH-FAILURE-001"
     (action,) = incident.recommended_actions[0].actions
     assert (action.action_type.value, action.target_item_id) == ("REFRESH_SEMANTIC_MODEL", "sm-sales")
+    # one source (the pipeline's activity run), no history, no upstream or temporal correlation: LOW, not sure
+    assert incident.confidence is not None and incident.confidence.level is ConfidenceLevel.LOW
     assert_grounded(incident)
 
 

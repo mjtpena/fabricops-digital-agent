@@ -97,8 +97,15 @@ class RestDeltaLogService:
             if not continuation:
                 return [commits[v] for v in sorted(commits)]
             params = {**params, "continuation": continuation}
+        # The listing is ordered by name, oldest version first, so what a cut-off listing holds is the *oldest* commits:
+        # the newest, which are the ones the collector needs, would be missing. No answer is better than that one.
         _log.warning("delta log listing stopped: page limit reached", extra={"table_id": table.id})
-        return [commits[v] for v in sorted(commits)]
+        raise FabricError(
+            f"The Delta log of table {table.id} has more than {_MAX_LIST_PAGES * _LIST_PAGE_SIZE} entries; its listing "
+            "was not read to the end, so the newest commits are unknown",
+            error_code="DeltaLogListingTruncated",
+            details={"table_id": table.id, "max_entries": _MAX_LIST_PAGES * _LIST_PAGE_SIZE},
+        )
 
     async def read_commit(self, table: DeltaTableRef, version: int) -> DeltaCommitFile:
         if version < 0:
@@ -108,14 +115,18 @@ class RestDeltaLogService:
         )
         url = f"{self._base_url}/{segment(table.workspace_id)}/{path}"
         cap = self._max_commit_bytes
+        # Range asks for the first bytes only, but a server may ignore it: the stream is cut at the cap either way.
         response = await self._http.request(
-            "GET", url, scope=self._scope, headers=self._headers(Range=f"bytes=0-{cap - 1}")
+            "GET", url, scope=self._scope, headers=self._headers(Range=f"bytes=0-{cap - 1}"), max_bytes=cap
         )
         data = response.content
         total = len(data)
         if (match := _CONTENT_RANGE_TOTAL.search(response.headers.get("Content-Range", ""))) is not None:
             total = int(match.group(1))
-        truncated = total > cap or len(data) > cap
+        elif isinstance(announced := response.extensions.get("orqentis.content_length"), int):
+            total = announced
+        truncated = total > cap or len(data) > cap or response.extensions.get("orqentis.truncated") is True
+        total = max(total, len(data) + 1) if truncated and total <= cap else total
         text = data[:cap].decode("utf-8", errors="replace")
         lines = text.split("\n")
         if truncated and lines:

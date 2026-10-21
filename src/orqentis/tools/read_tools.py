@@ -9,12 +9,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from orqentis.config.clock import Clock
+from orqentis.config.settings import RefreshSource
 from orqentis.domain.common import ItemType
 from orqentis.domain.estate import FabricItem
 from orqentis.domain.events import EventType
 from orqentis.domain.evidence import EvidenceType
 from orqentis.domain.runs import CapacitySnapshot
 from orqentis.domain.sla import SLAAssessment
+from orqentis.fabric.errors import FabricCapabilityUnavailableError
 from orqentis.fabric.ports import FabricClient
 from orqentis.incidents.deployment import compare_deployments
 from orqentis.incidents.history import IncidentHistory
@@ -45,8 +47,9 @@ class ReadToolDependencies:
     runbooks: RunbookCatalog
     sla: SLAEvaluator
     clock: Clock
-    # Semantic model refresh outcomes come from workspace monitoring instead of the Power BI history (decision D9).
-    refresh_from_monitoring: bool = False
+    # Where semantic model refresh outcomes may be read from (decision D9). The tool follows the deployment's setting,
+    # as the collectors do: it never calls a source the deployment cannot read.
+    refresh_source: RefreshSource = RefreshSource.POWERBI_API
 
 
 def _workspace_for(deps: ReadToolDependencies, item_id: str) -> str:
@@ -321,8 +324,15 @@ def build_read_tools(deps: ReadToolDependencies) -> list[ToolSpec]:
 
     async def get_semantic_model_refresh_history(p: RefreshHistoryInput, ctx: ToolContext) -> ToolOutcome:
         ws = _workspace_for(deps, p.semantic_model_id)
-        if deps.refresh_from_monitoring:
-            # The reader cannot read the Power BI history (dataset Write); the workspace's monitoring database has it.
+        if deps.refresh_source is RefreshSource.NONE:
+            raise FabricCapabilityUnavailableError(
+                "Semantic model refresh history is not read in this deployment (ORQENTIS_REFRESH_SOURCE=none)",
+                error_code="RefreshSourceDisabled",
+            )
+        if deps.refresh_source is not RefreshSource.POWERBI_API:
+            # The reader cannot read the Power BI history (dataset Write), so unless the deployment says it can (and
+            # only it), the workspace's monitoring database is the source. `both` collects from either; a question
+            # asked mid-investigation is asked of the one that is readable.
             now = deps.clock.now()
             logged = await deps.fabric.monitoring.list_semantic_model_refreshes(
                 ws, since=now - _REFRESH_LOOKBACK, until=now

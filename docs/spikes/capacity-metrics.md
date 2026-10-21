@@ -186,7 +186,7 @@ TOPN(
   `capacity_events` derives its `dedupe_key` from the bucket start, so a collector that stores a partial bucket will not update it.
 * **Window.** At most 7 days (the newest 7 if more is asked). `end <= start` returns `[]` without a request. Naive datetimes are UTC.
 * **Failure modes.** HTTP 401/403 -> `FabricAuthError` (from the HTTP layer, unchanged). A 400 or 200 whose DAX error says a name
-  cannot be resolved, or a response missing an expected column -> `FabricCapabilityUnavailableError(CapacityMetricsSchemaMismatch,
+  cannot be resolved, or a response missing an expected column -> `FabricError(CapacityMetricsSchemaMismatch,
   details={"missing_columns", "phase", ...})`. Any other DAX error -> `FabricError(DaxQueryError)`; row-limit errors ->
   `CapacityMetricsRowLimit`. The wording of the "name not found" errors is from memory of the engine's messages, not from a page.
 * **Cost per call.** 1 request, plus up to 12; `executeQueries` allows 120 per minute per user. Retries, the global call budget
@@ -308,7 +308,7 @@ If steps 1-3 or 9 fail, the live outcome is a decision for the owner between opt
 * `CapacityMetricsReader(http, powerbi_base_url=..., workspace_id=..., dataset_id=...)` matches the constructor you specified. The
   extra knob is the public attribute `utc_offset` (default `timedelta(0)`); a settings value would feed it.
 * It raises `FabricAuthError` for 401/403 (to be reported as an unavailable capability, as R13 asks for refresh history),
-  `FabricCapabilityUnavailableError` with `error_code` `CapacityMetricsSchemaMismatch` for model drift, `FabricError` with
+  `FabricError` with `error_code` `CapacityMetricsSchemaMismatch` for model drift (an error, not an unavailable capability, so the collector-errors alert fires), `FabricError` with
   `InvalidIdentifier` for a capacity id that is not a GUID, and `CapacityMetricsRowLimit` / `DaxQueryError` / `InvalidResponse` otherwise.
 * Snapshots are returned oldest first, one per 10-minute bucket, with `source` left at its default `fabric.capacity-metrics`.
 * If the collector polls often, ask for short windows (the last 30-60 minutes): each call makes 1 + up to 12 requests.

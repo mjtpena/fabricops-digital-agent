@@ -27,6 +27,15 @@ section does not match.
   `/health/ready`), not collector errors. Five new scenarios (`notebook_failure`, `refresh_failure`,
   `refresh_failure_pipeline`, `sla_breach`, `schema_drift_delta`); spike write-ups in `docs/spikes/`.
 - Redaction no longer hides the error evidence's own `signature_match` (exact safe keys; the value is still scanned).
+- Review round on the signal sources (PR 19): a hostile Delta commit (deeply nested JSON) no longer fails collection, and an
+  unexpected error in one table's log is that table's error only; the schema in force is remembered per table
+  (`SCHEMA_SNAPSHOT` events) so a change on a busy table is not missed, commits are read oldest first and the watermark
+  never passes one that was not processed; a commit is read as a capped stream even if OneLake ignores `Range`, and a listing
+  that hits its page limit is an error; workspace-monitoring scopes are the workspaces that hold a semantic model (those
+  with no monitoring database are *capability unavailable*) and only rows naming a model of that workspace are used;
+  only known launcher invoke types suppress a job incident; an ambiguous monitoring database and a Capacity Metrics schema
+  mismatch are errors; an unavailable collector still records a run (`outcome=unavailable`); the refresh history tool
+  follows `ORQENTIS_REFRESH_SOURCE`; Bicep parameters for the Delta log caps.
 
 - Durable storage and a stateless app (ADR-0017, implements ADR-0008): PostgreSQL adapters (asyncpg, Entra token as the
   password, no password setting) for the event store, incidents, dependencies, approvals (compare-and-set), the audit

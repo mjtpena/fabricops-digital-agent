@@ -338,11 +338,14 @@ listings filter by the watermark without stopping early and are capped at
 **Signal sources** (ADR-0020). Collectors, in the order they run (pipelines first, so their activity failures are stored before
 the failures they caused): `pipeline-runs`; `notebook-runs`, `spark-job-runs`, `dataflow-runs` (job instances per item);
 `semantic-model-refreshes` (Power BI history, off by default in rest mode) or `workspace-monitoring-refreshes` (one scope per
-workspace that has a monitoring database; it reads 30 minutes further back than its window because events arrive late);
-`delta-schema-changes` (one scope per `delta_tables` entry of the contracts); `capacity-metrics` (only when the Capacity
+workspace that holds a semantic model, *capability unavailable* where the estate has no monitoring database there; it reads 30
+minutes further back than its window because events arrive late, and uses only rows that name a model of that workspace);
+`delta-schema-changes` (one scope per `delta_tables` entry of the contracts; oldest unprocessed commits first, at most
+`ORQENTIS_DELTA_LOG_MAX_COMMITS` per run; the schema in force is remembered as a `SCHEMA_SNAPSHOT` event, so a change is
+compared with it however many commits ago it was written); `capacity-metrics` (only when the Capacity
 Metrics app is configured, at most the last 24 hours, 10-minute buckets). A collector or scope that cannot observe by design
-is **capability unavailable**, not a failure: `IngestionResult.unavailable`, the `orqentis.collector.unavailable` counter and
-`unavailable` on `/health/ready`; only a documented, configured 403 (`ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS`) or a missing
+is **capability unavailable**, not a failure: `IngestionResult.unavailable`, the `orqentis.collector.unavailable` counter
+(and a `collector.runs{outcome=unavailable}` run) and `unavailable` on `/health/ready`; only a documented, configured 403 (`ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS`) or a missing
 capability counts, any other 401/403 is an error. The SLA sweep records a breach only when the collector observing the
 freshness item completed a pass for it recently (`ORQENTIS_SLA_MAX_TELEMETRY_LAG_MINUTES`).
 

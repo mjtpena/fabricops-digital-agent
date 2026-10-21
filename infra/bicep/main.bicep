@@ -419,6 +419,16 @@ param workspaceMonitoringDatabase string = 'Monitoring KQL database'
 @description('ORQENTIS_COLLECT_SCHEMA_CHANGES: read the _delta_log of the Delta tables declared in the contracts (delta_tables). Needs a OneLake data access role with Read on exactly those tables (infra/bicep/README.md section 5).')
 param collectSchemaChanges bool = true
 
+@description('ORQENTIS_DELTA_LOG_MAX_COMMITS: commits of one Delta table read per collection run (the oldest not yet processed; more are read on the next run, none is skipped).')
+@minValue(1)
+@maxValue(1000)
+param deltaLogMaxCommits int = 50
+
+@description('ORQENTIS_DELTA_LOG_MAX_COMMIT_BYTES: bytes read of one Delta commit file (the schema is near the top; the read is cut at this size even if the server ignores the Range header).')
+@minValue(1024)
+@maxValue(67108864)
+param deltaLogMaxCommitBytes int = 2097152
+
 @description('ORQENTIS_CAPACITY_METRICS_WORKSPACE_ID: workspace the Fabric Capacity Metrics app is installed in. Set together with capacityMetricsDatasetId, or leave both empty (capacity utilisation is then unavailable).')
 param capacityMetricsWorkspaceId string = ''
 
@@ -1066,6 +1076,8 @@ var appEnv = concat(
     { name: 'ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES', value: string(fabricJobInstancesMaxPages) }
     { name: 'ORQENTIS_COLLECT_ITEM_JOBS', value: collectItemJobs ? 'true' : 'false' }
     { name: 'ORQENTIS_COLLECT_SCHEMA_CHANGES', value: collectSchemaChanges ? 'true' : 'false' }
+    { name: 'ORQENTIS_DELTA_LOG_MAX_COMMITS', value: string(deltaLogMaxCommits) }
+    { name: 'ORQENTIS_DELTA_LOG_MAX_COMMIT_BYTES', value: string(deltaLogMaxCommitBytes) }
     { name: 'ORQENTIS_REFRESH_SOURCE', value: refreshSource }
     { name: 'ORQENTIS_WORKSPACE_MONITORING_DATABASE', value: workspaceMonitoringDatabase }
     { name: 'ORQENTIS_SLA_MAX_TELEMETRY_LAG_MINUTES', value: string(slaMaxTelemetryLagMinutes) }

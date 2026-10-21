@@ -40,11 +40,19 @@ A notebook that a pipeline ran fails *because* it failed, and the pipeline's inc
 Two incidents for one failure would page twice, so a candidate can carry `covered_by_activity_target`: the engine drops it
 when a failed pipeline activity that targets the same item was recorded within `COVERAGE_WINDOW` (10 minutes) of the failure.
 The match is the activity's target item id and time, never a name. Pipelines are collected first, so within a cycle their
-activity failures are already stored when detection reads the job failure. Independently, a job whose `invokeType` is not
-`Manual`/`Scheduled` is marked `launched_by_item` and opens nothing. **Residual race:** if the notebook is read as failed
-while its pipeline is still `InProgress` (seconds, about 1 to 2% of cycles), the notebook incident opens first and the
-pipeline's follows next cycle. The live game day should confirm whether Fabric lists pipeline-started runs in the
-notebook's own job instances and what `invokeType` they carry; the dedupe is written not to depend on the answer.
+activity failures are already stored when detection reads the job failure. Independently, a job whose `invokeType` is one of
+the **known launcher values** (`Pipeline`, `ReferenceRun`, `Notebook`, case-insensitive) is marked `launched_by_item` and
+opens nothing. Any other value, an empty one or a missing one is a direct run: a failure is never hidden behind a word nobody
+has seen, and when a pipeline incident does cover it the coverage check above removes the duplicate.
+
+**Residual gaps, stated plainly.** (1) The coverage check needs the pipeline's activity failure to be stored, and that
+happens only when the pipeline *run* has finished. A pipeline that carries on after a failed activity (an on-failure branch
+that cleans up or notifies) stays `InProgress` for as long as that branch takes, which is minutes, not seconds; the earlier
+"about 1 to 2% of cycles" had no measurement behind it and is withdrawn. While the pipeline runs on, a job with an *unknown*
+invoke type opens its own incident and the pipeline's follows when it ends. (2) For a *known* launcher value the job opens
+nothing, so a job failure that its pipeline handles (the run ends `Succeeded`) is invisible to detection; the pipeline's own
+monitoring is where such a design is watched. Both are decisions for the live game day, which should confirm whether Fabric
+lists pipeline-started runs in the notebook's own job instances and which `invokeType` they carry.
 
 ### 3. Semantic model refresh failures (D9): workspace monitoring
 
@@ -58,9 +66,16 @@ into the query: ids and times travel as `properties.Parameters`, the options set
 are bounded. The bearer token for the query endpoint is sent only to hosts inside the Fabric API's parent domain
 (`*.fabric.microsoft.com`), because the endpoint is named by the response of an API a workspace member influences. Everything
 returned is untrusted: control, bidi and zero-width characters are removed, Power BI privacy markers stripped, lengths
-capped, ids must be GUIDs. `MonitoringRefreshCollector` has one scope per workspace that has a monitoring database in the
-catalog (a workspace without one costs no call) and reads 30 minutes further back than its window, because events reach the
+capped, ids must be GUIDs. `MonitoringRefreshCollector` has one scope per workspace that **holds a semantic model**. Where
+the catalog has no monitoring database for that workspace the scope is reported as *capability unavailable* without any API
+call (a metric and `/health/ready`, section 8): the refresh failures of those models cannot be seen, and a workspace that
+silently produced nothing would look healthy. It reads 30 minutes further back than its window, because events reach the
 database minutes late (a refresh that just ended can look unfinished; the event store de-duplicates by refresh id and status).
+A row is used only if its item is a semantic model **of that workspace** in the catalog: the database is written by anyone
+who can run a refresh there, and must not be able to name a model of another workspace (a PROD one) and have an incident
+opened on it. Rows for other ids are counted and logged, not used. A model created after the catalog was built is skipped the
+same way until the catalog catches up. Two databases carrying the monitoring name is a fault, not a missing capability
+(`WorkspaceMonitoringAmbiguous` is an error).
 
 **The spike could not settle permissions, and the documentation contradicts itself** (`docs/spikes/workspace-monitoring.md`):
 the workspace monitoring overview says "Workspace users with at least the Contributor role can query the monitoring
@@ -103,16 +118,37 @@ Contracts gain `delta_tables`: the Delta tables to watch (lakehouse item id, tab
 other section (duplicate ids, the lakehouse exists and is a lakehouse, names cannot carry a path) and in the JSON schema.
 `RestDeltaLogService` (the new `DeltaLogService` port) lists a table's `_delta_log` and reads the first bytes of a commit file
 through the OneLake ADLS Gen2 API, read-only (`GET` only) with a `Range` header and a byte cap, keeping only the `metaData`,
-`commitInfo` and `protocol` lines. `SchemaChangeCollector` reads the commits written since the watermark, finds the schema in
-force before the first of them (reading back a bounded number of commits), and compares each schema with the one before it.
-Columns added, removed or whose type changed are reported; a **rename is reported only when Delta column mapping proves it**
+`commitInfo` and `protocol` lines. `SchemaChangeCollector` reads the commits it has not processed yet, **oldest first**, and
+compares each schema with the one before it. Columns added, removed or whose type changed are reported; a **rename is reported only when Delta column mapping proves it**
 (same physical column, new logical name), otherwise it is one removed plus one added column, which the reasoner calls
 "consistent with a rename". Events are `SCHEMA_CHANGED` with the same payload keys the investigation already consumed.
 
+**"Before" is remembered, not searched for.** Delta writes a `metaData` action only when the schema changes, so on a busy
+table the commit that holds the previous schema can be thousands of commits back; a bounded search through the log misses
+exactly those tables. Whenever a commit brings a schema that differs from the one in force, the collector also emits a
+`SCHEMA_SNAPSHOT` event (the columns and Delta column-mapping names at that version, INFO, no rule consumes it), and the next
+run starts from the newest snapshot of the table. The search through up to `max_backscan` earlier commits remains only as the
+way a table is *first* seen. **Cold start limit:** a table whose last schema-carrying commit is older than that search (a table
+created long ago with thousands of appends since) has no starting point until its next schema-carrying commit, which is then
+recorded without being reported as a change; Parquet checkpoints, which would answer it, need a Parquet reader (alternatives).
+A log that starts over (the table was dropped and created again: the newest version is lower than the recorded one) is read
+from its first commit and compared with the recorded schema.
+
+**Work is bounded without losing anything.** At most `ORQENTIS_DELTA_LOG_MAX_COMMITS` commits are read per table per run. When
+more are waiting, the collector says so (`ResumableCollector.progress`), the ingestor moves that table's watermark only as far
+as the last commit processed (never to "now"), and a checkpoint snapshot records the version reached so the next run continues
+after it rather than reading the same commits again. The directory listing is ordered oldest first, so a listing that hits the
+page limit (100,000 entries) would hold only the oldest commits and is an error (`DeltaLogListingTruncated`), not a short list.
+A commit is read as a stream cut at `ORQENTIS_DELTA_LOG_MAX_COMMIT_BYTES` even when the server ignores the `Range` header and
+sends the whole file.
+
 **Everything in a Delta log is untrusted** (table and column names, `commitInfo.operation`, `engineInfo`, `userMetadata`):
 control characters, bidi characters and envelope-like tags are removed, lengths are clipped, the number of columns, lines and
-bytes is bounded, a malformed line is skipped. The values are then scanned by the evidence recorder's instruction scanner like
-every other Fabric string, flagged on the evidence, and told to the model inside the untrusted-data envelope.
+bytes is bounded, and a malformed line is skipped, including JSON nested deeper than the parser accepts (which raised
+`RecursionError` in the first version and failed every collection run). Whatever else a table's log makes the collector raise
+becomes that table's own error (`DeltaLogUnreadable`, the exception's type only): it costs the table its run, never the other
+tables' or the other collectors'. The values are then scanned by the evidence recorder's instruction scanner like every other
+Fabric string, flagged on the evidence, and told to the model inside the untrusted-data envelope.
 
 The live "column `'unknown'`" finding was Spark's own message form (``A column, variable, or function parameter with name
 `customer_id` cannot be resolved. Did you mean one of the following? [...]``, nested inside Fabric's JSON): the schema
@@ -124,7 +160,8 @@ Delta log, and with one it names the version and the rename.
 `CapacityMetricsReader` implements `CapacityService.get_capacity_metrics` through `executeQueries` against the Capacity
 Metrics app's semantic model, folding its 30-second timepoints into 10-minute buckets, with identifier validation (the DAX
 has no parameters, so the capacity id must be a GUID and timestamps are built from integers) and a schema guard that fails
-closed with `CapacityMetricsSchemaMismatch`. It is configured by `ORQENTIS_CAPACITY_METRICS_WORKSPACE_ID` and
+closed with `CapacityMetricsSchemaMismatch`, which is an **error** (the app was updated and the data is wrong or absent, so
+the collector-errors alert must fire), not an unavailable capability. It is configured by `ORQENTIS_CAPACITY_METRICS_WORKSPACE_ID` and
 `..._DATASET_ID` (both or neither). **ADR-0009 said a spike would confirm this source. It could not, offline, and the findings
 count against it** (`docs/spikes/capacity-metrics.md`): Microsoft states the app's model is not a supported surface and two
 app versions already name their tables differently; `executeQueries` needs **Build** on the model, which a workspace Viewer
@@ -167,6 +204,14 @@ watermark where it was, does not count it as a failed unit, and `/health/ready` 
 error and keeps the collector-errors alert meaningful. With workspace monitoring the default source, the Power BI refresh
 history call is no longer made at all in rest mode.
 
+An unavailable collector **still records a run**: `orqentis.collector.runs{outcome=unavailable}` and its duration, so a
+dashboard sees it ran and how long it took. Only `outcome=error` feeds the collector-errors alert. What is a fault rather than
+a missing capability is decided where it is raised: `WorkspaceMonitoringNotEnabled` (no monitoring database in the estate) and
+`CapacityMetricsUnavailable` (no capacity source configured) are unavailable; `WorkspaceMonitoringAmbiguous`, `CapacityMetricsSchemaMismatch`,
+`DeltaLogListingTruncated` and `DeltaLogUnreadable` are errors. The refresh history *tool* follows `ORQENTIS_REFRESH_SOURCE`
+too: `both` reads workspace monitoring (never the Power BI history the reader cannot read) and `none` answers
+`CAPABILITY_UNAVAILABLE`.
+
 ### 9. Not built: deployment-drift detection
 
 The brief made it optional "only if a read-only path exists with the reader's grants". It does not. Deployment pipelines are
@@ -185,9 +230,11 @@ follow-up for the owner's decision.
   precise at the cost of a few enum members.
 * **Merging a notebook incident into its pipeline's incident afterwards.** There is no incident merge, and the coverage test at
   open time is simpler and deterministic; the residual race is documented instead.
-* **Reading Delta checkpoints.** They are Parquet; reading them needs a Parquet reader. Bounded JSON commits are enough while a
-  checkpoint has not retired the commits we need, and a table whose log has none we can read reports nothing rather than
-  guessing.
+* **Reading Delta checkpoints.** They are Parquet; reading them needs a Parquet reader. Bounded JSON commits plus the recorded
+  snapshots are enough while a checkpoint has not retired the commits we need, and a table whose log has none we can read
+  reports nothing rather than guessing.
+* **A longer back-scan instead of snapshots.** Any bound is too short for some busy table, and a bound large enough for all of
+  them is thousands of reads per table per run. Remembering the schema costs one small event per schema change.
 * **A "newest-first early stop" for job instances.** Unsound for the reason in ADR-0013 section 8; not added.
 * **Treating a 403 as unavailable by default.** It would hide real permission regressions. It is opt-in and per collector.
 

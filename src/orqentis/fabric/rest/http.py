@@ -43,6 +43,8 @@ CLIENT_REQUEST_ID_HEADER = "x-ms-client-request-id"
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 _RESPONSE_REQUEST_ID_HEADERS = ("RequestId", "x-ms-request-id")
 _MAX_ERROR_TEXT = 1000
+_MAX_ERROR_BODY = 64 * 1024  # an error body read through a capped stream
+_WIRE_BODY_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
 
 QueryParams = Mapping[str, str | int]
 JsonObject = dict[str, Any]
@@ -218,10 +220,16 @@ class FabricHttp:
         params: QueryParams | None = None,
         json: Any = None,
         headers: Mapping[str, str] | None = None,
+        max_bytes: int | None = None,
     ) -> httpx.Response:
         """Send one logical request (with retries). Returns a 2xx response or raises a FabricError.
 
         ``headers`` adds to (or, for ``Accept``, replaces) the defaults; it can never replace ``Authorization``.
+
+        ``max_bytes`` reads the body as a stream and stops at that many bytes, closing the connection: a server that
+        ignores a ``Range`` header (or lies about its size) cannot make the process hold a whole file. The response
+        then carries at most ``max_bytes`` of body; ``extensions["orqentis.truncated"]`` says more was available and
+        ``extensions["orqentis.content_length"]`` is the length the server announced, if it did.
         """
         method = method.upper()
         correlation_id = str(uuid4())
@@ -240,8 +248,8 @@ class FabricHttp:
             try:
                 # The budget covers the network round trip only: backoff sleeps below never hold a slot.
                 async with self._budget.slot() if self._budget else contextlib.nullcontext():
-                    response = await self._client.request(
-                        method, url, params=params, json=json, headers=request_headers
+                    response = await self._send(
+                        method, url, params=params, json=json, headers=request_headers, max_bytes=max_bytes
                     )
             except httpx.TransportError as exc:
                 will_retry = attempt <= self._max_retries
@@ -306,6 +314,40 @@ class FabricHttp:
             if delay is None or not will_retry:
                 raise self._error(response, method=method, path=path, correlation_id=correlation_id, attempts=attempt)
             await self._sleep(delay)
+
+    async def _send(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: QueryParams | None,
+        json: Any,
+        headers: Mapping[str, str],
+        max_bytes: int | None,
+    ) -> httpx.Response:
+        if max_bytes is None:
+            return await self._client.request(method, url, params=params, json=json, headers=headers)
+        async with self._client.stream(method, url, params=params, json=json, headers=headers) as streamed:
+            limit = max_bytes if streamed.is_success else min(max_bytes, _MAX_ERROR_BODY)
+            body = bytearray()
+            truncated = False
+            async for chunk in streamed.aiter_bytes():
+                body += chunk
+                if len(body) > limit:
+                    truncated = True
+                    break  # leaving the block closes the connection: the rest of the body is never read
+            announced = streamed.headers.get("Content-Length")
+            return httpx.Response(
+                streamed.status_code,
+                # The body is already decoded and cut: the headers that describe the wire form no longer apply.
+                headers=[(k, v) for k, v in streamed.headers.multi_items() if k.lower() not in _WIRE_BODY_HEADERS],
+                content=bytes(body[:limit]),
+                request=streamed.request,
+                extensions={
+                    "orqentis.truncated": truncated,
+                    "orqentis.content_length": int(announced) if announced and announced.isdigit() else None,
+                },
+            )
 
     async def get_json(self, url: str, *, scope: str, params: QueryParams | None = None) -> JsonObject:
         return self._json_object(await self.request("GET", url, scope=scope, params=params))

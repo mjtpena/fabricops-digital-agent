@@ -87,15 +87,20 @@ async def test_an_expected_403_is_unavailable_and_not_an_error(container: Contai
     assert "HTTP 403" in result.unavailable["semantic-model-refreshes"] and result.units_unavailable == 1
     assert harness.total("orqentis.collector.unavailable", collector="semantic-model-refreshes") == 1
     assert harness.total("orqentis.collector.errors") == 0
+    # the collector-errors alert (WS9) reads collector.runs{outcome=error}, not collector.errors: it must stay at zero
+    assert harness.total("orqentis.collector.runs", collector="semantic-model-refreshes", outcome="error") == 0
+    assert harness.total("orqentis.collector.runs", collector="semantic-model-refreshes", outcome="unavailable") == 1
     assert (
         await container.event_store.get_watermarks("semantic-model-refreshes") == {}
     )  # retried from the lookback later
 
 
 async def test_the_same_403_is_an_error_when_the_deployment_does_not_expect_it(container: Container) -> None:
-    result = await ingestor(container, Failing("semantic-model-refreshes", forbidden())).run()
+    harness = MetricsHarness()
+    result = await ingestor(container, Failing("semantic-model-refreshes", forbidden()), harness=harness).run()
     assert "semantic-model-refreshes" in result.errors and result.unavailable == {}
     assert result.units_failed == 1
+    assert harness.total("orqentis.collector.runs", collector="semantic-model-refreshes", outcome="error") == 1
     other = await ingestor(
         container, Failing("pipeline-runs", forbidden()), expected=("semantic-model-refreshes",)
     ).run()

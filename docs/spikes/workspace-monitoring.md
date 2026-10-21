@@ -253,7 +253,7 @@ Redact ids before pasting anything into the ledger. `<ws>` is a sandbox workspac
    with `status` as seen in step 5, the engine message in `error_text`, a row for the success, no rows for DAX queries, and a row count equal to the number of refreshes in the window.
 7. Through the Python adapter, with the real settings and token provider: `RestMonitoringService.list_semantic_model_refreshes(<ws>, since, until)`. Pass: a `Refresh` with `RunStatus.FAILED`, `error.message` equal to the engine text (privacy markers gone) and the succeeded one;
    `source == "fabric.workspace-monitoring"`; the request log shows only `GET .../kqlDatabases` and `POST .../v1/rest/query`.
-8. Negative cases. (a) A sandbox workspace without monitoring: expect `FabricCapabilityUnavailableError` with `error_code == "WorkspaceMonitoringNotEnabled"`. (b) Monitoring on, a principal without query rights: expect `FabricAuthError` (403). (c) Monitoring on, no semantic model activity ever:
+8. Negative cases. (a) A sandbox workspace without monitoring: expect `FabricCapabilityUnavailableError` with `error_code == "WorkspaceMonitoringNotEnabled"` (the collector raises it from the catalog, with no API call, when the estate holds no KQL database named like the monitoring database in that workspace; the adapter raises it when the Fabric listing has none). (b) Monitoring on, a principal without query rights: expect `FabricAuthError` (403). (c) Monitoring on, no semantic model activity ever:
    expect `[]` (and record the real 400 wording if the adapter raised instead; fix `_table_missing`).
 
 **Latency, coverage, scale.**

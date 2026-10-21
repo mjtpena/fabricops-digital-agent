@@ -80,6 +80,30 @@ class SchemaSnapshot:
     def same_as(self, other: SchemaSnapshot) -> bool:
         return self.columns == other.columns and self.physical == other.physical
 
+    def to_payload(self) -> dict[str, Any]:
+        """The snapshot as event payload fields (already bounded and sanitised by the parser)."""
+        return {
+            "columns": [c.model_dump() for c in self.columns],
+            "physical": dict(self.physical),
+            "columns_truncated": self.truncated,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> SchemaSnapshot | None:
+        """The snapshot stored by :meth:`to_payload`, or ``None`` when the payload carries none (or cannot be read)."""
+        columns = payload.get("columns")
+        physical = payload.get("physical")
+        if not isinstance(columns, list) or not isinstance(physical, dict):
+            return None
+        try:
+            return cls(
+                tuple(ColumnSpec.model_validate(c) for c in columns),
+                {str(k): str(v) for k, v in physical.items()},
+                truncated=payload.get("columns_truncated") is True,
+            )
+        except ValueError:  # pydantic's ValidationError is a ValueError
+            return None
+
 
 @dataclass(frozen=True)
 class ParsedCommit:
@@ -92,13 +116,18 @@ class ParsedCommit:
     truncated: bool = False
 
 
+def _loads(text: str) -> Any:
+    """``json.loads`` that a writer of the table cannot make raise: bad JSON, or nesting beyond the parser's limit."""
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError):  # a 200 KB line of "[[[[..." is well under every size cap
+        return None
+
+
 def parse_schema_string(raw: object) -> SchemaSnapshot | None:
     if not isinstance(raw, str) or not raw or len(raw) > MAX_SCHEMA_STRING:
         return None
-    try:
-        document = json.loads(raw)
-    except ValueError:
-        return None
+    document = _loads(raw)
     fields = document.get("fields") if isinstance(document, dict) else None
     if not isinstance(fields, list):
         return None
@@ -122,10 +151,7 @@ def parse_schema_string(raw: object) -> SchemaSnapshot | None:
 def _action(line: str) -> tuple[str, dict[str, Any]] | None:
     if len(line) > MAX_LINE:
         return None
-    try:
-        document = json.loads(line)
-    except ValueError:
-        return None
+    document = _loads(line)
     if not isinstance(document, dict) or len(document) != 1:
         return None
     ((kind, body),) = document.items()

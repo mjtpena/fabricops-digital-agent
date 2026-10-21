@@ -71,7 +71,7 @@ Attribute values are bounded: enum members and our own collector, job and tool n
 | Metric | Kind | Attributes | Meaning |
 |---|---|---|---|
 | `orqentis.collector.duration` (s) | histogram | `collector` | Time one collector took in one run |
-| `orqentis.collector.runs` | counter | `collector`, `outcome` = `ok`/`error` | `error` when the collector, or any of its scopes, raised a Fabric error |
+| `orqentis.collector.runs` | counter | `collector`, `outcome` = `ok`/`error`/`unavailable` | `error` when the collector, or any of its scopes, raised a Fabric error (the *collector errors* alert reads only this); `unavailable` when it could not observe by design and nothing else failed. An unavailable collector still records a run and its duration |
 | `orqentis.collector.errors` | counter | `collector` | Failed collector runs or failed scopes (one per failing pipeline or model) |
 | `orqentis.collector.unavailable` | counter | `collector` | A collector (or scope) that could not observe **by design**: a permission gap the deployment documents (`ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS`) or a capability the platform does not expose. Not an error and never alerts; `/health/ready` lists the collector names under `unavailable` |
 | `orqentis.events.ingested` | counter | `collector` | Events that were new to the event store |
@@ -480,8 +480,8 @@ Do not stop FabricOps by deleting the Container App or its volume; stop the sche
 | `pipeline-runs` | pipeline job instances and activity runs | workspace Viewer | one per pipeline |
 | `notebook-runs`, `spark-job-runs`, `dataflow-runs` | job instances of those items | workspace Viewer | one per item |
 | `semantic-model-refreshes` | Power BI refresh history (`ORQENTIS_REFRESH_SOURCE` = `powerbi_api` or `both`) | dataset Write (the reader never has it) | one per model |
-| `workspace-monitoring-refreshes` | the monitoring KQL database (default refresh source in rest mode) | to be confirmed live: see `docs/security.md` section 11 | one per workspace that has a monitoring database |
-| `delta-schema-changes` | `_delta_log` of the contracts' `delta_tables` | a OneLake data access role with Read on exactly those tables | one per declared table |
+| `workspace-monitoring-refreshes` | the monitoring KQL database (default refresh source in rest mode) | to be confirmed live: see `docs/security.md` section 11 | one per workspace that holds a semantic model; one with no monitoring database in the estate is reported as capability unavailable, without an API call |
+| `delta-schema-changes` | `_delta_log` of the contracts' `delta_tables` (at most `ORQENTIS_DELTA_LOG_MAX_COMMITS` commits per table per run, oldest first; the schema in force is kept as a `SCHEMA_SNAPSHOT` event) | a OneLake data access role with Read on exactly those tables | one per declared table |
 | `capacity-metrics` | the Capacity Metrics app's model (configured by workspace and model id) | Read and Build on the model (open decision) | one per capacity |
 
 **Capability unavailable is not an error.** A collector (or one scope) that cannot observe by design (a capability the platform

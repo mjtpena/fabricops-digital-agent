@@ -290,7 +290,9 @@ class RestMonitoringService:
                 details={"workspace_id": workspace_id},
             )
         if len(found) > 1:
-            raise FabricCapabilityUnavailableError(
+            # A fault in the workspace, not an absent capability: monitoring *is* on, and the data cannot be trusted to
+            # come from the right database. Someone has to look, so it is an error and reaches the alert.
+            raise FabricError(
                 "More than one KQL database carries the monitoring database name; refusing to pick one",
                 error_code="WorkspaceMonitoringAmbiguous",
                 details={"workspace_id": workspace_id},

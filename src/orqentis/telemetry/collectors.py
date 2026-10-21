@@ -9,16 +9,16 @@ from datetime import datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from orqentis.config.clock import Clock
-from orqentis.domain.common import Environment, ItemType
+from orqentis.domain.common import ItemType
 from orqentis.domain.delta import DeltaCommitRef, DeltaTableRef
-from orqentis.domain.estate import GenericItem
-from orqentis.domain.events import OperationalEvent
+from orqentis.domain.estate import DeltaTableDeclaration, FabricItem, GenericItem
+from orqentis.domain.events import EventType, OperationalEvent
 from orqentis.domain.runs import RunStatus
 from orqentis.fabric.errors import FabricAuthError, FabricCapabilityUnavailableError, FabricError
 from orqentis.fabric.ports import FabricClient
 from orqentis.observability.logging import get_logger
 from orqentis.observability.metrics import DISABLED, Metrics
-from orqentis.storage.event_store import COLLECTOR_SCOPE, EventStore
+from orqentis.storage.event_store import COLLECTOR_SCOPE, EventQuery, EventStore
 from orqentis.telemetry.delta import ParsedCommit, SchemaSnapshot, parse_commit, schema_change
 from orqentis.telemetry.normalization import (
     JOB_EVENTS,
@@ -29,6 +29,7 @@ from orqentis.telemetry.normalization import (
     pipeline_run_event,
     refresh_event,
     schema_change_event,
+    schema_snapshot_event,
 )
 from orqentis.topology.catalog import EstateCatalog
 
@@ -60,6 +61,19 @@ class ScopedCollector(Protocol):
         ...
 
     async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]: ...
+
+
+@runtime_checkable
+class ResumableCollector(ScopedCollector, Protocol):
+    """A scoped collector that may stop before the end of a scope's window and say how far it got.
+
+    Without it a collector that caps its work per run would either drop what it did not reach (the watermark passes it)
+    or never get past it (the watermark stays and the same part is read again).
+    """
+
+    def progress(self, scope: str) -> datetime | None:
+        """After ``collect_scope(scope)``: the instant everything before which was processed, ``None`` if all of it."""
+        ...
 
 
 class PipelineRunCollector:
@@ -182,9 +196,15 @@ class ItemJobCollector:
 class MonitoringRefreshCollector:
     """Semantic model refresh outcomes from Fabric workspace monitoring (decision D9, ADR-0020).
 
-    One scope per workspace that has a monitoring database in the catalog, so a workspace without monitoring costs no
-    call. A workspace whose monitoring turns out to be unreadable is reported as *capability unavailable*, not as an
-    error.
+    One scope per workspace that holds a semantic model. Where the catalog has no monitoring database for that
+    workspace the scope is reported as *capability unavailable* without any API call: the refresh failures of those
+    models cannot be seen, and that must be visible (metric, readiness) instead of looking like a quiet workspace
+    (docs/spikes/workspace-monitoring.md, section 10). A monitoring database that exists but cannot be read is the
+    adapter's to classify; an ambiguous one is an error.
+
+    The rows a monitoring database returns are untrusted: anyone who can run a refresh in the workspace writes them. A
+    row is used only when its item is a semantic model of *this* workspace in the catalog, so a database cannot name a
+    model of another workspace (a PROD model, say) and have an incident opened against it.
     """
 
     name = "workspace-monitoring-refreshes"
@@ -199,20 +219,33 @@ class MonitoringRefreshCollector:
         self._database_name = database_name.strip().lower()
 
     def scopes(self) -> list[str]:
-        return sorted(
-            {
-                i.workspace_id
-                for i in self._catalog.items.values()
-                if isinstance(i, GenericItem)
-                and i.fabric_type == "KQLDatabase"
-                and i.display_name.strip().lower() == self._database_name
-            }
+        return sorted({i.workspace_id for i in self._catalog.items.values() if i.item_type is ItemType.SEMANTIC_MODEL})
+
+    def _has_monitoring(self, workspace_id: str) -> bool:
+        return any(
+            isinstance(i, GenericItem)
+            and i.workspace_id == workspace_id
+            and i.fabric_type == "KQLDatabase"
+            and i.display_name.strip().lower() == self._database_name
+            for i in self._catalog.items.values()
         )
 
     async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]:
-        workspace = self._catalog.workspaces.get(scope)
-        fallback = workspace.environment if workspace else Environment.UNKNOWN
+        if not self._has_monitoring(scope):
+            raise FabricCapabilityUnavailableError(
+                f"Semantic model refreshes of workspace {scope} cannot be observed: the estate has no KQL database "
+                "named like the workspace monitoring database there (monitoring is not enabled, or the reader cannot "
+                "see it)",
+                error_code="WorkspaceMonitoringNotEnabled",
+                details={"workspace_id": scope},
+            )
+        models = {
+            i.id: i
+            for i in self._catalog.items.values()
+            if i.item_type is ItemType.SEMANTIC_MODEL and i.workspace_id == scope
+        }
         events: list[OperationalEvent] = []
+        foreign = 0
         window_start = since - self.LATENCY_MARGIN
         for refresh in await self._fabric.monitoring.list_semantic_model_refreshes(
             scope, since=window_start, until=until
@@ -220,13 +253,17 @@ class MonitoringRefreshCollector:
             when = refresh.end_time or refresh.start_time
             if not is_reportable(refresh.status) or when is None or not window_start <= when <= until:
                 continue
-            model = self._catalog.items.get(refresh.item_id)
-            events.append(
-                refresh_event(
-                    refresh,
-                    display_name=model.display_name if model else refresh.item_id,
-                    environment=model.environment if model else fallback,
-                )
+            model = models.get(refresh.item_id)
+            if model is None:
+                foreign += 1
+                continue
+            events.append(refresh_event(refresh, display_name=model.display_name, environment=model.environment))
+        if foreign:
+            # A model created since the catalog was built, or a row that names an item that is not ours. Counted, not
+            # named: the id came from the database.
+            _log.warning(
+                "workspace monitoring rows skipped: not a semantic model of this workspace in the estate",
+                extra={"workspace_id": scope, "skipped": foreign},
             )
         return events
 
@@ -240,24 +277,43 @@ class MonitoringRefreshCollector:
 class SchemaChangeCollector:
     """Schema changes of the Delta tables declared in the contracts, read from their ``_delta_log`` (ADR-0009).
 
-    One scope per declared table. A scope reads the JSON commits written since the watermark and compares each schema
-    it finds with the one before it; the first commit read has no predecessor in the window, so a few older commits
-    are read to find one. Only a difference in the columns or their types produces an event: re-written but identical
-    schemas (a table property changed, an overwrite with the same columns) produce nothing.
+    One scope per declared table. A scope reads the JSON commits it has not processed yet, oldest first, and compares
+    each schema it finds with the one before it. Only a difference in the columns or their types produces a
+    ``SCHEMA_CHANGED`` event: re-written but identical schemas (a table property changed, an overwrite with the same
+    columns) produce nothing.
+
+    **What "before" is** is remembered, not searched for: whenever a commit brings a schema that differs from the one in
+    force, the collector also returns a ``SCHEMA_SNAPSHOT`` event holding it, and the next run starts from the newest
+    snapshot of the table. Delta writes a ``metaData`` action only when the schema changes, so on a busy table the
+    commit that carries the previous schema can be thousands of commits back; a bounded search through the log would
+    miss exactly the tables that matter. The search (``max_backscan`` commits) is only the way a table is first seen.
+
+    **Work per run is bounded without losing anything.** At most ``max_commits`` commits are read per scope per run,
+    the *oldest* unprocessed ones. When more are waiting the collector says so (:meth:`progress`), the ingestor moves
+    the watermark only as far as the last commit processed, and a checkpoint snapshot records the version reached, so
+    the next run continues after it instead of reading the same commits again.
     """
 
     name = "delta-schema-changes"
     SOURCE = "orqentis.collectors.delta-log"
 
     def __init__(
-        self, fabric: FabricClient, catalog: EstateCatalog, *, max_commits: int = 50, max_backscan: int = 20
+        self,
+        fabric: FabricClient,
+        catalog: EstateCatalog,
+        event_store: EventStore,
+        *,
+        max_commits: int = 50,
+        max_backscan: int = 20,
     ) -> None:
         if max_commits < 1 or max_backscan < 0:
             raise ValueError("max_commits must be >= 1 and max_backscan >= 0")
         self._fabric = fabric
         self._catalog = catalog
+        self._event_store = event_store
         self._max_commits = max_commits
         self._max_backscan = max_backscan
+        self._resume: dict[str, datetime] = {}
 
     def scopes(self) -> list[str]:
         return sorted(
@@ -266,7 +322,16 @@ class SchemaChangeCollector:
             if (item := self._catalog.items.get(t.item_id)) is not None and item.item_type is ItemType.LAKEHOUSE
         )
 
+    def progress(self, scope: str) -> datetime | None:
+        """Set by the last :meth:`collect_scope` of ``scope`` when commits were left for the next run.
+
+        The instant up to which the commits were processed (the watermark may move that far, no further), or ``None``
+        when the whole window was read. Read once: the value is consumed.
+        """
+        return self._resume.pop(scope, None)
+
     async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]:
+        self._resume.pop(scope, None)
         declaration = self._catalog.delta_tables.get(scope)
         lakehouse = self._catalog.items.get(declaration.item_id) if declaration else None
         if declaration is None or lakehouse is None:
@@ -278,20 +343,78 @@ class SchemaChangeCollector:
             table=declaration.table,
             schema_name=declaration.schema_name,
         )
+        try:
+            return await self._read_table(declaration, lakehouse, table, since=since, until=until)
+        except FabricError:
+            raise
+        except Exception as exc:
+            # The log is written by whoever can write to the table: whatever it contains must cost this table its run,
+            # never the other tables' (or the other collectors') runs. Only the exception's type is kept: its message
+            # may quote what was read.
+            raise FabricError(
+                f"The Delta log of {declaration.id} could not be processed ({type(exc).__name__})",
+                error_code="DeltaLogUnreadable",
+            ) from exc
+
+    async def _read_table(
+        self,
+        declaration: DeltaTableDeclaration,
+        lakehouse: FabricItem,
+        table: DeltaTableRef,
+        *,
+        since: datetime,
+        until: datetime,
+    ) -> list[OperationalEvent]:
         commits = await self._fabric.delta_logs.list_commits(table)
-        fresh = [c for c in commits if c.modified_at is None or c.modified_at >= since][-self._max_commits :]
-        if not fresh:
-            return []
-        previous = await self._baseline(table, [c for c in commits if c.version < fresh[0].version])
+        stored = await self._stored_baseline(declaration.id)
+        floor = stored.version if stored else -1
+        if stored and commits and commits[-1].version < stored.version:
+            floor = -1  # the log starts over (the table was dropped and created again): everything in it is new
+        pending = [c for c in commits if c.version > floor and (c.modified_at is None or c.modified_at >= since)]
+        batch = pending[: self._max_commits]
+
+        def event_time(ref: DeltaCommitRef | None, parsed: ParsedCommit | None = None) -> datetime:
+            when = (parsed.committed_at if parsed else None) or (ref.modified_at if ref else None) or until
+            return min(when, until)
+
+        def snapshot(version: int, schema: SchemaSnapshot | None, *, checkpoint: bool = False) -> OperationalEvent:
+            # Stamped with the collection time, not the commit's: the order of snapshots is the order they were taken in
+            # (the writer of the log chooses the commit's own timestamp).
+            return schema_snapshot_event(
+                declaration=declaration,
+                version=version,
+                schema=schema,
+                tenant_id=lakehouse.tenant_id,
+                workspace_id=lakehouse.workspace_id,
+                lakehouse_name=lakehouse.display_name,
+                environment=lakehouse.environment,
+                timestamp=until,
+                source=self.SOURCE,
+                checkpoint=checkpoint,
+            )
+
         events: list[OperationalEvent] = []
-        for ref in fresh:
+        previous: tuple[int, SchemaSnapshot] | None = (
+            (stored.version, stored.schema) if stored and stored.schema else None
+        )
+        if previous is None and stored is None:
+            # A table seen for the first time: the newest schema before what is read now is the starting point.
+            earlier = [c for c in commits if not batch or c.version < batch[0].version]
+            found = await self._first_schema(table, earlier)
+            if found is not None and found[1].schema is not None:
+                previous = (found[0].version, found[1].schema)
+                events.append(snapshot(found[0].version, found[1].schema))
+        last: DeltaCommitRef | None = None
+        for ref in batch:
             parsed = parse_commit(await self._fabric.delta_logs.read_commit(table, ref.version))
+            last = ref
             if parsed.schema is None:
                 continue
+            if previous is not None and previous[1].same_as(parsed.schema):
+                continue  # the same columns re-written
             if previous is not None:
                 change = schema_change(declaration.table, previous, (ref.version, parsed.schema), parsed)
                 if change is not None:
-                    when = parsed.committed_at or ref.modified_at or until
                     events.append(
                         schema_change_event(
                             change,
@@ -300,24 +423,50 @@ class SchemaChangeCollector:
                             workspace_id=lakehouse.workspace_id,
                             lakehouse_name=lakehouse.display_name,
                             environment=lakehouse.environment,
-                            timestamp=min(when, until),
+                            timestamp=event_time(ref, parsed),
                             source=self.SOURCE,
                             user_metadata=parsed.user_metadata,
                             truncated=parsed.truncated,
                         )
                     )
+            events.append(snapshot(ref.version, parsed.schema))
             previous = (ref.version, parsed.schema)
+        partial = last is not None and len(pending) > len(batch)
+        reached = last.version if last is not None else (commits[-1].version if commits else None)
+        # A snapshot of the version reached already says how far the run got.
+        recorded = (
+            bool(events) and events[-1].event_type is EventType.SCHEMA_SNAPSHOT and _version_of(events[-1]) == reached
+        )
+        if reached is not None and not recorded and (partial or (stored is None and previous is None)):
+            # Record how far this run got: when commits are left, so the next run resumes after this one; when the table
+            # was searched for a schema and none was found, so it is not searched again on every run.
+            events.append(snapshot(reached, previous[1] if previous else None, checkpoint=True))
+        if partial and last is not None:
+            self._resume[declaration.id] = last.modified_at or since
         return events
 
-    async def _baseline(
+    async def _stored_baseline(self, table_id: str) -> _Baseline | None:
+        """The newest snapshot recorded for the table: the schema in force at the last commit processed."""
+        found = await self._event_store.query(
+            EventQuery(event_types=[EventType.SCHEMA_SNAPSHOT], correlation_id=table_id, limit=50, newest_first=True)
+        )
+        # The snapshots of one run share a timestamp: among the newest, the highest version is the last processed.
+        # (After a log restart the new snapshots are newer, so they win.)
+        recorded = [(e.timestamp, v, e) for e in found if isinstance(v := e.payload.get("version"), int) and v >= 0]
+        if not recorded:
+            return None
+        _, version, newest = max(recorded, key=lambda r: (r[0], r[1]))
+        return _Baseline(version, SchemaSnapshot.from_payload(newest.payload))
+
+    async def _first_schema(
         self, table: DeltaTableRef, earlier: Sequence[DeltaCommitRef]
-    ) -> tuple[int, SchemaSnapshot] | None:
-        """The schema in force before the first commit read: the newest earlier commit that carries one."""
+    ) -> tuple[DeltaCommitRef, ParsedCommit] | None:
+        """The newest of the last ``max_backscan`` earlier commits that carries a schema (a table's first sight)."""
         candidates = earlier[-self._max_backscan :] if self._max_backscan else []
         for ref in reversed(candidates):
             parsed: ParsedCommit = parse_commit(await self._fabric.delta_logs.read_commit(table, ref.version))
             if parsed.schema is not None:
-                return ref.version, parsed.schema
+                return ref, parsed
         return None
 
     async def collect(self, *, since: datetime, until: datetime) -> list[OperationalEvent]:
@@ -325,6 +474,16 @@ class SchemaChangeCollector:
         for scope in self.scopes():
             events.extend(await self.collect_scope(scope, since=since, until=until))
         return events
+
+
+@dataclass(frozen=True)
+class _Baseline:
+    version: int
+    schema: SchemaSnapshot | None  # None: a checkpoint of a table whose schema was never seen
+
+
+def _version_of(event: OperationalEvent) -> object:
+    return event.payload.get("version")
 
 
 # The Capacity Metrics model has 30 second timepoints; a day of 10 minute buckets is plenty of context and bounded.
@@ -496,6 +655,10 @@ class TelemetryIngestor:
         except FabricError as exc:
             if (reason := self._unavailable_reason(collector.name, exc)) is not None:
                 self._note_unavailable(result, collector.name, collector.name, reason)
+                # Still a run, and its duration still counts: only `outcome=error` feeds the collector-errors alert.
+                self._metrics.collector_run(
+                    collector.name, seconds=self._seconds_since(started), errors=0, new_events=0, unavailable=True
+                )
                 return
             # One failing collector must not blind the others, and its watermark stays where it was.
             result.errors[collector.name] = exc.message
@@ -519,6 +682,8 @@ class TelemetryIngestor:
         done: dict[str, datetime] = {}
         repaired: dict[str, datetime] = {}
         failed_scopes = 0
+        unavailable_scopes = 0
+        ok_scopes = 0
         new_events = 0
         try:
             for scope in collector.scopes():
@@ -530,6 +695,7 @@ class TelemetryIngestor:
                 except FabricError as exc:
                     if (reason := self._unavailable_reason(collector.name, exc)) is not None:
                         self._note_unavailable(result, collector.name, label, reason)
+                        unavailable_scopes += 1
                         continue
                     result.errors[label] = exc.message
                     result.units_failed += 1
@@ -538,7 +704,9 @@ class TelemetryIngestor:
                     continue
                 new_events += await self._store(events, result)
                 result.units_ok += 1
-                (repaired if repair else done)[scope] = until
+                ok_scopes += 1
+                reached = collector.progress(scope) if isinstance(collector, ResumableCollector) else None
+                (repaired if repair else done)[scope] = min(reached, until) if reached else until
         except Exception:
             self._metrics.collector_run(
                 collector.name, seconds=self._seconds_since(started), errors=failed_scopes + 1, new_events=new_events
@@ -549,5 +717,9 @@ class TelemetryIngestor:
             await self._event_store.advance_watermarks(collector.name, done)
             await self._event_store.advance_watermarks(collector.name, repaired, force=True)
         self._metrics.collector_run(
-            collector.name, seconds=self._seconds_since(started), errors=failed_scopes, new_events=new_events
+            collector.name,
+            seconds=self._seconds_since(started),
+            errors=failed_scopes,
+            new_events=new_events,
+            unavailable=unavailable_scopes > 0 and ok_scopes == 0,
         )

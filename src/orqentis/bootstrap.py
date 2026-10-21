@@ -571,7 +571,7 @@ async def _build_container(
         runbooks=runbooks,
         sla=SLAEvaluator(event_store, clock),
         clock=clock,
-        refresh_from_monitoring=settings.refresh_source is RefreshSource.WORKSPACE_MONITORING,
+        refresh_source=settings.refresh_source,
     )
     registry = ToolRegistry(
         [*build_read_tools(read_deps), *build_mutation_request_tools(gateway, catalog, clock)],
@@ -653,7 +653,9 @@ async def _build_container(
             MonitoringRefreshCollector(fabric, catalog, database_name=settings.workspace_monitoring_database)
         )
     if settings.collect_schema_changes:
-        collectors.append(SchemaChangeCollector(fabric, catalog, max_commits=settings.delta_log_max_commits))
+        collectors.append(
+            SchemaChangeCollector(fabric, catalog, event_store, max_commits=settings.delta_log_max_commits)
+        )
     if scenario is not None:
         # Capacity metrics and the scenario's own events are replayed in mock mode.
         collectors += [CapacityCollector(fabric, catalog), StaticEventCollector(scenario.events)]

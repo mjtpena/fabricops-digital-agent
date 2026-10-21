@@ -32,7 +32,7 @@ from typing import Any
 
 from orqentis.domain.common import ItemType
 from orqentis.domain.runs import CapacitySnapshot, WorkloadUsage
-from orqentis.fabric.errors import FabricCapabilityUnavailableError, FabricError
+from orqentis.fabric.errors import FabricError
 from orqentis.fabric.rest.auth import POWERBI_SCOPE
 from orqentis.fabric.rest.http import FabricHttp, JsonObject, strip_privacy_tags
 from orqentis.fabric.rest.util import segment
@@ -306,7 +306,7 @@ class CapacityMetricsReader:
         """One snapshot per ``BUCKET`` (oldest first) with data in ``[start, end]``; the window is at most seven days.
 
         Raises ``FabricError(InvalidIdentifier)`` before any request when the capacity id is not a GUID,
-        ``FabricCapabilityUnavailableError(CapacityMetricsSchemaMismatch)`` when the model no longer has what the
+        ``FabricError(CapacityMetricsSchemaMismatch)`` when the model no longer has what the
         queries need, and the HTTP layer's ``FabricAuthError`` when the caller may not query the model.
         """
         capacity = _capacity_guid(capacity_id)
@@ -484,13 +484,15 @@ def _pbi_message(exc: FabricError) -> str:
 
 def _schema_mismatch(
     phase: str, missing: list[str], *, found: list[str] | None = None, reason: str | None = None
-) -> FabricCapabilityUnavailableError:
+) -> FabricError:
     details: dict[str, Any] = {"phase": phase, "missing_columns": missing}
     if found is not None:
         details["found_columns"] = [_text(name, 80) for name in found[:20]]
     if reason:
         details["reason"] = reason
-    return FabricCapabilityUnavailableError(
+    # A fault, not a missing capability: the app was updated or the model changed, and the capacity data is *wrong or
+    # absent* until someone looks. It must reach the collector-errors alert, which "unavailable" does not.
+    return FabricError(
         "The Capacity Metrics semantic model does not have what the capacity query needs "
         f"({phase}). The app was probably updated; see docs/spikes/capacity-metrics.md.",
         error_code="CapacityMetricsSchemaMismatch",

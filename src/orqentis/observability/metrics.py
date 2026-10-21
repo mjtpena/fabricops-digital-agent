@@ -18,11 +18,11 @@ Instruments (all names start with ``orqentis.``):
 name                                  kind       attributes
 ====================================  =========  ===========================================================
 ``collector.duration`` (s)            histogram  collector
-``collector.runs``                    counter    collector, outcome = ok | error
+``collector.runs``                    counter    collector, outcome = ok | error | unavailable
 ``collector.errors``                  counter    collector (one per failed collector or scope)
 ``collector.unavailable``             counter    collector (a documented permission gap or a capability the platform
                                                  does not expose: seen, counted, but not an error)
-``events.ingested``                 counter    collector (events that were new to the event store)
+``events.ingested``                   counter    collector (events that were new to the event store)
 ``collection.runs``                   counter    outcome = success | degraded | failed | cancelled
 ``collection.heartbeat`` (s, epoch)   gauge      time of the last successful collection (see below)
 ``incidents.opened``                  counter    category, severity, environment
@@ -206,10 +206,14 @@ class Metrics:
             yield Observation(self._anchor_age)
 
     # ------------------------------------------------------------------------------------------ collection
-    def collector_run(self, collector: str, *, seconds: float, errors: int, new_events: int) -> None:
+    def collector_run(
+        self, collector: str, *, seconds: float, errors: int, new_events: int, unavailable: bool = False
+    ) -> None:
+        """One collector run. ``unavailable``: it could not observe by design (no error); it is still a run."""
         attrs = {"collector": label(collector)}
         self._collector_duration.record(seconds, attrs)
-        self._collector_runs.add(1, {**attrs, "outcome": "error" if errors else "ok"})
+        outcome = "error" if errors else "unavailable" if unavailable else "ok"
+        self._collector_runs.add(1, {**attrs, "outcome": outcome})
         if errors:
             self._collector_errors.add(errors, attrs)
         if new_events:

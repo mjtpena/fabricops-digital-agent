@@ -265,9 +265,11 @@ async def test_blank_measures_are_zero_and_unreadable_rows_are_skipped(setup: Ca
 
 async def test_rows_that_are_all_unreadable_are_a_schema_mismatch_not_silence(setup: Callable[[Answer], Setup]) -> None:
     s = setup(serving([point("garbage", 1.0), point("worse", 2.0)]))
-    with pytest.raises(FabricCapabilityUnavailableError) as raised:
+    with pytest.raises(FabricError) as raised:
         await s.reader.get_capacity_metrics(CAP, start=START, end=END)
     assert raised.value.error_code == "CapacityMetricsSchemaMismatch"
+    # a fault, not a missing capability: it must be counted by the collector-errors alert
+    assert not isinstance(raised.value, FabricCapabilityUnavailableError)
 
 
 async def test_the_model_clock_offset_is_applied_both_ways(setup: Callable[[Answer], Setup]) -> None:
@@ -344,7 +346,7 @@ async def test_a_missing_column_is_a_schema_mismatch_that_names_it(setup: Callab
         {k: v for k, v in point(START + timedelta(seconds=30), 50.0).items() if k != "[BackgroundRejectionPercent]"}
     ]
     s = setup(serving(rows))
-    with pytest.raises(FabricCapabilityUnavailableError) as raised:
+    with pytest.raises(FabricError) as raised:
         await s.reader.get_capacity_metrics(CAP, start=START, end=END)
     error = raised.value
     assert error.error_code == "CapacityMetricsSchemaMismatch"
@@ -356,7 +358,7 @@ async def test_a_missing_column_is_a_schema_mismatch_that_names_it(setup: Callab
 async def test_a_renamed_table_is_a_schema_mismatch(setup: Callable[[Answer], Setup]) -> None:
     renamed = {"Timepoints_v2[TimePoint]" if k.startswith("TimePoints") else k: v for k, v in point(START, 5.0).items()}
     s = setup(serving([renamed]))
-    with pytest.raises(FabricCapabilityUnavailableError) as raised:
+    with pytest.raises(FabricError) as raised:
         await s.reader.get_capacity_metrics(CAP, start=START, end=END)
     assert raised.value.details["missing_columns"] == ["TimePoints[TimePoint]"]
 
@@ -376,7 +378,7 @@ async def test_column_names_are_compared_without_quotes_or_case(setup: Callable[
 async def test_a_workload_query_that_lost_a_column_fails_closed_too(setup: Callable[[Answer], Setup]) -> None:
     broken = [{k: v for k, v in item(item_id(1), "x", "Notebook", 5.0).items() if k != "Items[Item kind]"}]
     s = setup(serving([point(START + timedelta(seconds=30), 80.0)], lambda _: broken))
-    with pytest.raises(FabricCapabilityUnavailableError) as raised:
+    with pytest.raises(FabricError) as raised:
         await s.reader.get_capacity_metrics(CAP, start=START, end=END)
     assert raised.value.details["phase"] == "workloads"
     assert raised.value.details["missing_columns"] == ["Items[Item kind]"]
@@ -384,7 +386,7 @@ async def test_a_workload_query_that_lost_a_column_fails_closed_too(setup: Calla
 
 async def test_a_dax_error_that_says_a_name_is_gone_is_a_schema_mismatch(setup: Callable[[Answer], Setup]) -> None:
     s = setup(replay("doc_capacity_metrics_dax_name_error"))
-    with pytest.raises(FabricCapabilityUnavailableError) as raised:
+    with pytest.raises(FabricError) as raised:
         await s.reader.get_capacity_metrics(CAP, start=START, end=END)
     error = raised.value
     assert error.error_code == "CapacityMetricsSchemaMismatch"

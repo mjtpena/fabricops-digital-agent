@@ -27,6 +27,9 @@ class EventType(StrEnum):
     CAPACITY_METRIC = "CAPACITY_METRIC"
     CAPACITY_THROTTLING = "CAPACITY_THROTTLING"
     SCHEMA_CHANGED = "SCHEMA_CHANGED"
+    # The schema of a Delta table at one version, written by the schema collector so the next run knows what "before"
+    # is without searching the log again (ADR-0020). No rule consumes it.
+    SCHEMA_SNAPSHOT = "SCHEMA_SNAPSHOT"
     DEPLOYMENT_COMPLETED = "DEPLOYMENT_COMPLETED"
     CREDENTIAL_EXPIRED = "CREDENTIAL_EXPIRED"
     # Written by the SLA sweep when an SLA enters a new state for a deadline day (see incidents/sla_sweep.py).

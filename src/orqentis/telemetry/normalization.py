@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 
 from orqentis.domain.common import Environment, ItemType
@@ -10,7 +12,7 @@ from orqentis.domain.estate import Capacity, DeltaTableDeclaration
 from orqentis.domain.events import EventSeverity, EventType, OperationalEvent
 from orqentis.domain.runs import ActivityRun, CapacitySnapshot, PipelineRun, Refresh, RunStatus
 from orqentis.observability.redaction import redact_text
-from orqentis.telemetry.delta import clip
+from orqentis.telemetry.delta import SchemaSnapshot, clip
 
 CAPACITY_SATURATION_PERCENT = 100.0
 
@@ -129,13 +131,15 @@ JOB_EVENTS: dict[ItemType, tuple[EventType, EventType, str, str]] = {
     ),
 }
 
-# What Fabric reports as the invoke type of a job a person or a schedule started. Anything else (a pipeline's notebook
-# activity, a notebook calling another) was started by another item, whose own failure is the incident.
-_DIRECT_INVOKE_TYPES = frozenset({"manual", "scheduled"})
+# The invoke types that name another item as the starter of a job: a pipeline's activity, a notebook run from a notebook
+# (the Monitoring hub calls that a reference run). Only these suppress a job incident. A value nobody has seen yet is
+# treated as a direct run: a failure is never hidden behind a word we do not know, and when a pipeline incident does
+# cover it the engine's coverage check (incidents/detection.py) drops the duplicate.
+_LAUNCHER_INVOKE_TYPES = frozenset({"pipeline", "referencerun", "notebook"})
 
 
 def launched_by_item(invoke_type: str | None) -> bool:
-    return invoke_type is not None and invoke_type.strip().lower() not in _DIRECT_INVOKE_TYPES
+    return invoke_type is not None and invoke_type.strip().lower() in _LAUNCHER_INVOKE_TYPES
 
 
 def item_job_event(
@@ -239,6 +243,52 @@ def schema_change_event(
             "operation": change.operation,
             "user_metadata": user_metadata,
             "log_truncated": truncated,
+        },
+    )
+
+
+def schema_snapshot_event(
+    *,
+    declaration: DeltaTableDeclaration,
+    version: int,
+    schema: SchemaSnapshot | None,
+    tenant_id: str,
+    workspace_id: str,
+    lakehouse_name: str,
+    environment: Environment,
+    timestamp: datetime,
+    source: str,
+    checkpoint: bool = False,
+) -> OperationalEvent:
+    """The schema of a declared Delta table at ``version``: what the next run compares against.
+
+    ``schema`` is ``None`` for a *checkpoint* of a table whose schema was never seen: it only records how far the log
+    was read, so a run that stopped early resumes after it. Snapshots are INFO events no rule consumes.
+    """
+    digest = hashlib.sha256(
+        json.dumps(schema.to_payload() if schema else None, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:12]
+    table = declaration.table
+    return OperationalEvent(
+        event_id=f"evt-schema-snapshot-{declaration.id}-v{version}-{digest}",
+        event_type=EventType.SCHEMA_SNAPSHOT,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        item_id=declaration.item_id,
+        item_type=ItemType.LAKEHOUSE,
+        display_name=lakehouse_name,
+        environment=environment,
+        timestamp=timestamp,
+        summary=clip(f"Schema of {lakehouse_name}.{table} at Delta version {version}", 300),
+        correlation_id=declaration.id,
+        dedupe_key=f"schema-snapshot:{declaration.item_id}:{declaration.schema_name or ''}:{table}:{version}:{digest}",
+        source=source,
+        payload={
+            "table": table,
+            "schema": declaration.schema_name,
+            "version": version,
+            "checkpoint": checkpoint,
+            **(schema.to_payload() if schema else {"columns": None, "physical": {}, "columns_truncated": False}),
         },
     )
 
