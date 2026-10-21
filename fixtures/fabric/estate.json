@@ -778,6 +778,14 @@
       "owner": "supply-chain-data@contoso.com"
     }
   ],
+  "delta_tables": [
+    {
+      "id": "tbl-sales-orders-raw",
+      "item_id": "lh-sales-bronze",
+      "table": "sales_orders_raw",
+      "description": "Raw CRM sales orders; transform_sales reads it. A schema change here breaks the transformation."
+    }
+  ],
   "deployment_states": [
     {
       "id": "dpl-001",

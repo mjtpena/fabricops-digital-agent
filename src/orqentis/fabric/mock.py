@@ -135,6 +135,8 @@ class _MockDeltaLogs:
             ) from None
 
     async def list_commits(self, table: DeltaTableRef) -> list[DeltaCommitRef]:
+        if (table.item_id, table.schema_name, table.table) not in self._logs:
+            return []  # declared but never written in this scenario: an empty log, not an error
         return sorted(
             (DeltaCommitRef(version=c.version, modified_at=c.committed_at) for c in self._log(table).commits),
             key=lambda r: r.version,

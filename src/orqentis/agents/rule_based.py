@@ -262,7 +262,16 @@ class RuleBasedReasoner:
         ctx = package.context
         table = signature.entities.get("table")
         model_table = signature.entities.get("model_table")
-        name = package.primary_item.display_name
+        # On the pipeline route the failing model is the activity's target, not the incident's primary item.
+        origin = next(
+            (
+                a.display_name
+                for a in (ctx.blast_radius.assets if ctx.blast_radius else [])
+                if a.depth == 0 and a.item_id == error.target_item_id
+            ),
+            None,
+        )
+        name = origin or package.primary_item.display_name
         cause = (
             f"it references the source table '{clip(table, 128)}'"
             + (f" (model table '{clip(model_table, 128)}')" if model_table else "")

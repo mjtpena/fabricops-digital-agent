@@ -778,19 +778,28 @@ class DiagnosticWorkflow:
                 )
             )
 
-    async def _runbooks(self, st: WorkflowState) -> None:
+    def _runbook_category(self, st: WorkflowState) -> str | None:
+        """The category to look runbooks up by: the error signature's, unless a workflow knows better."""
         signature = st.a.primary_signature
+        return signature.category if signature else None
+
+    def _runbook_text(self, st: WorkflowState) -> list[str]:
+        """Extra text the runbook signals are matched against, beyond the error messages."""
+        return []
+
+    async def _runbooks(self, st: WorkflowState) -> None:
         text_parts = [e.message for e in st.a.errors] + [
             f"Schema change: column {c} removed" for s in st.a.schema_changes for c in s.removed_columns
         ]
         if st.a.capacity and st.a.capacity.failure_during_throttling:
             text_parts.append("capacity throttling: background rejection, exceeded its limits")
+        text_parts += self._runbook_text(st)
         item_types = {st.incident.primary_item_type or ItemType.DATA_PIPELINE}
         item_types |= {n.item_type for fp in st.a.failure_point_ids if (n := self._d.catalog.node(fp))}
         response = await self._call(
             st,
             "search_runbooks",
-            category=signature.category if signature else None,
+            category=self._runbook_category(st),
             text="\n".join(text_parts)[:8000],
             item_types=sorted(t.value for t in item_types),
         )
@@ -924,6 +933,8 @@ class DiagnosticWorkflow:
             e
             for e in cited
             if e.evidence_id not in primary_error_ids
+            # how the item has been running is context, not a cause that preceded the failure
+            and e.evidence_type is not EvidenceType.RUN_HISTORY
             and e.observed_at is not None
             and st.failure_time - CAUSAL_WINDOW <= e.observed_at <= st.failure_time
         ]

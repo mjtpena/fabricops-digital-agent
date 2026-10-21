@@ -1,0 +1,256 @@
+{
+  "scenario": {
+    "name": "refresh_failure_pipeline",
+    "title": "The refresh activity of ingest_sales_prod fails: the model's source table is gone",
+    "description": "06:09 the pipeline's semantic model refresh activity fails with the engine's error. The model's own refresh failure is recorded too, but the pipeline's incident already covers it, so exactly one incident is opened.",
+    "now": "2026-10-05T06:15:00+11:00",
+    "expected_category": "SEMANTIC_MODEL_REFRESH_FAILURE",
+    "expected_runbook_id": "RB-SM-REFRESH-FAILURE-001"
+  },
+  "pipeline_runs": [
+    {
+      "id": "run-sales-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "pl-ingest-sales-prod",
+      "display_name": "ingest_sales_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-02T06:00:03+10:00",
+      "end_time": "2026-10-02T06:18:41+10:00"
+    },
+    {
+      "id": "run-sales-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "pl-ingest-sales-prod",
+      "display_name": "ingest_sales_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-03T06:00:03+10:00",
+      "end_time": "2026-10-03T06:18:41+10:00"
+    },
+    {
+      "id": "run-sales-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "pl-ingest-sales-prod",
+      "display_name": "ingest_sales_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-04T06:00:03+11:00",
+      "end_time": "2026-10-04T06:18:41+11:00"
+    },
+    {
+      "id": "run-sales-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "pl-ingest-sales-prod",
+      "item_type": "DataPipeline",
+      "display_name": "ingest_sales_prod",
+      "environment": "PROD",
+      "status": "Failed",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-05T06:00:02+11:00",
+      "end_time": "2026-10-05T06:09:20+11:00",
+      "failure": {
+        "error_code": "ActivityFailed",
+        "failure_type": "UserError",
+        "message": "Operation on target refresh_sales_model failed: We cannot access the source Delta table 'sales_gold_orders' referenced by table 'sales_orders'. Either the source Delta table does not exist, or you don't have access permissions. Consider removing the table from the model. Please refer to https://go.microsoft.com/fwlink/?linkid=2248855 for more information."
+      },
+      "correlation_id": "corr-5a1e77b3"
+    }
+  ],
+  "activity_runs": [
+    {
+      "id": "act-sales-p1",
+      "pipeline_run_id": "run-sales-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "pipeline_item_id": "pl-ingest-sales-prod",
+      "activity_name": "copy_crm_to_bronze",
+      "activity_type": "Copy",
+      "status": "Succeeded",
+      "start_time": "2026-10-05T06:00:05+11:00",
+      "end_time": "2026-10-05T06:01:31+11:00",
+      "target_item_id": "lh-sales-bronze",
+      "correlation_id": "corr-5a1e77b3"
+    },
+    {
+      "id": "act-sales-p2",
+      "pipeline_run_id": "run-sales-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "pipeline_item_id": "pl-ingest-sales-prod",
+      "activity_name": "transform_sales",
+      "activity_type": "TridentNotebook",
+      "status": "Succeeded",
+      "start_time": "2026-10-05T06:01:33+11:00",
+      "end_time": "2026-10-05T06:05:10+11:00",
+      "target_item_id": "nb-transform-sales",
+      "correlation_id": "corr-5a1e77b3"
+    },
+    {
+      "id": "act-sales-p3",
+      "pipeline_run_id": "run-sales-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "pipeline_item_id": "pl-ingest-sales-prod",
+      "activity_name": "refresh_sales_model",
+      "activity_type": "PBISemanticModelRefresh",
+      "status": "Failed",
+      "start_time": "2026-10-05T06:05:12+11:00",
+      "end_time": "2026-10-05T06:09:18+11:00",
+      "target_item_id": "sm-sales",
+      "error": {
+        "error_code": "2304",
+        "failure_type": "UserError",
+        "message": "We cannot access the source Delta table 'sales_gold_orders' referenced by table 'sales_orders'. Either the source Delta table does not exist, or you don't have access permissions. Consider removing the table from the model. Please refer to https://go.microsoft.com/fwlink/?linkid=2248855 for more information."
+      },
+      "correlation_id": "corr-5a1e77b3"
+    }
+  ],
+  "refreshes": [
+    {
+      "id": "ref-sales-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "sm-sales",
+      "refresh_type": "ViaApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-02T06:19:30+10:00",
+      "end_time": "2026-10-02T06:24:10+10:00"
+    },
+    {
+      "id": "ref-sales-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "sm-sales",
+      "refresh_type": "ViaApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-03T06:19:30+10:00",
+      "end_time": "2026-10-03T06:24:10+10:00"
+    },
+    {
+      "id": "ref-sales-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "sm-sales",
+      "refresh_type": "ViaApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-04T06:19:30+11:00",
+      "end_time": "2026-10-04T06:24:10+11:00"
+    },
+    {
+      "id": "ref-sales-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-sales-prod",
+      "item_id": "sm-sales",
+      "refresh_type": "ViaApi",
+      "status": "Failed",
+      "start_time": "2026-10-05T06:05:13+11:00",
+      "end_time": "2026-10-05T06:09:17+11:00",
+      "error": {
+        "error_code": "ModelRefresh_ShortMessage_ProcessingError",
+        "message": "We cannot access the source Delta table 'sales_gold_orders' referenced by table 'sales_orders'. Either the source Delta table does not exist, or you don't have access permissions. Consider removing the table from the model. Please refer to https://go.microsoft.com/fwlink/?linkid=2248855 for more information."
+      }
+    }
+  ],
+  "capacity_snapshots": [
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T05:30:00+11:00",
+      "cu_utilization_percent": 34.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 9.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T05:40:00+11:00",
+      "cu_utilization_percent": 37.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 10.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T05:50:00+11:00",
+      "cu_utilization_percent": 40.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 11.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T06:00:00+11:00",
+      "cu_utilization_percent": 43.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "pl-ingest-sales-prod",
+          "workspace_id": "ws-sales-prod",
+          "display_name": "ingest_sales_prod",
+          "item_type": "DataPipeline",
+          "cu_percent": 12.0
+        },
+        {
+          "item_id": "sm-finance",
+          "workspace_id": "ws-finance-prod",
+          "display_name": "FinanceSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    }
+  ]
+}

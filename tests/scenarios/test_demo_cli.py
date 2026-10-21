@@ -45,4 +45,4 @@ def test_cli_utilities(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["scenarios"]) == 0
     assert main(["runbooks"]) == 0
     out = capsys.readouterr().out
-    assert "schema_drift" in out and "7 runbooks valid" in out
+    assert "schema_drift" in out and "9 runbooks valid" in out

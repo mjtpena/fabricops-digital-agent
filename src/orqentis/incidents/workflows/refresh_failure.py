@@ -119,6 +119,8 @@ class RefreshFailureWorkflow(DiagnosticWorkflow):
             resource_id=incident.primary_item_id,
             resource_type=ItemType.SEMANTIC_MODEL.value,
             observed_at=summary.last_success_at,
+            # the history is the same source's events, read back from the store: not a second source
+            source=trigger.source if isinstance(trigger := st.scratch.get("refresh_event"), OperationalEvent) else None,
         )
         st.a.run_history = RunHistoryObservation(
             evidence_id=evidence.evidence_id,

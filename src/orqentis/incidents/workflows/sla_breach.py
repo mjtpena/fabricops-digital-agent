@@ -60,7 +60,8 @@ class SlaBreachWorkflow(DiagnosticWorkflow):
         trace, clock = st.trace, self._d.clock
         with trace.step(2, "Fetch SLA assessment", clock):
             await self._fetch_assessment(st)
-        st.start_analysis()
+        if st.analysis is None:  # the assessment could not be read: the analysis opens at the detection time
+            st.start_analysis()
         with trace.step(3, "Fetch freshness item runs", clock):
             await self._fetch_runs(st)
         with trace.step(4, "Capture error evidence", clock):
@@ -69,6 +70,13 @@ class SlaBreachWorkflow(DiagnosticWorkflow):
     async def _after_upstream(self, st: WorkflowState) -> None:
         await self._record_upstream_incidents(st)
         self._classify(st)
+
+    def _runbook_category(self, st: WorkflowState) -> str | None:
+        return "SLA_BREACH"
+
+    def _runbook_text(self, st: WorkflowState) -> list[str]:
+        breach = st.a.sla_breach
+        return [f"SLA breach: {breach.kind.lower()}"] if breach else []
 
     async def _sla(self, st: WorkflowState) -> None:
         """Already done in step 2: the assessment is what this incident is about, and the rule set the severity."""
@@ -97,6 +105,9 @@ class SlaBreachWorkflow(DiagnosticWorkflow):
             return
         assessments = [SLAAssessment.model_validate(a) for a in response.data]
         mine = next((a for a in assessments if a.sla_id == sla_id), None)
+        if mine is not None and mine.deadline is not None:
+            st.failure_time = mine.deadline  # the moment the SLA was missed
+        st.start_analysis()
         incident.sla_impact = assessments
         st.a.sla = assessments
         evidence = await self._evidence(
@@ -112,8 +123,6 @@ class SlaBreachWorkflow(DiagnosticWorkflow):
             st.trace.errors.append("the SLA that opened the incident is not among the SLAs downstream of its item")
             return
         st.scratch["assessment"] = mine
-        if mine.deadline is not None:
-            st.failure_time = mine.deadline  # the moment the SLA was missed
 
     async def _fetch_runs(self, st: WorkflowState) -> None:
         incident = st.incident

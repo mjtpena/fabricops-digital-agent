@@ -44,6 +44,8 @@ def test_all_repository_runbooks_are_valid(catalog: RunbookCatalog) -> None:
         "RB-PIPELINE-TIMEOUT-001",
         "RB-SM-REFRESH-FAILURE-001",
         "RB-SM-STALE-001",
+        "RB-NOTEBOOK-FAILURE-001",
+        "RB-SLA-BREACH-001",
     } == ids
     for runbook in catalog.all():
         assert set(REQUIRED_RUNBOOK_SECTIONS) <= set(runbook.sections)
