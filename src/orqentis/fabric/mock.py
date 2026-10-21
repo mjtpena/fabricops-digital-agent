@@ -102,12 +102,13 @@ class _MockMonitoring:
         self._refreshes = scenario.refreshes
 
     async def list_semantic_model_refreshes(
-        self, workspace_id: str, *, since: datetime, until: datetime
+        self, workspace_id: str, *, since: datetime, until: datetime, item_id: str | None = None
     ) -> list[Refresh]:
         found = [
             r
             for r in self._refreshes
             if r.workspace_id == workspace_id
+            and (item_id is None or r.item_id == item_id)
             and (when := r.end_time or r.start_time) is not None
             and since <= when <= until
         ]

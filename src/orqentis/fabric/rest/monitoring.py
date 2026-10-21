@@ -64,7 +64,8 @@ declare query_parameters(
     workspace_id: string,
     window_start: string,
     window_end: string,
-    max_rows: long
+    max_rows: long,
+    item_id: string
 );
 let window_from = todatetime(window_start);
 let window_to = todatetime(window_end);
@@ -89,7 +90,8 @@ let refreshes = monitor_events
         Correlation = take_any(CorrelationId),
         RefreshHits = countif(EventText has_any ('<Refresh xmlns', '"refresh"'))
         by OperationId
-    | where RefreshHits > 0;
+    | where RefreshHits > 0
+    | where isempty(item_id) or Model =~ item_id;
 let engine_errors = monitor_events
     | where OperationName == 'Error'
     | summarize arg_min(Timestamp, EventText, StatusCode) by OperationId
@@ -358,7 +360,7 @@ class RestMonitoringService:
 
     # ----------------------------------------------------------------------------------------------- query
     async def _query(
-        self, target: _Target, workspace_id: str, since: datetime, until: datetime
+        self, target: _Target, workspace_id: str, since: datetime, until: datetime, item_id: str | None
     ) -> list[dict[str, Any]]:
         body = {
             "db": target.database,
@@ -370,6 +372,9 @@ class RestMonitoringService:
                     "window_start": iso(since),
                     "window_end": iso(until),
                     "max_rows": MAX_ROWS,
+                    # empty: every model of the workspace. Applied before `top`, so one model's history is not
+                    # crowded out by the others'.
+                    "item_id": item_id or "",
                 },
             },
         }
@@ -416,7 +421,7 @@ class RestMonitoringService:
         )
 
     async def list_semantic_model_refreshes(
-        self, workspace_id: str, *, since: datetime, until: datetime
+        self, workspace_id: str, *, since: datetime, until: datetime, item_id: str | None = None
     ) -> list[Refresh]:
         """Refreshes that ended (or, if unfinished, started) in ``[since, until]``, newest first.
 
@@ -425,6 +430,7 @@ class RestMonitoringService:
         refresh that ended just before ``until`` can still show as unfinished.
         """
         workspace_id = _require_guid(workspace_id, "workspace")
+        model_id = _require_guid(item_id, "semantic model") if item_id else None
         since, until = _utc(since), _utc(until)
         if until < since:
             return []
@@ -433,7 +439,7 @@ class RestMonitoringService:
         for attempt in (1, 2):
             target = await self._target(workspace_id, refresh=attempt == 2)
             try:
-                rows = await self._query(target, workspace_id, since, until)
+                rows = await self._query(target, workspace_id, since, until, model_id)
                 break
             except FabricAuthError:
                 self._targets.pop(workspace_id, None)

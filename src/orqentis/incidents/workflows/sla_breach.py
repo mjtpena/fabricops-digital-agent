@@ -148,6 +148,7 @@ class SlaBreachWorkflow(DiagnosticWorkflow):
                 event_types=[EventType.REFRESH_FAILED.value, EventType.REFRESH_SUCCEEDED.value],
                 since=(st.failure_time - timedelta(days=14)).isoformat(),
                 limit=100,
+                newest_first=True,  # the limit must cut the oldest runs, not the latest ones
             )
             if response.status is not ToolStatus.SUCCESS:
                 return

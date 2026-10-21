@@ -382,6 +382,7 @@ async def test_the_query_is_static_and_parameterised(rig: Rig) -> None:
         "window_start": "2026-10-20T00:00:00Z",
         "window_end": "2026-10-20T02:00:00Z",
         "max_rows": MAX_ROWS,
+        "item_id": "",  # the whole workspace
     }
     assert body["properties"]["Options"]["request_readonly"] is True
 
@@ -639,6 +640,31 @@ async def test_the_database_name_is_matched_ignoring_case(rig: Rig) -> None:
 
     assert len(await rig.refreshes()) == 1
     assert rig.query_body()["db"] == "MONITORING kql DATABASE"  # the name as Fabric has it
+
+
+async def test_one_model_is_asked_for_in_the_query_before_the_row_limit(rig: Rig) -> None:
+    rig.serve(result(make_row()))
+
+    await rig.service.list_semantic_model_refreshes(WORKSPACE, since=SINCE, until=UNTIL, item_id=MODEL.upper())
+    await rig.refreshes()
+
+    asked, whole = rig.query_body(0), rig.query_body(1)
+    assert asked["properties"]["Parameters"]["item_id"] == MODEL  # a GUID, lower-cased, as a parameter
+    assert whole["properties"]["Parameters"]["item_id"] == ""  # no model: the whole workspace
+    assert asked["csl"] == whole["csl"] == REFRESHES_KQL  # the text is static either way
+    # the model filter comes before `top`: other models cannot fill the limit
+    assert REFRESHES_KQL.index("isempty(item_id) or Model =~ item_id") < REFRESHES_KQL.index("top max_rows by")
+    assert MODEL not in REFRESHES_KQL
+
+
+async def test_a_model_id_that_is_not_a_guid_never_reaches_the_query(rig: Rig) -> None:
+    rig.serve(result())
+
+    with pytest.raises(FabricError) as caught:
+        await rig.service.list_semantic_model_refreshes(WORKSPACE, since=SINCE, until=UNTIL, item_id="x' | take 1 //")
+
+    assert caught.value.error_code == "InvalidIdentifier"
+    assert rig.wire.calls("POST", QUERY_PATH) == []
 
 
 async def test_the_query_endpoint_is_fetched_from_the_database_when_the_list_leaves_out_its_properties(

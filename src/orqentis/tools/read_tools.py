@@ -130,6 +130,9 @@ class EventsInput(_Input):
     since: datetime | None = None
     until: datetime | None = None
     limit: int = Field(default=100, ge=1, le=500)
+    # Which end the limit cuts: the oldest events of the window (default) or the newest. A history that is read to find
+    # the latest outcome must ask for the newest, because sorting what came back cannot recover what was cut.
+    newest_first: bool = False
 
 
 # ----------------------------------------------------------------------------------------- helpers
@@ -334,8 +337,10 @@ def build_read_tools(deps: ReadToolDependencies) -> list[ToolSpec]:
             # only it), the workspace's monitoring database is the source. `both` collects from either; a question
             # asked mid-investigation is asked of the one that is readable.
             now = deps.clock.now()
+            # The model is named in the query itself: the adapter returns the newest rows of what it is asked for,
+            # and asked for the whole workspace a busy one would fill them with other models' refreshes.
             logged = await deps.fabric.monitoring.list_semantic_model_refreshes(
-                ws, since=now - _REFRESH_LOOKBACK, until=now
+                ws, since=now - _REFRESH_LOOKBACK, until=now, item_id=p.semantic_model_id
             )
             refreshes = [r for r in logged if r.item_id == p.semantic_model_id][: p.top]
             source = "fabric.workspace-monitoring"
@@ -474,7 +479,14 @@ def build_read_tools(deps: ReadToolDependencies) -> list[ToolSpec]:
 
     async def get_operational_events(p: EventsInput, ctx: ToolContext) -> ToolOutcome:
         events = await deps.event_store.query(
-            EventQuery(item_ids=p.item_ids, event_types=p.event_types, since=p.since, until=p.until, limit=p.limit)
+            EventQuery(
+                item_ids=p.item_ids,
+                event_types=p.event_types,
+                since=p.since,
+                until=p.until,
+                limit=p.limit,
+                newest_first=p.newest_first,
+            )
         )
         return ToolOutcome(
             data=events,

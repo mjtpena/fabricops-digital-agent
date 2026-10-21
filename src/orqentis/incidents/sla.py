@@ -6,9 +6,9 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from orqentis.config.clock import Clock
-from orqentis.domain.events import EventType
 from orqentis.domain.incidents import Incident
 from orqentis.domain.sla import SLA, SLAAssessment, SLAState
+from orqentis.incidents.run_history import SUCCESS_EVENTS
 from orqentis.storage.event_store import EventQuery, EventStore
 
 # The detection rule that opens an incident for a breached SLA (incidents/detection.py).
@@ -29,7 +29,8 @@ class SLAEvaluator:
         events = await self._events.query(
             EventQuery(
                 item_ids=[sla.freshness_item_id],
-                event_types=[EventType.PIPELINE_RUN_SUCCEEDED, EventType.REFRESH_SUCCEEDED],
+                # a pipeline, notebook, Spark job or Dataflow run, or a semantic model refresh: whatever produces it
+                event_types=sorted(SUCCESS_EVENTS),
                 until=before,
                 newest_first=True,
                 limit=1,

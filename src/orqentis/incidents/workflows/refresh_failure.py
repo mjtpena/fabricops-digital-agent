@@ -98,6 +98,7 @@ class RefreshFailureWorkflow(DiagnosticWorkflow):
             since=(st.failure_time - _HISTORY_WINDOW).isoformat(),
             until=st.failure_time.isoformat(),
             limit=100,
+            newest_first=True,  # the limit must cut the oldest runs, not the failure and the latest successes
         )
         if response.status is not ToolStatus.SUCCESS:
             return

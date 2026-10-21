@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from orqentis.domain.events import EventType, OperationalEvent
 from orqentis.domain.runs import PipelineRun, Refresh, RunStatus
 
-_SUCCESS_EVENTS = frozenset(
+SUCCESS_EVENTS = frozenset(
     {
         EventType.PIPELINE_RUN_SUCCEEDED,
         EventType.NOTEBOOK_RUN_SUCCEEDED,
@@ -93,14 +93,14 @@ def points_from_events(events: Iterable[OperationalEvent]) -> list[RunPoint]:
     """The same from stored events (their payloads carry status and duration), newest first."""
     points: list[RunPoint] = []
     for e in events:
-        if e.event_type not in _SUCCESS_EVENTS | _FAILURE_EVENTS:
+        if e.event_type not in SUCCESS_EVENTS | _FAILURE_EVENTS:
             continue
         duration = e.payload.get("duration_seconds")
         points.append(
             RunPoint(
                 None,
                 e.timestamp,
-                e.event_type in _SUCCESS_EVENTS,
+                e.event_type in SUCCESS_EVENTS,
                 float(duration) if isinstance(duration, int | float) else None,
                 str(e.payload.get("refresh_id") or e.payload.get("run_id") or e.event_id),
                 e.payload.get("error_message") if isinstance(e.payload.get("error_message"), str) else None,

@@ -43,7 +43,10 @@ section does not match.
   Database" no longer matches), and a missing `SemanticModelLogs` table in a database only inferred from its name is
   capability unavailable (`SemanticModelLogsMissing`) rather than "no refreshes". A Delta table whose backlog is older than
   the collection lookback is still worked off from its recorded version (the lookback floor no longer skips it), and
-  `orqentis.collector.backlog` shows the commits waiting.
+  `orqentis.collector.backlog` shows the commits waiting. From the PR review threads: an SLA whose freshness item is a
+  notebook, Spark job or Dataflow is met by that run (the evaluator only looked at pipeline runs and refreshes); the
+  refresh and SLA workflows read a model's history newest first, so the limit cuts the oldest runs; the refresh history
+  tool names the model in the monitoring query, before the row limit, instead of filtering the workspace's newest 1,000.
 
 - Durable storage and a stateless app (ADR-0017, implements ADR-0008): PostgreSQL adapters (asyncpg, Entra token as the
   password, no password setting) for the event store, incidents, dependencies, approvals (compare-and-set), the audit

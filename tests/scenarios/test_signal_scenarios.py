@@ -7,14 +7,15 @@ runbooks and policy. The four original scenarios live in test_scenarios.py and a
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from orqentis.bootstrap import Container, build_container
+from orqentis.domain.common import ItemType
 from orqentis.domain.confidence import ConfidenceLevel
-from orqentis.domain.events import EventType
+from orqentis.domain.events import EventType, OperationalEvent
 from orqentis.domain.evidence import EvidenceType
 from orqentis.domain.incidents import ApprovalState, Incident, IncidentStatus
 from orqentis.domain.taxonomy import Severity
@@ -103,6 +104,38 @@ async def test_a_failed_refresh_opens_a_model_incident_and_reaches_the_refresh_r
     refresh_evidence = next(e for e in incident.evidence if e.evidence_type is EvidenceType.SEMANTIC_MODEL_REFRESH)
     assert refresh_evidence.structured_payload["status"] == "Failed"
     assert_grounded(incident)
+
+
+@pytest.mark.parametrize("scenario", ["refresh_failure"], indirect=True)
+async def test_the_history_of_a_busy_model_is_its_latest_runs_not_its_oldest(scenario: Container) -> None:
+    """With more refreshes in the window than the history limit, the limit must cut the oldest, not the failure."""
+    fixture = scenario.scenario  # type: ignore[union-attr]
+    failed = next(r for r in fixture.refreshes if r.status.is_failure and r.end_time is not None)
+    assert failed.end_time is not None
+    last_success = failed.end_time - timedelta(hours=12)
+    history = [
+        OperationalEvent(
+            event_id=f"evt-history-{i}",
+            event_type=EventType.REFRESH_SUCCEEDED,
+            tenant_id=failed.tenant_id,
+            workspace_id=failed.workspace_id,
+            item_id=failed.item_id,
+            item_type=ItemType.SEMANTIC_MODEL,
+            timestamp=last_success - timedelta(hours=2 * (150 - i)),
+            summary="refresh succeeded",
+            dedupe_key=f"history-{i}",
+            source="test",
+            payload={"refresh_id": f"history-{i}", "status": "Succeeded"},
+        )
+        for i in range(1, 151)  # 150 successes, every two hours: more than the 100 the history asks for
+    ]
+    await scenario.event_store.append(history)
+
+    incident = await detect_and_investigate(scenario)
+
+    payload = next(e for e in incident.evidence if e.evidence_type is EvidenceType.RUN_HISTORY).structured_payload
+    assert payload["consecutive_failures"] == 1  # the failure that opened the incident is in the history
+    assert datetime.fromisoformat(str(payload["last_success_at"])) == last_success  # and so is the latest success
 
 
 @pytest.mark.parametrize("scenario", ["refresh_failure_pipeline"], indirect=True)

@@ -58,7 +58,7 @@ class FakeMonitoring:
         self.calls: list[tuple[str, datetime, datetime]] = []
 
     async def list_semantic_model_refreshes(
-        self, workspace_id: str, *, since: datetime, until: datetime
+        self, workspace_id: str, *, since: datetime, until: datetime, item_id: str | None = None
     ) -> list[Refresh]:
         self.calls.append((workspace_id, since, until))
         return self.refreshes

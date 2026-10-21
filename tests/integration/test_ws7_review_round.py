@@ -25,8 +25,8 @@ from orqentis.domain.delta import DeltaCommitFile, DeltaCommitRef, DeltaTableRef
 from orqentis.domain.estate import DeltaTableDeclaration, SemanticModel
 from orqentis.domain.events import EventType
 from orqentis.domain.principals import SYSTEM_PRINCIPAL
-from orqentis.domain.runs import RunStatus
-from orqentis.fabric.errors import FabricCapabilityUnavailableError, FabricError
+from orqentis.domain.runs import Refresh, RunStatus
+from orqentis.fabric.errors import FabricAuthError, FabricCapabilityUnavailableError, FabricError
 from orqentis.fabric.rest.http import FabricHttp
 from orqentis.fabric.rest.onelake import RestDeltaLogService
 from orqentis.storage.event_store import EventQuery
@@ -296,6 +296,42 @@ async def test_a_server_that_ignores_range_is_not_read_beyond_the_cap() -> None:
     assert body.sent <= 4096 + 2 * body.chunk  # a chunk or two past the cap, not the file
 
 
+async def test_the_capped_stream_keeps_authentication_retries_and_error_mapping() -> None:
+    """The cap is applied inside ``FabricHttp.request``: the bearer token, the retries and the errors are the same."""
+    seen: list[httpx.Request] = []
+    answers = iter(
+        [
+            httpx.Response(503),
+            httpx.Response(
+                206,
+                content=b'{"commitInfo":{"operation":"WRITE"}}\n{"add":{"path":"x"}}\n',
+                headers={"Content-Range": "bytes 0-60/61"},
+            ),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return next(answers)
+
+    http = FabricHttp(Tokens(), transport=httpx.MockTransport(handler), max_retries=2, sleep=_no_sleep)
+    service = RestDeltaLogService(http, base_url="https://onelake.example.invalid", scope="s/.default")
+    commit = await service.read_commit(TABLE, 1)
+    assert len(seen) == 2  # the 503 was retried
+    assert all(r.headers["authorization"] == "Bearer token-not-real" for r in seen)
+    assert all(r.headers["range"].startswith("bytes=0-") for r in seen)
+    assert commit.lines == ['{"commitInfo":{"operation":"WRITE"}}'] and not commit.truncated
+
+    forbidden = httpx.MockTransport(lambda r: httpx.Response(403, json={"error": {"code": "AuthorizationFailure"}}))
+    denied = RestDeltaLogService(
+        FabricHttp(Tokens(), transport=forbidden, max_retries=0, sleep=_no_sleep),
+        base_url="https://onelake.example.invalid",
+        scope="s/.default",
+    )
+    with pytest.raises(FabricAuthError):
+        await denied.read_commit(TABLE, 1)
+
+
 async def test_a_listing_that_hits_the_page_cap_is_an_error_not_the_oldest_entries() -> None:
     def forever(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -408,6 +444,62 @@ async def test_the_refresh_history_tool_never_calls_a_source_the_deployment_cann
             assert any(e.code == "CAPABILITY_UNAVAILABLE" for e in response.errors)
         else:
             assert response.status is ToolStatus.SUCCESS and response.source == expected
+    finally:
+        await c.aclose()
+
+
+class BusyWorkspace:
+    """A monitoring database that returns the newest rows it is asked for, at most ``limit``, as the adapter does."""
+
+    def __init__(self, refreshes: list[Refresh], limit: int) -> None:
+        self.refreshes, self.limit = refreshes, limit
+
+    async def list_semantic_model_refreshes(
+        self, workspace_id: str, *, since: datetime, until: datetime, item_id: str | None = None
+    ) -> list[Refresh]:
+        rows = [r for r in self.refreshes if item_id is None or r.item_id == item_id]
+        rows.sort(key=lambda r: r.end_time or r.start_time or since, reverse=True)
+        return rows[: self.limit]
+
+
+async def test_the_refresh_history_of_a_model_is_not_crowded_out_by_the_others_in_a_busy_workspace(
+    tmp_path: Path,
+) -> None:
+    c = await build_container(
+        make_settings(tmp_path, scenario="refresh_failure", refresh_source=RefreshSource.WORKSPACE_MONITORING),
+        reset=True,
+    )
+    try:
+        now = c.clock.now()
+        others = [
+            refresh_run(
+                f"other-{i}",
+                "sm-other",
+                RunStatus.SUCCEEDED,
+                now - timedelta(minutes=i + 1),
+                now - timedelta(minutes=i),
+            )
+            for i in range(30)
+        ]  # 30 newer refreshes of other models: more than the row limit
+        own = [
+            refresh_run(
+                f"own-{i}",
+                "sm-marketing",
+                RunStatus.FAILED if i == 0 else RunStatus.SUCCEEDED,
+                now - timedelta(days=2, hours=i + 1),
+                now - timedelta(days=2, hours=i),
+                message="boom",
+            )
+            for i in range(3)
+        ]
+        c.fabric._monitoring = BusyWorkspace(others + own, limit=10)  # type: ignore[attr-defined]
+        response = await c.registry.invoke(
+            "get_semantic_model_refresh_history",
+            {"semantic_model_id": "sm-marketing", "top": 5},
+            ToolContext(principal=SYSTEM_PRINCIPAL, trace_id="t"),
+        )
+        assert response.status is ToolStatus.SUCCESS
+        assert sorted(r["id"] for r in response.data) == ["own-0", "own-1", "own-2"]
     finally:
         await c.aclose()
 

@@ -72,9 +72,12 @@ class MonitoringService(Protocol):
     """
 
     async def list_semantic_model_refreshes(
-        self, workspace_id: str, *, since: datetime, until: datetime
+        self, workspace_id: str, *, since: datetime, until: datetime, item_id: str | None = None
     ) -> list[Refresh]:
         """Refreshes that ended (or, if unfinished, started) in ``[since, until]``, newest first.
+
+        ``item_id`` limits them to one semantic model *before* the adapter's row limit: asked for the workspace as a
+        whole, a busy workspace's other models can fill the limit and hide a model's refreshes.
 
         Raises :class:`~orqentis.fabric.errors.FabricCapabilityUnavailableError` when the workspace has no readable
         monitoring database (monitoring not enabled, or not visible to the reader).

@@ -125,7 +125,8 @@ monitoring database and any other KQL database, so even if the overview is right
    If the list leaves `properties` out, `GET .../kqlDatabases/{id}` returns the same object.
 2. Check the host: https, no credentials, no port, no path, and inside the Fabric API's parent domain (`*.fabric.microsoft.com`). The Kusto bearer token is only ever sent there.
 3. `POST {queryServiceUri}/v1/rest/query` with a token for the Kusto audience. Body:
-   `{"db": "<displayName>", "csl": "<REFRESHES_KQL>", "properties": {"Options": {"request_readonly": true, "servertimeout": "00:00:30"}, "Parameters": {"workspace_id": "...", "window_start": "...", "window_end": "...", "max_rows": 1000}}}`.
+   `{"db": "<displayName>", "csl": "<REFRESHES_KQL>", "properties": {"Options": {"request_readonly": true, "servertimeout": "00:00:30"}, "Parameters": {"workspace_id": "...", "window_start": "...", "window_end": "...", "max_rows": 1000, "item_id": ""}}}`.
+   `item_id` is empty for the whole workspace (the collector) or one semantic model's GUID (the refresh history tool): the filter is applied before `top max_rows`, so a busy workspace's other models cannot fill the row limit and hide that model's refreshes.
    Response: v1 `Tables`; the adapter finds the result table by its column names, reads `Exceptions` if present, and treats 403 as `FabricAuthError`, 404 as `FabricNotFoundError`
    (dropping the cached database and looking it up once more).
 
@@ -145,7 +146,7 @@ that constant and contains none of the values. Declared parameters are strings (
 the "KQL literal in string form" rule for other types.
 
 ```kusto
-declare query_parameters(workspace_id: string, window_start: string, window_end: string, max_rows: long);
+declare query_parameters(workspace_id: string, window_start: string, window_end: string, max_rows: long, item_id: string);
 let window_from = todatetime(window_start);
 let window_to = todatetime(window_end);
 let monitor_events = materialize(
@@ -166,7 +167,8 @@ let refreshes = monitor_events
                 Model = take_any(ItemId), ModelName = take_any(ItemName), Correlation = take_any(CorrelationId),
                 RefreshHits = countif(EventText has_any ('<Refresh xmlns', '"refresh"'))
       by OperationId
-    | where RefreshHits > 0;
+    | where RefreshHits > 0
+    | where isempty(item_id) or Model =~ item_id;
 let engine_errors = monitor_events
     | where OperationName == 'Error'
     | summarize arg_min(Timestamp, EventText, StatusCode) by OperationId
@@ -276,7 +278,7 @@ Redact ids before pasting anything into the ledger. `<ws>` is a sandbox workspac
 **The adapter's own query.**
 
 6. Generate the body from the module so the exact production text is used:
-   `.venv/Scripts/python.exe -c "import json; from orqentis.fabric.rest.monitoring import REFRESHES_KQL as K; print(json.dumps({'db':'<db>','csl':K,'properties':{'Options':{'request_readonly':True,'servertimeout':'00:00:30'},'Parameters':{'workspace_id':'<ws>','window_start':'<ISO start>','window_end':'<ISO end>','max_rows':1000}}}))" > query.json`
+   `.venv/Scripts/python.exe -c "import json; from orqentis.fabric.rest.monitoring import REFRESHES_KQL as K; print(json.dumps({'db':'<db>','csl':K,'properties':{'Options':{'request_readonly':True,'servertimeout':'00:00:30'},'Parameters':{'workspace_id':'<ws>','window_start':'<ISO start>','window_end':'<ISO end>','max_rows':1000,'item_id':''}}}))" > query.json`
    then `az rest --method post --resource <resource> --url "<qs>/v1/rest/query" --body @query.json`. Pass: HTTP 200 (so `request_readonly`, `servertimeout`, `declare query_parameters` and the v1 shape are accepted) and in the primary table a row for the injected failure
    with `status` as seen in step 5, the engine message in `error_text`, a row for the success, no rows for DAX queries, and a row count equal to the number of refreshes in the window.
 7. Through the Python adapter, with the real settings and token provider: `RestMonitoringService.list_semantic_model_refreshes(<ws>, since, until)`. Pass: a `Refresh` with `RunStatus.FAILED`, `error.message` equal to the engine text (privacy markers gone) and the succeeded one;
