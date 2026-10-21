@@ -27,6 +27,9 @@ from orqentis.topology.graph import DependencyGraph, GraphNode
 
 _ID = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
 
+# How far back the refresh history tool looks in workspace monitoring (the database keeps 30 days).
+_REFRESH_LOOKBACK = timedelta(days=14)
+
 
 class _Input(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -42,6 +45,8 @@ class ReadToolDependencies:
     runbooks: RunbookCatalog
     sla: SLAEvaluator
     clock: Clock
+    # Semantic model refresh outcomes come from workspace monitoring instead of the Power BI history (decision D9).
+    refresh_from_monitoring: bool = False
 
 
 def _workspace_for(deps: ReadToolDependencies, item_id: str) -> str:
@@ -72,6 +77,16 @@ class WorkspaceInput(_Input):
 class DependencyInput(_Input):
     item_id: str = _ID
     max_depth: int | None = Field(default=None, ge=1, le=10)
+
+
+class JobInstanceInput(_Input):
+    item_id: str = _ID
+    run_id: str = _ID
+
+
+class JobInstancesInput(_Input):
+    item_id: str = _ID
+    limit: int = Field(default=10, ge=1, le=50)
 
 
 class RefreshHistoryInput(_Input):
@@ -213,6 +228,39 @@ def build_read_tools(deps: ReadToolDependencies) -> list[ToolSpec]:
             summary=f"{len(runs)} activity run(s) for {p.run_id}: " + ", ".join(parts),
         )
 
+    async def get_job_instance(p: JobInstanceInput, ctx: ToolContext) -> ToolOutcome:
+        ws = _workspace_for(deps, p.item_id)
+        run = await deps.fabric.jobs.get_job_instance(ws, p.item_id, p.run_id)
+        item = deps.catalog.items.get(p.item_id)
+        name = item.display_name if item else p.item_id
+        failure = f": {run.failure.message}" if run.failure else ""
+        return ToolOutcome(
+            data=run,
+            source=run.source,
+            resource_id=run.item_id,
+            resource_type=item.item_type.value if item else None,
+            observed_at=run.end_time or run.start_time,
+            summary=f"Job {run.id} of {name} {run.status.value} ({_hhmm(run.start_time)} to {_hhmm(run.end_time)})"
+            f"{failure}",
+        )
+
+    async def get_job_instances(p: JobInstancesInput, ctx: ToolContext) -> ToolOutcome:
+        ws = _workspace_for(deps, p.item_id)
+        runs = await deps.fabric.jobs.list_job_instances(ws, p.item_id, limit=p.limit)
+        item = deps.catalog.items.get(p.item_id)
+        name = item.display_name if item else p.item_id
+        succeeded = [r for r in runs if r.status.value == "Succeeded"]
+        last = (succeeded[0].end_time or succeeded[0].start_time) if succeeded else None
+        failed = sum(1 for r in runs if r.status.is_failure)
+        return ToolOutcome(
+            data=runs,
+            source="fabric.jobs",
+            resource_id=p.item_id,
+            resource_type=item.item_type.value if item else None,
+            observed_at=last,
+            summary=f"{len(runs)} recent run(s) of {name}; last success {_hhmm(last)}; {failed} failure(s)",
+        )
+
     async def get_item(p: ItemInput, ctx: ToolContext) -> ToolOutcome:
         if (dp := deps.catalog.data_products.get(p.item_id)) is not None:
             return ToolOutcome(
@@ -273,13 +321,23 @@ def build_read_tools(deps: ReadToolDependencies) -> list[ToolSpec]:
 
     async def get_semantic_model_refresh_history(p: RefreshHistoryInput, ctx: ToolContext) -> ToolOutcome:
         ws = _workspace_for(deps, p.semantic_model_id)
-        refreshes = await deps.fabric.semantic_models.get_refresh_history(ws, p.semantic_model_id, top=p.top)
+        if deps.refresh_from_monitoring:
+            # The reader cannot read the Power BI history (dataset Write); the workspace's monitoring database has it.
+            now = deps.clock.now()
+            logged = await deps.fabric.monitoring.list_semantic_model_refreshes(
+                ws, since=now - _REFRESH_LOOKBACK, until=now
+            )
+            refreshes = [r for r in logged if r.item_id == p.semantic_model_id][: p.top]
+            source = "fabric.workspace-monitoring"
+        else:
+            refreshes = await deps.fabric.semantic_models.get_refresh_history(ws, p.semantic_model_id, top=p.top)
+            source = "powerbi.refreshes"
         succeeded = [r for r in refreshes if r.status.value == "Succeeded"]
         last = succeeded[0].end_time if succeeded else None
         failed = sum(1 for r in refreshes if r.status.is_failure)
         return ToolOutcome(
             data=refreshes,
-            source="powerbi.refreshes",
+            source=source,
             resource_id=p.semantic_model_id,
             resource_type=ItemType.SEMANTIC_MODEL.value,
             observed_at=last,
@@ -427,6 +485,20 @@ def build_read_tools(deps: ReadToolDependencies) -> list[ToolSpec]:
             PipelineRunInput,
             get_pipeline_activity_runs,
             evidence_type=EvidenceType.ACTIVITY_FAILURE,
+        ),
+        ToolSpec(
+            "get_job_instance",
+            "Get one job instance (a notebook, Spark job definition or Dataflow run) by item id and run id.",
+            JobInstanceInput,
+            get_job_instance,
+            evidence_type=EvidenceType.JOB_FAILURE,
+        ),
+        ToolSpec(
+            "get_job_instances",
+            "List the most recent job instances of an item, newest first.",
+            JobInstancesInput,
+            get_job_instances,
+            evidence_type=EvidenceType.RUN_HISTORY,
         ),
         ToolSpec(
             "get_item",

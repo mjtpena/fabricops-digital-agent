@@ -53,7 +53,10 @@ from orqentis.incidents.investigation import InvestigationService
 from orqentis.incidents.service import IncidentService
 from orqentis.incidents.sla import SLAEvaluator
 from orqentis.incidents.sla_sweep import SLASweeper
+from orqentis.incidents.workflows.item_job_failure import ItemJobFailureWorkflow
 from orqentis.incidents.workflows.pipeline_failure import PipelineFailureWorkflow, WorkflowDependencies
+from orqentis.incidents.workflows.refresh_failure import RefreshFailureWorkflow
+from orqentis.incidents.workflows.sla_breach import SlaBreachWorkflow
 from orqentis.notifications.factory import build_notification_service
 from orqentis.notifications.port import Notifier
 from orqentis.notifications.sink import NOOP_SINK, NotificationService
@@ -568,6 +571,7 @@ async def _build_container(
         runbooks=runbooks,
         sla=SLAEvaluator(event_store, clock),
         clock=clock,
+        refresh_from_monitoring=settings.refresh_source is RefreshSource.WORKSPACE_MONITORING,
     )
     registry = ToolRegistry(
         [*build_read_tools(read_deps), *build_mutation_request_tools(gateway, catalog, clock)],
@@ -601,27 +605,38 @@ async def _build_container(
         ),
     )
     reports = ReportPublisher(ReportBuilder(clock, timezone=settings.default_timezone), evidence_store)
-    workflow = PipelineFailureWorkflow(
-        WorkflowDependencies(
-            registry=registry,
-            incidents=incidents,
-            evidence_store=evidence_store,
-            investigator=investigator,
-            classifier=classifier,
-            catalog=catalog,
-            graph=graph,
-            history=history,
-            runbooks=runbooks,
-            confidence=ConfidenceCalculator(),
-            policy=policy,
-            gateway=gateway,
-            approvals=approvals,
-            reports=reports,
-            clock=clock,
-            auto_request_approval=settings.auto_request_approval,
-        )
+    workflow_dependencies = WorkflowDependencies(
+        registry=registry,
+        incidents=incidents,
+        evidence_store=evidence_store,
+        investigator=investigator,
+        classifier=classifier,
+        catalog=catalog,
+        graph=graph,
+        history=history,
+        runbooks=runbooks,
+        confidence=ConfidenceCalculator(),
+        policy=policy,
+        gateway=gateway,
+        approvals=approvals,
+        reports=reports,
+        clock=clock,
+        auto_request_approval=settings.auto_request_approval,
     )
-    investigations = InvestigationService([workflow], incidents, evidence_store, audit, clock)
+    # The first workflow that supports an incident investigates it. An SLA breach is claimed by its own workflow
+    # whatever kind of item refreshes the product, so the SLA workflow comes first.
+    investigations = InvestigationService(
+        [
+            SlaBreachWorkflow(workflow_dependencies),
+            PipelineFailureWorkflow(workflow_dependencies),
+            ItemJobFailureWorkflow(workflow_dependencies),
+            RefreshFailureWorkflow(workflow_dependencies),
+        ],
+        incidents,
+        evidence_store,
+        audit,
+        clock,
+    )
 
     # Pipelines first: their activity failures are stored before the notebook / refresh failures they caused, which is
     # what lets detection see that a pipeline incident already covers them (incidents/detection.py, ADR-0020).

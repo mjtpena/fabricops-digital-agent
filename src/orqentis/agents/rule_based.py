@@ -18,12 +18,15 @@ from orqentis.agents.models import (
     ProposedFinding,
     ProposedRootCause,
     ReasonerOutput,
+    SlaBreachObservation,
 )
 from orqentis.agents.toolbox import AgentToolbox
+from orqentis.domain.common import ItemType
 from orqentis.domain.evidence import FindingCategory, StatementKind
 from orqentis.domain.sla import SLAState
 from orqentis.domain.taxonomy import IncidentCategory
 from orqentis.incidents.classification import SignatureMatch
+from orqentis.telemetry.delta import clip
 
 
 def _ids(*values: str | None) -> list[str]:
@@ -46,7 +49,9 @@ class RuleBasedReasoner:
         findings: list[ProposedFinding] = []
         root: ProposedRootCause | None = None
 
-        if error and signature:
+        if ctx.sla_breach is not None:
+            root = self._sla_root(package, ctx.sla_breach)
+        elif error and signature:
             category = signature.category
             if category == IncidentCategory.SCHEMA_DRIFT:
                 root = self._schema_drift(ctx, error, signature)
@@ -54,9 +59,13 @@ class RuleBasedReasoner:
                 root = self._auth(ctx, error, signature)
             elif category in {IncidentCategory.CAPACITY_PRESSURE, IncidentCategory.THROTTLING}:
                 root = self._capacity_root(ctx, error, signature)
+            elif category == IncidentCategory.SEMANTIC_MODEL_REFRESH_FAILURE:
+                root = self._refresh_root(package, error, signature)
+            elif signature.signature_id == "SIG-NOTEBOOK-EXCEPTION":
+                root = self._exception_root(package, error, signature)
             else:
                 root = ProposedRootCause(
-                    statement=f"{signature.description}: {error.activity_name or 'the pipeline'} failed with "
+                    statement=f"{signature.description}: {self._subject(package, error)} failed with "
                     f"'{signature.matched_text}'.",
                     category=category,
                     evidence_ids=_ids(error.evidence_id),
@@ -71,6 +80,8 @@ class RuleBasedReasoner:
                 and root.category in {IncidentCategory.CAPACITY_PRESSURE, IncidentCategory.THROTTLING},
             )
         )
+        findings.extend(self._run_history_findings(package, root))
+        findings.extend(self._upstream_incident_findings(ctx, root))
         findings.extend(self._deployment_findings(ctx, root))
         findings.extend(self._history_findings(ctx, root))
         findings.extend(self._impact_findings(ctx))
@@ -109,29 +120,37 @@ class RuleBasedReasoner:
             (
                 c
                 for c in ctx.schema_changes
-                if (column is None or column in c.removed_columns) and c.observed_at <= ctx.failure_time
+                if (
+                    column is None
+                    or column in c.removed_columns
+                    or column in [before for before, _ in c.renamed_columns]
+                )
+                and c.observed_at <= ctx.failure_time
             ),
             None,
         )
         activity = error.activity_name or "the transformation"
         if change is None:
+            hint = self._suggestion(signature)
             return ProposedRootCause(
-                statement=f"Schema drift: {activity} expects column '{column or 'unknown'}', which is missing "
-                "from its input. No upstream schema-change telemetry was found, so where the change "
+                statement=f"Schema drift: {activity} expects column '{column or 'a column'}', which is missing "
+                f"from its input{hint}. No upstream schema-change telemetry was found, so where the change "
                 "came from is not confirmed.",
                 category=IncidentCategory.SCHEMA_DRIFT,
                 evidence_ids=_ids(error.evidence_id),
                 reasoning_summary="Error signature only; no corroborating schema-change evidence.",
             )
-        rename = (
-            f" and '{change.added_columns[0]}' was added, consistent with a rename"
-            if len(change.added_columns) == 1 and len(change.removed_columns) == 1
-            else ""
-        )
+        renamed_to = dict(change.renamed_columns).get(column or "")
+        if renamed_to is not None:
+            rename = f" and renamed to '{renamed_to}' (Delta column mapping)"
+        elif len(change.added_columns) == 1 and len(change.removed_columns) == 1:
+            rename = f" and '{change.added_columns[0]}' was added, consistent with a rename"
+        else:
+            rename = ""
         return ProposedRootCause(
             statement=(
-                f"Upstream schema change: column '{column or ', '.join(change.removed_columns)}' was removed from "
-                f"{change.table or 'the input table'} in {change.item_name} at {self._t(change.observed_at)}"
+                f"Upstream schema change: column '{column or ', '.join(change.removed_columns) or '?'}' was removed "
+                f"from {change.table or 'the input table'} in {change.item_name} at {self._t(change.observed_at)}"
                 f"{rename}. {activity} still expects the original column and failed."
             ),
             category=IncidentCategory.SCHEMA_DRIFT,
@@ -193,7 +212,163 @@ class RuleBasedReasoner:
             reasoning_summary="Capacity-limit error and capacity metrics show throttling at the failure time.",
         )
 
+    def _subject(self, package: EvidencePackage, error: ErrorObservation) -> str:
+        """What failed, in words: the activity that raised the error, else the item itself."""
+        if error.activity_name:
+            return error.activity_name
+        return (
+            "the pipeline"
+            if package.primary_item.item_type is ItemType.DATA_PIPELINE
+            else package.primary_item.display_name
+        )
+
+    @staticmethod
+    def _suggestion(signature: SignatureMatch) -> str:
+        suggestions = signature.entities.get("suggestions")
+        return f" (Spark suggests {clip(suggestions, 120)})" if suggestions else ""
+
+    def _exception_root(
+        self, package: EvidencePackage, error: ErrorObservation, signature: SignatureMatch
+    ) -> ProposedRootCause:
+        ctx = package.context
+        exception = clip(signature.entities.get("exception", "an exception"), 80)
+        message = signature.entities.get("exception_message")
+        ruled_out = [
+            what
+            for what, absent in (
+                ("an upstream schema change", not ctx.schema_changes),
+                ("an expired credential", not ctx.credentials),
+                ("capacity pressure", ctx.capacity is not None and not ctx.capacity.throttling_detected),
+            )
+            if absent
+        ]
+        return ProposedRootCause(
+            statement=(
+                f"{self._subject(package, error)} raised {exception}"
+                + (f": {clip(message, 200)}" if message else "")
+                + ". The exception comes from the job's own code or data; the cause inside it is not determined."
+            ),
+            category=IncidentCategory.ACTIVITY_FAILURE,
+            evidence_ids=_ids(error.evidence_id, ctx.run_history.evidence_id if ctx.run_history else None),
+            reasoning_summary=(
+                f"Error matches signature {signature.signature_id}: a Python or Spark exception surfaced by the run."
+                + (f" Nothing observed points to {', '.join(ruled_out)}." if ruled_out else "")
+            ),
+        )
+
+    def _refresh_root(
+        self, package: EvidencePackage, error: ErrorObservation, signature: SignatureMatch
+    ) -> ProposedRootCause:
+        ctx = package.context
+        table = signature.entities.get("table")
+        model_table = signature.entities.get("model_table")
+        name = package.primary_item.display_name
+        cause = (
+            f"it references the source table '{clip(table, 128)}'"
+            + (f" (model table '{clip(model_table, 128)}')" if model_table else "")
+            + ", which the engine cannot access: the table does not exist, or the identity has no permission on it"
+            if table
+            else f"the engine reported {signature.matched_text}"
+        )
+        return ProposedRootCause(
+            statement=f"The refresh of {name} failed: {cause}.",
+            category=IncidentCategory.SEMANTIC_MODEL_REFRESH_FAILURE,
+            evidence_ids=_ids(error.evidence_id, ctx.run_history.evidence_id if ctx.run_history else None),
+            reasoning_summary=f"Error matches signature {signature.signature_id}: a refresh error from the engine.",
+        )
+
+    @staticmethod
+    def _duration(seconds: float | None) -> str:
+        if seconds is None:
+            return "unknown"
+        minutes = round(seconds / 60)
+        return f"{minutes // 60} h {minutes % 60} min" if minutes >= 60 else f"{minutes} min"
+
+    def _sla_root(self, package: EvidencePackage, b: SlaBreachObservation) -> ProposedRootCause:
+        ctx = package.context
+        item = package.primary_item.display_name
+        head = f"{b.data_product_name} missed its {self._t(b.deadline)} deadline"
+        blockers = ctx.upstream_incidents
+        if b.kind == "LATE":
+            detail = ""
+            if b.started_at is not None:
+                detail = f" The run started at {self._t(b.started_at)}"
+                detail += f" (usually around {b.usual_start_local})" if b.usual_start_local else ""
+                if b.duration_seconds is not None:
+                    detail += f" and took {self._duration(b.duration_seconds)}"
+                    detail += (
+                        f" (median {self._duration(b.median_duration_seconds)})" if b.median_duration_seconds else ""
+                    )
+                detail += "."
+            statement = (
+                f"{head}: {item} finished refreshing at {self._t(b.last_successful_update)}, "
+                f"{b.minutes_late or 0:.0f} min late.{detail}"
+            )
+            reasoning = (
+                "The last successful run ended after the deadline; "
+                "its start and duration are compared with earlier runs."
+            )
+        elif b.kind == "BLOCKED":
+            listing = "; ".join(f"{u.incident_id} ({u.category}) on {u.item_name}" for u in blockers)
+            statement = f"{head} because {item} could not refresh today: {listing} blocked the refresh."
+            reasoning = "An incident on the item, or on something upstream of it, was open before the deadline."
+        elif b.kind == "FAILED":
+            statement = f"{head}: the last run of {item} failed and no incident is open for it."
+            reasoning = "The most recent run of the freshness item failed; nothing blocks it any more."
+        else:
+            statement = (
+                f"{head}: no completed run of {item} was observed in the window. It did not start, or is still running."
+            )
+            reasoning = "No run of the freshness item finished since the start of the SLA window."
+        return ProposedRootCause(
+            statement=statement,
+            category=IncidentCategory.SLA_BREACH,
+            evidence_ids=_ids(b.evidence_id, b.run_evidence_id, *[u.evidence_id for u in blockers]),
+            reasoning_summary=reasoning,
+        )
+
     # ------------------------------------------------------------------ supporting findings
+    def _run_history_findings(self, package: EvidencePackage, root: ProposedRootCause | None) -> list[ProposedFinding]:
+        history = package.context.run_history
+        if history is None or package.context.sla_breach is not None:
+            return []
+        name = package.primary_item.display_name
+        if history.consecutive_failures == 0:
+            return []
+        since = f" since {self._t(history.first_failure_at)}" if history.first_failure_at else ""
+        last = (
+            f"; the last success was at {self._t(history.last_success_at)}"
+            if history.last_success_at
+            else "; no success in the recent runs"
+        )
+        return [
+            ProposedFinding(
+                statement=f"{name} has failed {history.consecutive_failures} time(s) in a row{since}{last}.",
+                category=FindingCategory.HISTORICAL_PATTERN,
+                evidence_ids=[history.evidence_id],
+                kind=StatementKind.FACT,
+                reasoning_summary=f"Recent runs of the item ({history.runs_considered} considered), newest first.",
+            )
+        ]
+
+    def _upstream_incident_findings(
+        self, ctx: InvestigationContext, root: ProposedRootCause | None
+    ) -> list[ProposedFinding]:
+        if not ctx.upstream_incidents or (ctx.sla_breach is not None and ctx.sla_breach.kind == "BLOCKED"):
+            return []
+        listing = "; ".join(
+            f"{u.incident_id} ({u.category}, {u.status}) on {u.item_name}" for u in ctx.upstream_incidents
+        )
+        return [
+            ProposedFinding(
+                statement=f"An incident was already open at or upstream of this item: {listing}. "
+                "It may have caused this failure.",
+                category=FindingCategory.CONTRIBUTING_FACTOR,
+                evidence_ids=[u.evidence_id for u in ctx.upstream_incidents],
+                reasoning_summary="Open incidents on the item or on items upstream of it in the dependency graph.",
+            )
+        ]
+
     def _capacity_findings(
         self, ctx: InvestigationContext, package: EvidencePackage, *, is_root: bool
     ) -> list[ProposedFinding]:
@@ -376,10 +551,17 @@ class RuleBasedReasoner:
         ctx = package.context
         name = package.primary_item.display_name
         when = self._t(ctx.failure_time)
+        what = (
+            f"{ctx.sla_breach.data_product_name} missed its SLA"
+            if ctx.sla_breach
+            else f"{name} refresh failed"
+            if package.primary_item.item_type is ItemType.SEMANTIC_MODEL
+            else f"{name} failed"
+        )
         if root is None:
-            head = f"{name} failed at {when}. The root cause could not be determined from the available evidence."
+            head = f"{what} at {when}. The root cause could not be determined from the available evidence."
         else:
-            head = f"{name} failed at {when}. Probable root cause: {root.statement}"
+            head = f"{what} at {when}. Probable root cause: {root.statement}"
         parts = [head]
         if ctx.blast_radius is not None:
             downstream = [a for a in ctx.blast_radius.assets if a.depth > 0]
