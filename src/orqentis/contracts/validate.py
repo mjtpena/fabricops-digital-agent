@@ -20,7 +20,7 @@ from orqentis.contracts.diagnostics import parse_json, pydantic_violations, read
 from orqentis.contracts.errors import ContractViolation, Severity
 from orqentis.contracts.locator import Locations
 from orqentis.contracts.model import CONTRACT_SECTIONS, ESTATE_ONLY_KEYS, EstateContracts
-from orqentis.domain.common import Environment
+from orqentis.domain.common import Environment, ItemType
 from orqentis.domain.estate import DataProduct, ExternalSource
 from orqentis.domain.sla import SLA
 from orqentis.domain.topology import Dependency
@@ -81,6 +81,7 @@ class _Checker:
         fabric_items = set(self.catalog.items) if self.catalog else set()
         self._ids(fabric_items)
         self._environments()
+        self._delta_tables()
         unchecked = self._dependencies(declared, fabric_items)
         unchecked += self._slas(declared, fabric_items)
         unchecked += self._data_products_and_sources(declared, fabric_items)
@@ -103,6 +104,7 @@ class _Checker:
         self._duplicates("data_products", (d.id for d in c.data_products))
         self._duplicates("dependencies", (d.id for d in c.dependencies))
         self._duplicates("slas", (s.id for s in c.slas))
+        self._duplicates("delta_tables", (t.id for t in c.delta_tables))
         source_ids = {s.id for s in c.external_sources}
         for index, product in enumerate(c.data_products):
             if product.id in source_ids:
@@ -121,6 +123,31 @@ class _Checker:
                         f"/{section}/{index}/id",
                         f"id '{node_id}' is also a Fabric item in the catalog; the declared node would be shadowed",
                     )
+
+    def _delta_tables(self) -> None:
+        """A declared table names one lakehouse table once; with a catalog, the lakehouse must exist."""
+        seen: dict[tuple[str, str | None, str], int] = {}
+        for index, declaration in enumerate(self.contracts.delta_tables):
+            pointer = f"/delta_tables/{index}"
+            key = (declaration.item_id, declaration.schema_name, declaration.table)
+            if key in seen:
+                self.add(
+                    pointer,
+                    f"table '{declaration.table}' is already declared at {self._line(f'/delta_tables/{seen[key]}')}",
+                )
+            else:
+                seen[key] = index
+            if self.catalog is None:
+                continue
+            item = self.catalog.items.get(declaration.item_id)
+            if item is None:
+                self.add(f"{pointer}/item_id", f"lakehouse '{declaration.item_id}' is not in the catalog")
+            elif item.item_type is not ItemType.LAKEHOUSE:
+                self.add(
+                    f"{pointer}/item_id",
+                    f"'{declaration.item_id}' is a {item.item_type.value}, not a Lakehouse; only lakehouse tables "
+                    "have a readable _delta_log",
+                )
 
     def _environments(self) -> None:
         seen: dict[tuple[str, str], int] = {}

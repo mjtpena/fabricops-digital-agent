@@ -74,9 +74,12 @@ async def ready(request: Request, response: Response) -> Ready | JSONResponse:
     if container.audit_anchoring is not None and container.scheduler.is_leader and container.audit_anchoring.stale:
         problems.append("audit anchoring stale")
     degraded = problems or None
+    unavailable = container.collection.unavailable or None
     if not settings.scheduler_enabled:
-        return Ready(scheduler="disabled", degraded=degraded)
-    return Ready(scheduler="leader" if container.scheduler.is_leader else "standby", degraded=degraded)
+        return Ready(scheduler="disabled", degraded=degraded, unavailable=unavailable)
+    return Ready(
+        scheduler="leader" if container.scheduler.is_leader else "standby", degraded=degraded, unavailable=unavailable
+    )
 
 
 @router.post("/telemetry/collect", response_model=CollectionResult)
@@ -87,6 +90,7 @@ async def collect(c: ContainerDep, _: CollectPrincipal) -> CollectionResult:
         by_type=ingestion.counts(),
         incidents_created=[i.incident_id for i in created],
         collector_errors=ingestion.errors,
+        collector_unavailable=ingestion.unavailable,
     )
 
 

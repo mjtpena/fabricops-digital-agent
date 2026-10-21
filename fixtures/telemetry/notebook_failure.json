@@ -1,0 +1,189 @@
+{
+  "scenario": {
+    "name": "notebook_failure",
+    "title": "Notebook inventory_snapshot fails on its own with an unhandled exception",
+    "description": "07:02 the scheduled run of inventory_snapshot raises ValueError on a non-numeric unit_cost. No pipeline is involved, capacity is calm, and nothing upstream changed. The notebook's own data or code is at fault.",
+    "now": "2026-10-05T07:25:00+11:00",
+    "expected_category": "ACTIVITY_FAILURE",
+    "expected_runbook_id": "RB-NOTEBOOK-FAILURE-001"
+  },
+  "pipeline_runs": [
+    {
+      "id": "run-nb-inv-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "nb-inventory-snapshot",
+      "item_type": "Notebook",
+      "display_name": "inventory_snapshot",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-02T07:00:04+10:00",
+      "end_time": "2026-10-02T07:05:20+10:00"
+    },
+    {
+      "id": "run-nb-inv-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "nb-inventory-snapshot",
+      "item_type": "Notebook",
+      "display_name": "inventory_snapshot",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-03T07:00:04+10:00",
+      "end_time": "2026-10-03T07:05:20+10:00"
+    },
+    {
+      "id": "run-nb-inv-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "nb-inventory-snapshot",
+      "item_type": "Notebook",
+      "display_name": "inventory_snapshot",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-04T07:00:04+11:00",
+      "end_time": "2026-10-04T07:05:20+11:00"
+    },
+    {
+      "id": "run-nb-inv-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "nb-inventory-snapshot",
+      "item_type": "Notebook",
+      "display_name": "inventory_snapshot",
+      "environment": "PROD",
+      "status": "Failed",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-05T07:00:03+11:00",
+      "end_time": "2026-10-05T07:02:41+11:00",
+      "failure": {
+        "error_code": "200",
+        "failure_type": "UserError",
+        "message": "Notebook execution failed at Notebook service with http status code - '200', please check the Run logs on Notebook, additional details - '{\"errorCode\": \"200\", \"errorName\": \"ValueError\", \"errorValue\": \"could not convert string to float: 'N/A' (column unit_cost)\", \"message\": \"Notebook execution is in Failed state, runId: 5b1f0c2e-7a64-4d0a-9e6d-31c0a8d2f1b7\"}' : "
+      },
+      "correlation_id": "corr-nb-91c4e2d0"
+    },
+    {
+      "id": "run-inv-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "pl-ingest-inventory-prod",
+      "item_type": "DataPipeline",
+      "display_name": "ingest_inventory_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-02T05:45:03+10:00",
+      "end_time": "2026-10-02T06:02:30+10:00"
+    },
+    {
+      "id": "run-inv-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "pl-ingest-inventory-prod",
+      "item_type": "DataPipeline",
+      "display_name": "ingest_inventory_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-03T05:45:03+10:00",
+      "end_time": "2026-10-03T06:02:30+10:00"
+    },
+    {
+      "id": "run-inv-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "pl-ingest-inventory-prod",
+      "item_type": "DataPipeline",
+      "display_name": "ingest_inventory_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-04T05:45:03+11:00",
+      "end_time": "2026-10-04T06:02:30+11:00"
+    },
+    {
+      "id": "run-inv-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-supply-prod",
+      "item_id": "pl-ingest-inventory-prod",
+      "item_type": "DataPipeline",
+      "display_name": "ingest_inventory_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-05T05:45:03+11:00",
+      "end_time": "2026-10-05T06:02:30+11:00"
+    }
+  ],
+  "activity_runs": [],
+  "capacity_snapshots": [
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T06:30:00+11:00",
+      "cu_utilization_percent": 31.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "nb-inventory-snapshot",
+          "workspace_id": "ws-supply-prod",
+          "display_name": "inventory_snapshot",
+          "item_type": "Notebook",
+          "cu_percent": 7.0
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T06:45:00+11:00",
+      "cu_utilization_percent": 33.5,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "nb-inventory-snapshot",
+          "workspace_id": "ws-supply-prod",
+          "display_name": "inventory_snapshot",
+          "item_type": "Notebook",
+          "cu_percent": 6.5
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T07:00:00+11:00",
+      "cu_utilization_percent": 36.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "nb-inventory-snapshot",
+          "workspace_id": "ws-supply-prod",
+          "display_name": "inventory_snapshot",
+          "item_type": "Notebook",
+          "cu_percent": 9.0
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T07:15:00+11:00",
+      "cu_utilization_percent": 34.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "nb-inventory-snapshot",
+          "workspace_id": "ws-supply-prod",
+          "display_name": "inventory_snapshot",
+          "item_type": "Notebook",
+          "cu_percent": 5.5
+        }
+      ]
+    }
+  ]
+}

@@ -37,3 +37,15 @@ workspace monitoring (which covers item-level logs, not capacity CU).
 * Capacity signals include load from every workspace on the capacity, not only monitored ones.
 * Delta log content (column names, operation metadata) is a new prompt-injection surface and is
   covered by the security review (WS12).
+
+## Update (ADR-0020, WS7)
+
+* **Schema drift** is implemented as decided: the Delta `_delta_log` of tables declared in the contracts (`delta_tables`), read
+  through the OneLake ADLS Gen2 API with a table-level OneLake data access role (smaller than the expected `Read` + `ReadAll`,
+  proven live; see `docs/security.md` section 11).
+* **Capacity** is built (`CapacityMetricsReader`, `executeQueries`) but the spike could **not confirm** the source, offline: the
+  model is documented as unsupported outside the app's own reports, two app versions already name their tables differently,
+  and `executeQueries` needs Build on the model, which a Viewer does not have and which cannot be granted to a service
+  principal through the API. The adapter fails closed on a schema mismatch and stays dormant until configured. The fallback
+  stated above (Real-Time hub capacity events in an Eventhouse) remains the documented alternative; the choice is the owner's.
+

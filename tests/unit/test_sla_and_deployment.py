@@ -33,10 +33,10 @@ SLA_0630 = SLA(
 )
 
 
-def success(at: datetime) -> OperationalEvent:
+def success(at: datetime, event_type: EventType = EventType.PIPELINE_RUN_SUCCEEDED) -> OperationalEvent:
     return OperationalEvent(
         event_id=f"e{at.timestamp()}",
-        event_type=EventType.PIPELINE_RUN_SUCCEEDED,
+        event_type=event_type,
         tenant_id="t",
         item_id="pl",
         timestamp=at,
@@ -83,6 +83,41 @@ async def test_sla_states(
     tmp_path: Path, now: datetime, successes: list[datetime], blocking: list[str], state: SLAState
 ) -> None:
     assert await evaluate(tmp_path, now, successes, blocking) is state
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        EventType.PIPELINE_RUN_SUCCEEDED,
+        EventType.NOTEBOOK_RUN_SUCCEEDED,
+        EventType.SPARK_JOB_SUCCEEDED,
+        EventType.DATAFLOW_REFRESH_SUCCEEDED,
+        EventType.REFRESH_SUCCEEDED,
+    ],
+)
+async def test_whatever_produces_the_freshness_item_can_meet_the_sla(tmp_path: Path, event_type: EventType) -> None:
+    """A notebook, Spark job or Dataflow that finished before the deadline meets it, as a pipeline run does."""
+    store = LocalEventStore(SqliteDatabase(tmp_path / "e.sqlite3"))
+    await store.append([success(MONDAY.replace(hour=6, minute=10), event_type)])
+    assessment = await SLAEvaluator(store, FixedClock(MONDAY.replace(hour=7))).assess(SLA_0630, data_product_name="dp")
+    assert assessment.state is SLAState.MET
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        EventType.PIPELINE_RUN_FAILED,
+        EventType.NOTEBOOK_RUN_FAILED,
+        EventType.SPARK_JOB_FAILED,
+        EventType.DATAFLOW_REFRESH_FAILED,
+        EventType.REFRESH_FAILED,
+    ],
+)
+async def test_a_failed_run_does_not_meet_the_sla(tmp_path: Path, event_type: EventType) -> None:
+    store = LocalEventStore(SqliteDatabase(tmp_path / "e.sqlite3"))
+    await store.append([success(MONDAY.replace(hour=6, minute=10), event_type)])
+    assessment = await SLAEvaluator(store, FixedClock(MONDAY.replace(hour=7))).assess(SLA_0630, data_product_name="dp")
+    assert assessment.state is SLAState.BREACHED
 
 
 def dstate(env: Environment, commit: str, at: datetime, item: str) -> DeploymentState:

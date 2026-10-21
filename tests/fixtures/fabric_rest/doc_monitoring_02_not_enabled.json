@@ -1,0 +1,38 @@
+{
+  "label": "doc_monitoring_02_not_enabled",
+  "description": "Built from the documented schema, not recorded live: List KQL Databases in a workspace that has workspace monitoring switched off, so no KQL database carries the monitoring database name.",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000080/kqlDatabases",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-00000000008e"
+        },
+        "json": {
+          "value": [
+            {
+              "id": "00000000-0000-4000-8000-000000000082",
+              "displayName": "Sales events",
+              "description": "An unrelated KQL database.",
+              "type": "KQLDatabase",
+              "workspaceId": "00000000-0000-4000-8000-000000000080",
+              "properties": {
+                "parentEventhouseItemId": "00000000-0000-4000-8000-000000000084",
+                "queryServiceUri": "https://trd-other.z5.kusto.fabric.example.invalid",
+                "ingestionServiceUri": "https://ingest-trd-other.z5.kusto.fabric.example.invalid",
+                "databaseType": "ReadWrite"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

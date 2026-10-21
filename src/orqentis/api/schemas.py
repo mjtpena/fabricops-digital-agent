@@ -36,6 +36,9 @@ class Ready(BaseModel):
     # Present only when something is wrong that does not stop the service: the estate contracts last uploaded were
     # refused, so the previous ones are in force (the refresh job fails until the upload is fixed).
     degraded: list[Literal["contracts reload failed", "audit anchoring stale"]] | None = None
+    # Our own collector names whose last run could not observe by design (a documented permission gap, a capability
+    # the platform does not expose). Not a fault: FabricOps works but is blind to that signal. Never a message.
+    unavailable: list[str] | None = None
 
 
 class NotReady(BaseModel):
@@ -106,6 +109,7 @@ class CollectionResult(BaseModel):
     by_type: dict[str, int]
     incidents_created: list[str]
     collector_errors: dict[str, str]
+    collector_unavailable: dict[str, str] = Field(default_factory=dict)
 
 
 class DependencyNode(BaseModel):

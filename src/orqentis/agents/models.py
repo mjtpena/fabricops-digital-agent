@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, Field
 
@@ -37,6 +37,8 @@ class SchemaChangeObservation(BaseModel):
     table: str | None = None
     removed_columns: list[str] = Field(default_factory=list)
     added_columns: list[str] = Field(default_factory=list)
+    # (before, after) pairs, only where Delta column mapping proves a rename
+    renamed_columns: list[tuple[str, str]] = Field(default_factory=list)
     observed_at: AwareDatetime
     upstream_path: list[str] = Field(default_factory=list)
 
@@ -76,6 +78,50 @@ class CapacityObservation(BaseModel):
     contending: list[ContendingWorkload] = Field(default_factory=list)
 
 
+class RunHistoryObservation(BaseModel):
+    """How an item has been running: its recent runs (or refreshes), reduced to what explains a failure."""
+
+    evidence_id: str
+    item_id: str
+    runs_considered: int
+    last_success_at: AwareDatetime | None = None
+    consecutive_failures: int = 0
+    first_failure_at: AwareDatetime | None = None
+    median_duration_seconds: float | None = None
+
+
+class UpstreamIncidentObservation(BaseModel):
+    """An incident on an item at or upstream of the failing one that was open when it failed."""
+
+    evidence_id: str
+    incident_id: str
+    item_id: str
+    item_name: str
+    category: str
+    status: str
+    detected_at: AwareDatetime
+
+
+class SlaBreachObservation(BaseModel):
+    """What happened to the item that has to refresh a data product by its deadline."""
+
+    evidence_id: str
+    sla_id: str
+    data_product_name: str
+    deadline: AwareDatetime
+    # LATE: it refreshed, after the deadline. BLOCKED: an incident on the item or upstream of it explains it.
+    # FAILED: its last run failed and no incident is open. NOT_RUN: nothing ran in the window.
+    kind: Literal["LATE", "BLOCKED", "FAILED", "NOT_RUN"]
+    last_successful_update: AwareDatetime | None = None
+    minutes_late: float | None = None
+    run_evidence_id: str | None = None
+    started_at: AwareDatetime | None = None
+    usual_start_local: str | None = None
+    duration_seconds: float | None = None
+    median_duration_seconds: float | None = None
+    blocking_incident_ids: list[str] = Field(default_factory=list)
+
+
 class DeploymentObservation(BaseModel):
     evidence_id: str
     item_id: str
@@ -107,6 +153,9 @@ class InvestigationContext(BaseModel):
     runbooks: list[RunbookMatch] = Field(default_factory=list)
     runbook_evidence_id: str | None = None
     refresh_evidence_ids: list[str] = Field(default_factory=list)
+    run_history: RunHistoryObservation | None = None
+    upstream_incidents: list[UpstreamIncidentObservation] = Field(default_factory=list)
+    sla_breach: SlaBreachObservation | None = None
 
 
 class PrimaryItemView(BaseModel):

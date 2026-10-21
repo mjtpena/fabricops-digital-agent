@@ -13,6 +13,41 @@ section does not match.
 
 ### Added
 
+- Signal sources and detection breadth (ADR-0020, implements D9 and the schema half of ADR-0009): collectors for notebook,
+  Spark job definition and Dataflow runs; semantic model refresh outcomes from Fabric workspace monitoring (a parameterised,
+  read-only KQL query; `ORQENTIS_REFRESH_SOURCE`); Delta schema changes read from the `_delta_log` of the contracts'
+  new `delta_tables` through OneLake (rename only when column mapping proves it); a Capacity Metrics `executeQueries`
+  adapter (dormant until configured; the spikes could not confirm its source offline). Deterministic rules for notebook,
+  Spark job, Dataflow and refresh failures and for SLA breaches (severity from the data product's declared criticality or
+  the environment), one incident per failure (a failure a failed pipeline activity already covers opens nothing), and an
+  SLA breach is never declared while the freshness item's collector has no recent pass. Workflows for jobs, refreshes and
+  SLA breaches on a shared `DiagnosticWorkflow` base; runbooks `RB-NOTEBOOK-FAILURE-001` and `RB-SLA-BREACH-001`;
+  signatures for notebook exceptions and refresh errors; Spark's own `UNRESOLVED_COLUMN` message now yields the column.
+  Known permission gaps are *capability unavailable* (metric `orqentis.collector.unavailable`, `unavailable` on
+  `/health/ready`), not collector errors. Five new scenarios (`notebook_failure`, `refresh_failure`,
+  `refresh_failure_pipeline`, `sla_breach`, `schema_drift_delta`); spike write-ups in `docs/spikes/`.
+- Redaction no longer hides the error evidence's own `signature_match` (exact safe keys; the value is still scanned).
+- Review round on the signal sources (PR 19): a hostile Delta commit (deeply nested JSON) no longer fails collection, and an
+  unexpected error in one table's log is that table's error only; the schema in force is remembered per table
+  (`SCHEMA_SNAPSHOT` events) so a change on a busy table is not missed, commits are read oldest first and the watermark
+  never passes one that was not processed; a commit is read as a capped stream even if OneLake ignores `Range`, and a listing
+  that hits its page limit is an error; workspace-monitoring scopes are the workspaces that hold a semantic model (those
+  with no monitoring database are *capability unavailable*) and only rows naming a model of that workspace are used;
+  only known launcher invoke types suppress a job incident; an ambiguous monitoring database and a Capacity Metrics schema
+  mismatch are errors; an unavailable collector still records a run (`outcome=unavailable`); the refresh history tool
+  follows `ORQENTIS_REFRESH_SOURCE`; Bicep parameters for the Delta log caps. From the first live checks: a Kusto 400
+  for a missing `SemanticModelLogs` table is recognised from the error's `@message` (the generic `message` never named it);
+  the monitoring database is recognised per workspace by its documented names instead of one configured name
+  (`ORQENTIS_WORKSPACE_MONITORING_DATABASE` is now an override, empty by default), and the not-enabled error counts the KQL
+  databases the reader could see. The name rule is literal (`<workspace> <item>_Database`, case-sensitive; "Sales
+  Database" no longer matches), and a missing `SemanticModelLogs` table in a database only inferred from its name is
+  capability unavailable (`SemanticModelLogsMissing`) rather than "no refreshes". A Delta table whose backlog is older than
+  the collection lookback is still worked off from its recorded version (the lookback floor no longer skips it), and
+  `orqentis.collector.backlog` shows the commits waiting. From the PR review threads: an SLA whose freshness item is a
+  notebook, Spark job or Dataflow is met by that run (the evaluator only looked at pipeline runs and refreshes); the
+  refresh and SLA workflows read a model's history newest first, so the limit cuts the oldest runs; the refresh history
+  tool names the model in the monitoring query, before the row limit, instead of filtering the workspace's newest 1,000.
+
 - Durable storage and a stateless app (ADR-0017, implements ADR-0008): PostgreSQL adapters (asyncpg, Entra token as the
   password, no password setting) for the event store, incidents, dependencies, approvals (compare-and-set), the audit
   chain (chain-head row lock), the leader lease (database clock, fencing generation) and investigation jobs

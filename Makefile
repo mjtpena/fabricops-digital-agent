@@ -10,7 +10,7 @@ endif
 VENV     ?= .venv
 BIN      := $(VENV)/$(VENV_BIN)
 SCENARIO ?= schema_drift
-SCENARIOS := schema_drift auth_failure capacity_pressure unknown_failure
+SCENARIOS := schema_drift auth_failure capacity_pressure unknown_failure notebook_failure refresh_failure refresh_failure_pipeline sla_breach schema_drift_delta
 
 .DEFAULT_GOAL := help
 .PHONY: help install demo demo-all serve test lint format typecheck check runbooks audit clean

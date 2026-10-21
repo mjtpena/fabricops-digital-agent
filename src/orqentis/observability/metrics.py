@@ -18,8 +18,12 @@ Instruments (all names start with ``orqentis.``):
 name                                  kind       attributes
 ====================================  =========  ===========================================================
 ``collector.duration`` (s)            histogram  collector
-``collector.runs``                    counter    collector, outcome = ok | error
+``collector.runs``                    counter    collector, outcome = ok | error | unavailable
 ``collector.errors``                  counter    collector (one per failed collector or scope)
+``collector.backlog``                 gauge      collector (units its last run left over because of a per-run
+                                                 cap, summed over its scopes: Delta commits not yet read)
+``collector.unavailable``             counter    collector (a documented permission gap or a capability the platform
+                                                 does not expose: seen, counted, but not an error)
 ``events.ingested``                   counter    collector (events that were new to the event store)
 ``collection.runs``                   counter    outcome = success | degraded | failed | cancelled
 ``collection.heartbeat`` (s, epoch)   gauge      time of the last successful collection (see below)
@@ -91,6 +95,7 @@ class Metrics:
         self._approvals_pending: int | None = None
         self._leader = False
         self._anchor_age: float | None = None
+        self._backlog: dict[str, int] = {}
 
         # collection
         self._collector_duration = meter.create_histogram(
@@ -101,6 +106,16 @@ class Metrics:
         )
         self._collector_errors = meter.create_counter(
             "orqentis.collector.errors", description="Failed collector runs, or failed scopes of a scoped collector"
+        )
+        self._collector_unavailable = meter.create_counter(
+            "orqentis.collector.unavailable",
+            description="Collector runs (or scopes) that could not observe by design: a documented permission gap "
+            "or a capability the platform does not expose. Not an error.",
+        )
+        meter.create_observable_gauge(
+            "orqentis.collector.backlog",
+            callbacks=[self._observe_backlog],
+            description="Units a collector left unprocessed in its last run because of a per-run cap",
         )
         self._events_ingested = meter.create_counter(
             "orqentis.events.ingested", description="Events that were new to the event store, by collector"
@@ -183,6 +198,10 @@ class Metrics:
         )
 
     # ------------------------------------------------------------------------------------------ observers
+    def _observe_backlog(self, options: CallbackOptions) -> Iterable[Observation]:
+        for collector, behind in list(self._backlog.items()):
+            yield Observation(behind, {"collector": collector})
+
     def _observe_heartbeat(self, options: CallbackOptions) -> Iterable[Observation]:
         if self._last_collection_success is not None:
             yield Observation(self._last_collection_success)
@@ -199,14 +218,26 @@ class Metrics:
             yield Observation(self._anchor_age)
 
     # ------------------------------------------------------------------------------------------ collection
-    def collector_run(self, collector: str, *, seconds: float, errors: int, new_events: int) -> None:
+    def collector_run(
+        self, collector: str, *, seconds: float, errors: int, new_events: int, unavailable: bool = False
+    ) -> None:
+        """One collector run. ``unavailable``: it could not observe by design (no error); it is still a run."""
         attrs = {"collector": label(collector)}
         self._collector_duration.record(seconds, attrs)
-        self._collector_runs.add(1, {**attrs, "outcome": "error" if errors else "ok"})
+        outcome = "error" if errors else "unavailable" if unavailable else "ok"
+        self._collector_runs.add(1, {**attrs, "outcome": outcome})
         if errors:
             self._collector_errors.add(errors, attrs)
         if new_events:
             self._events_ingested.add(new_events, attrs)
+
+    def collector_backlog(self, collector: str, behind: int) -> None:
+        """What a collector's last run left unprocessed (0 when it caught up): a gauge, so it can fall again."""
+        self._backlog[label(collector)] = max(behind, 0)
+
+    def collector_unavailable(self, collector: str) -> None:
+        """A collector (or one of its scopes) could not observe because the deployment does not allow it, by design."""
+        self._collector_unavailable.add(1, {"collector": label(collector)})
 
     def collection_run(self, outcome: str, *, at: datetime | None = None) -> None:
         """Record a finished collection run. ``at`` (when the run succeeded or degraded) advances the heartbeat."""

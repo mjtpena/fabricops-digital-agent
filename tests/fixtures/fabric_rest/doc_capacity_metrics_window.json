@@ -1,0 +1,236 @@
+{
+  "label": "doc_capacity_metrics_window",
+  "description": "Built from the documented schema, not recorded live: a 30-minute window read through executeQueries. One capacity-level query, then the top items at the peak timepoint of the throttled bucket and of the busy bucket; the idle bucket gets no item query. The requests are the DAX the adapter generates (a change to it must be reviewed here); the table and measure names are assumptions listed in docs/spikes/capacity-metrics.md.",
+  "entries": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1.0/myorg/groups/00000000-0000-4000-8000-0000000000a1/datasets/00000000-0000-4000-8000-0000000000a2/executeQueries",
+        "query": {},
+        "json": {
+          "queries": [
+            {
+              "query": "EVALUATE\nTOPN(\n    21000,\n    SUMMARIZECOLUMNS(\n        'TimePoints'[TimePoint],\n        TREATAS({\"00000000-0000-4000-8000-0000000000a0\"}, 'Capacities'[capacityId]),\n        FILTER(ALL('TimePoints'[TimePoint]), 'TimePoints'[TimePoint] >= (DATE(2026, 10, 21) + TIME(12, 0, 0)) && 'TimePoints'[TimePoint] <= (DATE(2026, 10, 21) + TIME(12, 30, 0))),\n        \"CuPercent\", [CU %],\n        \"InteractiveDelayPercent\", [Interactive delay %],\n        \"BackgroundRejectionPercent\", [Background rejection %]\n    ),\n    'TimePoints'[TimePoint], DESC\n)\nORDER BY 'TimePoints'[TimePoint] ASC"
+            }
+          ],
+          "serializerSettings": {
+            "includeNulls": true
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-0000000000a6"
+        },
+        "json": {
+          "results": [
+            {
+              "tables": [
+                {
+                  "rows": [
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:00:30",
+                      "[CuPercent]": 58.1,
+                      "[InteractiveDelayPercent]": 0.0,
+                      "[BackgroundRejectionPercent]": 0.0
+                    },
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:01:00",
+                      "[CuPercent]": 62.4,
+                      "[InteractiveDelayPercent]": 0.0,
+                      "[BackgroundRejectionPercent]": 0.0
+                    },
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:04:30",
+                      "[CuPercent]": 88.2,
+                      "[InteractiveDelayPercent]": 0.0,
+                      "[BackgroundRejectionPercent]": 0.0
+                    },
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:05:00",
+                      "[CuPercent]": 71.9,
+                      "[InteractiveDelayPercent]": null,
+                      "[BackgroundRejectionPercent]": 0.0
+                    },
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:10:30",
+                      "[CuPercent]": 104.8,
+                      "[InteractiveDelayPercent]": 112.4,
+                      "[BackgroundRejectionPercent]": 31.2
+                    },
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:11:00",
+                      "[CuPercent]": 119.2,
+                      "[InteractiveDelayPercent]": 140.3,
+                      "[BackgroundRejectionPercent]": 36.0
+                    },
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:11:30",
+                      "[CuPercent]": 131.5,
+                      "[InteractiveDelayPercent]": 178.9,
+                      "[BackgroundRejectionPercent]": 34.7
+                    },
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:15:00",
+                      "[CuPercent]": 96.0,
+                      "[InteractiveDelayPercent]": 85.2,
+                      "[BackgroundRejectionPercent]": 38.4
+                    },
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:20:30",
+                      "[CuPercent]": 6.1,
+                      "[InteractiveDelayPercent]": 0.0,
+                      "[BackgroundRejectionPercent]": 0.0
+                    },
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:25:00",
+                      "[CuPercent]": 4.9,
+                      "[InteractiveDelayPercent]": 0.0,
+                      "[BackgroundRejectionPercent]": 0.0
+                    },
+                    {
+                      "TimePoints[TimePoint]": "2026-10-21T12:29:30",
+                      "[CuPercent]": 5.5,
+                      "[InteractiveDelayPercent]": 0.0,
+                      "[BackgroundRejectionPercent]": 0.0
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1.0/myorg/groups/00000000-0000-4000-8000-0000000000a1/datasets/00000000-0000-4000-8000-0000000000a2/executeQueries",
+        "query": {},
+        "json": {
+          "queries": [
+            {
+              "query": "DEFINE\n    MPARAMETER 'CapacitiesList' = { \"00000000-0000-4000-8000-0000000000a0\" }\n    MPARAMETER 'TimePoint' = (DATE(2026, 10, 21) + TIME(12, 11, 30))\nEVALUATE\nTOPN(\n    10,\n    SUMMARIZECOLUMNS(\n        'Items'[Workspace Id],\n        'Items'[Item Id],\n        'Items'[Item name],\n        'Items'[Item kind],\n        TREATAS({\"00000000-0000-4000-8000-0000000000a0\"}, 'Capacities'[capacityId]),\n        TREATAS({(DATE(2026, 10, 21) + TIME(12, 11, 30))}, 'TimePoints'[TimePoint]),\n        \"InteractiveCuPercent\", SUM('Timepoint Interactive Detail'[% of Base Capacity]),\n        \"BackgroundCuPercent\", SUM('Timepoint Background Detail'[% of Base Capacity])\n    ),\n    [InteractiveCuPercent] + [BackgroundCuPercent], DESC\n)"
+            }
+          ],
+          "serializerSettings": {
+            "includeNulls": true
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-0000000000a7"
+        },
+        "json": {
+          "results": [
+            {
+              "tables": [
+                {
+                  "rows": [
+                    {
+                      "Items[Workspace Id]": "00000000-0000-4000-8000-0000000000a4",
+                      "Items[Item Id]": "00000000-0000-4000-8000-0000000000b2",
+                      "Items[Item name]": "orders_semantic_model",
+                      "Items[Item kind]": "SemanticModel",
+                      "[InteractiveCuPercent]": 41.3,
+                      "[BackgroundCuPercent]": 0.0
+                    },
+                    {
+                      "Items[Workspace Id]": "00000000-0000-4000-8000-0000000000a5",
+                      "Items[Item Id]": "00000000-0000-4000-8000-0000000000b0",
+                      "Items[Item name]": "nightly_ingest",
+                      "Items[Item kind]": "Pipeline",
+                      "[InteractiveCuPercent]": null,
+                      "[BackgroundCuPercent]": 52.6
+                    },
+                    {
+                      "Items[Workspace Id]": "00000000-0000-4000-8000-0000000000a4",
+                      "Items[Item Id]": "00000000-0000-4000-8000-0000000000b1",
+                      "Items[Item name]": "transform_orders",
+                      "Items[Item kind]": "Notebook",
+                      "[InteractiveCuPercent]": 0.0,
+                      "[BackgroundCuPercent]": 18.4
+                    },
+                    {
+                      "Items[Workspace Id]": "00000000-0000-4000-8000-0000000000a4",
+                      "Items[Item Id]": "00000000-0000-4000-8000-0000000000b3",
+                      "Items[Item name]": "orders_stream",
+                      "Items[Item kind]": "Eventstream",
+                      "[InteractiveCuPercent]": null,
+                      "[BackgroundCuPercent]": 9.9
+                    },
+                    {
+                      "Items[Workspace Id]": "00000000-0000-4000-8000-0000000000a5",
+                      "Items[Item Id]": "00000000-0000-4000-8000-0000000000b4",
+                      "Items[Item name]": "sales_lakehouse",
+                      "Items[Item kind]": "Lakehouse",
+                      "[InteractiveCuPercent]": 0.0,
+                      "[BackgroundCuPercent]": 4.2
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1.0/myorg/groups/00000000-0000-4000-8000-0000000000a1/datasets/00000000-0000-4000-8000-0000000000a2/executeQueries",
+        "query": {},
+        "json": {
+          "queries": [
+            {
+              "query": "DEFINE\n    MPARAMETER 'CapacitiesList' = { \"00000000-0000-4000-8000-0000000000a0\" }\n    MPARAMETER 'TimePoint' = (DATE(2026, 10, 21) + TIME(12, 4, 30))\nEVALUATE\nTOPN(\n    10,\n    SUMMARIZECOLUMNS(\n        'Items'[Workspace Id],\n        'Items'[Item Id],\n        'Items'[Item name],\n        'Items'[Item kind],\n        TREATAS({\"00000000-0000-4000-8000-0000000000a0\"}, 'Capacities'[capacityId]),\n        TREATAS({(DATE(2026, 10, 21) + TIME(12, 4, 30))}, 'TimePoints'[TimePoint]),\n        \"InteractiveCuPercent\", SUM('Timepoint Interactive Detail'[% of Base Capacity]),\n        \"BackgroundCuPercent\", SUM('Timepoint Background Detail'[% of Base Capacity])\n    ),\n    [InteractiveCuPercent] + [BackgroundCuPercent], DESC\n)"
+            }
+          ],
+          "serializerSettings": {
+            "includeNulls": true
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-0000000000a8"
+        },
+        "json": {
+          "results": [
+            {
+              "tables": [
+                {
+                  "rows": [
+                    {
+                      "Items[Workspace Id]": "00000000-0000-4000-8000-0000000000a4",
+                      "Items[Item Id]": "00000000-0000-4000-8000-0000000000b2",
+                      "Items[Item name]": "orders_semantic_model",
+                      "Items[Item kind]": "SemanticModel",
+                      "[InteractiveCuPercent]": 60.2,
+                      "[BackgroundCuPercent]": 0.0
+                    },
+                    {
+                      "Items[Workspace Id]": "00000000-0000-4000-8000-0000000000a5",
+                      "Items[Item Id]": "00000000-0000-4000-8000-0000000000b0",
+                      "Items[Item name]": "nightly_ingest",
+                      "Items[Item kind]": "Pipeline",
+                      "[InteractiveCuPercent]": null,
+                      "[BackgroundCuPercent]": 21.0
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

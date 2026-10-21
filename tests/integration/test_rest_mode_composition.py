@@ -102,6 +102,8 @@ def estate_routes(router: Router) -> None:
             }
         ),
     )
+    # The notebook collector (ADR-0020) lists the notebook's own job instances; this one has never run on its own.
+    router.add("GET", f"{ws}/items/nb-1/jobs/instances", respond(body={"value": []}))
     router.add("GET", f"{POWERBI_PATH}/groups/ws-1/datasets/sm-1/refreshes", respond(body={"value": []}))
     router.add("GET", f"{FABRIC_PATH}/deploymentPipelines", respond(body={"value": []}))
 

@@ -1,0 +1,42 @@
+{
+  "label": "doc_monitoring_05_query_forbidden",
+  "description": "Built from the documented schema, not recorded live: the Kusto query endpoint answers 403 Forbidden (the documented status 'Client request is denied') to a reader that may not query the monitoring database. The error body follows the Microsoft REST API Guidelines shape that the Kusto response page points to; the message text is a placeholder, not recorded wording.",
+  "entries": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/rest/query",
+        "query": {},
+        "json": {
+          "db": "Monitoring KQL database",
+          "csl": "<REFRESHES_KQL from orqentis.fabric.rest.monitoring>",
+          "properties": {
+            "Options": {
+              "request_readonly": true,
+              "servertimeout": "00:00:30"
+            },
+            "Parameters": {
+              "workspace_id": "00000000-0000-4000-8000-000000000080",
+              "window_start": "2026-10-20T00:00:00Z",
+              "window_end": "2026-10-20T02:00:00Z",
+              "max_rows": 1000
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-ms-activity-id": "00000000-0000-4000-8000-00000000008f"
+        },
+        "json": {
+          "error": {
+            "code": "Forbidden",
+            "message": "The caller is not authorized to query this database (placeholder text)."
+          }
+        }
+      }
+    }
+  ]
+}

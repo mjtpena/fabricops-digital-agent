@@ -71,8 +71,10 @@ Attribute values are bounded: enum members and our own collector, job and tool n
 | Metric | Kind | Attributes | Meaning |
 |---|---|---|---|
 | `orqentis.collector.duration` (s) | histogram | `collector` | Time one collector took in one run |
-| `orqentis.collector.runs` | counter | `collector`, `outcome` = `ok`/`error` | `error` when the collector, or any of its scopes, raised a Fabric error |
+| `orqentis.collector.runs` | counter | `collector`, `outcome` = `ok`/`error`/`unavailable` | `error` when the collector, or any of its scopes, raised a Fabric error (the *collector errors* alert reads only this); `unavailable` when it could not observe by design and nothing else failed. An unavailable collector still records a run and its duration |
 | `orqentis.collector.errors` | counter | `collector` | Failed collector runs or failed scopes (one per failing pipeline or model) |
+| `orqentis.collector.backlog` | gauge | `collector` | Units the collector's last run left over because of a per-run cap, summed over its scopes: for `delta-schema-changes`, Delta commits not yet read. 0 when caught up; a number that keeps growing means a table commits faster than `ORQENTIS_DELTA_LOG_MAX_COMMITS` per collection cycle |
+| `orqentis.collector.unavailable` | counter | `collector` | A collector (or scope) that could not observe **by design**: a permission gap the deployment documents (`ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS`) or a capability the platform does not expose. Not an error and never alerts; `/health/ready` lists the collector names under `unavailable` |
 | `orqentis.events.ingested` | counter | `collector` | Events that were new to the event store |
 | `orqentis.collection.runs` | counter | `outcome` = `success`/`degraded`/`failed`/`cancelled` | One per collect + detect run (below) |
 | `orqentis.collection.heartbeat` (s) | gauge | none | Unix time of the last successful collection |
@@ -266,9 +268,11 @@ collecting the rest (the run is `degraded`, the heartbeat still advances). Sev 2
 1. What the error is. `ContainerAppConsoleLogs_CL | where Log_s has 'collector failed' | where TimeGenerated > ago(30m) | project TimeGenerated, Log_s | take 20`:
    each line names the collector (or `collector:item`) and a redacted error with its HTTP status and Fabric error code.
 2. Classify it. `401`/`403`: identity or permission (the reader identity lost a workspace role, a service principal secret
-   expired, a Fabric tenant setting changed). **A permanent `403` from `semantic-model-refreshes` is known**: refresh history
-   needs more than Viewer (programme decision D9, `infra/bicep/README.md` section 5); it alerts until D9 is decided, which is
-   correct. `429`: Fabric throttling; the global call budget (`ORQENTIS_FABRIC_MAX_CONCURRENCY`, `_RATE_PER_SECOND`) slows
+   expired, a Fabric tenant setting changed). **A permanent `403` from `semantic-model-refreshes` is by design**: refresh history
+   needs dataset Write, which the reader never has (programme decision D9). Refresh outcomes come from workspace monitoring
+   (`ORQENTIS_REFRESH_SOURCE`, default in rest mode), so that call is no longer made; a deployment that turns
+   `powerbi_api` on lists the collector in `ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS` and the 403 becomes *capability
+   unavailable* (section 15), not an error. `429`: Fabric throttling; the global call budget (`ORQENTIS_FABRIC_MAX_CONCURRENCY`, `_RATE_PER_SECOND`) slows
    every caller, check whether it is set too high. `5xx`/timeouts: a Fabric or Power BI outage.
 3. Who it affects. `AppMetrics | where Name == 'orqentis.collector.errors' | summarize sum(Sum) by tostring(Properties.collector), bin(TimeGenerated, 15m)`.
    If *every* collector is failing the heartbeat alert follows within 15 minutes: treat the cause as one problem (usually
@@ -469,3 +473,27 @@ Do not stop FabricOps by deleting the Container App or its volume; stop the sche
 * Nothing checks that the action group named by `ALERT_ACTION_GROUP_ID` has a receiver, or that it exists before the first
   deployment (the deployment of the alert rules fails if it does not): look at it once (section 4).
 * The KQL of the alerts is exercised by the dev test fire, not by an offline test (ADR-0019, *Consequences*).
+
+## 15. Collectors, what each needs, and "capability unavailable"
+
+| Collector (`collector` dimension) | Reads | Minimum grant | Scope |
+|---|---|---|---|
+| `pipeline-runs` | pipeline job instances and activity runs | workspace Viewer | one per pipeline |
+| `notebook-runs`, `spark-job-runs`, `dataflow-runs` | job instances of those items | workspace Viewer | one per item |
+| `semantic-model-refreshes` | Power BI refresh history (`ORQENTIS_REFRESH_SOURCE` = `powerbi_api` or `both`) | dataset Write (the reader never has it) | one per model |
+| `workspace-monitoring-refreshes` | the monitoring KQL database, recognised per workspace by its documented name (legacy `Monitoring KQL database`, or `<workspace> <item>_Database`; `ORQENTIS_WORKSPACE_MONITORING_DATABASE` overrides) (default refresh source in rest mode) | to be confirmed live: see `docs/security.md` section 11 | one per workspace that holds a semantic model; one with no monitoring database in the estate is reported as capability unavailable, without an API call |
+| `delta-schema-changes` | `_delta_log` of the contracts' `delta_tables` (at most `ORQENTIS_DELTA_LOG_MAX_COMMITS` commits per table per run, oldest first, with `orqentis.collector.backlog` showing what waits; the schema in force is kept as a `SCHEMA_SNAPSHOT` event) | a OneLake data access role with Read on exactly those tables | one per declared table |
+| `capacity-metrics` | the Capacity Metrics app's model (configured by workspace and model id) | Read and Build on the model (open decision) | one per capacity |
+
+**Capability unavailable is not an error.** A collector (or one scope) that cannot observe by design (a capability the platform
+does not expose, a workspace without a monitoring database, or an HTTP 403 the deployment lists in
+`ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS`) is counted in `orqentis.collector.unavailable{collector}`, listed by name under
+`unavailable` in the `GET /health/ready` body, and reported per scope in the `collector_unavailable` field of
+`POST /telemetry/collect`. It does not count as a failed run, never raises the *collector errors* alert and does not stop the
+heartbeat. It also means FabricOps is blind to that signal, so a name that stays in the list needs an owner. Any other 401 or 403
+remains a collector error.
+
+**An SLA breach is not declared from blindness.** If the collector that observes an SLA's freshness item has not completed a
+pass for it within `ORQENTIS_SLA_MAX_TELEMETRY_LAG_MINUTES` (30 in rest mode), the sweep withholds the breach and logs
+`sla breach withheld`; the breach is recorded on the first sweep after telemetry is current. If breaches seem missing, check the
+collector errors first.

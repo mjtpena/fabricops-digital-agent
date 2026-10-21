@@ -1,0 +1,177 @@
+{
+  "scenario": {
+    "name": "refresh_failure",
+    "title": "Semantic model CampaignSemanticModel fails to refresh: its source table is gone",
+    "description": "07:10 the scheduled refresh of CampaignSemanticModel fails: the engine cannot access the Delta table it is mapped to. The feeding pipeline succeeded at 07:08. No pipeline failed, so the refresh failure itself opens the incident.",
+    "now": "2026-10-05T07:25:00+11:00",
+    "expected_category": "SEMANTIC_MODEL_REFRESH_FAILURE",
+    "expected_runbook_id": "RB-SM-REFRESH-FAILURE-001"
+  },
+  "pipeline_runs": [
+    {
+      "id": "run-mkt-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-marketing-prod",
+      "item_id": "pl-ingest-campaigns-prod",
+      "item_type": "DataPipeline",
+      "display_name": "ingest_campaigns_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-02T07:00:03+10:00",
+      "end_time": "2026-10-02T07:08:41+10:00"
+    },
+    {
+      "id": "run-mkt-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-marketing-prod",
+      "item_id": "pl-ingest-campaigns-prod",
+      "item_type": "DataPipeline",
+      "display_name": "ingest_campaigns_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-03T07:00:03+10:00",
+      "end_time": "2026-10-03T07:08:41+10:00"
+    },
+    {
+      "id": "run-mkt-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-marketing-prod",
+      "item_id": "pl-ingest-campaigns-prod",
+      "item_type": "DataPipeline",
+      "display_name": "ingest_campaigns_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-04T07:00:03+11:00",
+      "end_time": "2026-10-04T07:08:41+11:00"
+    },
+    {
+      "id": "run-mkt-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-marketing-prod",
+      "item_id": "pl-ingest-campaigns-prod",
+      "item_type": "DataPipeline",
+      "display_name": "ingest_campaigns_prod",
+      "environment": "PROD",
+      "status": "Succeeded",
+      "invoke_type": "Scheduled",
+      "start_time": "2026-10-05T07:00:03+11:00",
+      "end_time": "2026-10-05T07:08:41+11:00"
+    }
+  ],
+  "activity_runs": [],
+  "refreshes": [
+    {
+      "id": "ref-mkt-20261002",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-marketing-prod",
+      "item_id": "sm-marketing",
+      "refresh_type": "ViaEnhancedApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-02T07:10:05+10:00",
+      "end_time": "2026-10-02T07:12:40+10:00"
+    },
+    {
+      "id": "ref-mkt-20261003",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-marketing-prod",
+      "item_id": "sm-marketing",
+      "refresh_type": "ViaEnhancedApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-03T07:10:05+10:00",
+      "end_time": "2026-10-03T07:12:40+10:00"
+    },
+    {
+      "id": "ref-mkt-20261004",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-marketing-prod",
+      "item_id": "sm-marketing",
+      "refresh_type": "ViaEnhancedApi",
+      "status": "Succeeded",
+      "start_time": "2026-10-04T07:10:05+11:00",
+      "end_time": "2026-10-04T07:12:40+11:00"
+    },
+    {
+      "id": "ref-mkt-20261005",
+      "tenant_id": "tenant-contoso",
+      "workspace_id": "ws-marketing-prod",
+      "item_id": "sm-marketing",
+      "refresh_type": "ViaEnhancedApi",
+      "status": "Failed",
+      "start_time": "2026-10-05T07:10:06+11:00",
+      "end_time": "2026-10-05T07:10:52+11:00",
+      "error": {
+        "error_code": "ModelRefresh_ShortMessage_ProcessingError",
+        "message": "We cannot access the source Delta table 'campaigns_clean' referenced by table 'campaigns'. Either the source Delta table does not exist, or you don't have access permissions. Consider removing the table from the model. Please refer to https://go.microsoft.com/fwlink/?linkid=2248855 for more information."
+      }
+    }
+  ],
+  "capacity_snapshots": [
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T06:30:00+11:00",
+      "cu_utilization_percent": 31.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "sm-marketing",
+          "workspace_id": "ws-marketing-prod",
+          "display_name": "CampaignSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 7.0
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T06:45:00+11:00",
+      "cu_utilization_percent": 33.5,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "sm-marketing",
+          "workspace_id": "ws-marketing-prod",
+          "display_name": "CampaignSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 6.5
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T07:00:00+11:00",
+      "cu_utilization_percent": 36.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "sm-marketing",
+          "workspace_id": "ws-marketing-prod",
+          "display_name": "CampaignSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 9.0
+        }
+      ]
+    },
+    {
+      "capacity_id": "cap-prod-f64",
+      "timestamp": "2026-10-05T07:15:00+11:00",
+      "cu_utilization_percent": 34.0,
+      "interactive_delay_percent": 0,
+      "background_rejection_percent": 0,
+      "top_workloads": [
+        {
+          "item_id": "sm-marketing",
+          "workspace_id": "ws-marketing-prod",
+          "display_name": "CampaignSemanticModel",
+          "item_type": "SemanticModel",
+          "cu_percent": 5.5
+        }
+      ]
+    }
+  ]
+}

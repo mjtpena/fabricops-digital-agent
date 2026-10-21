@@ -1,0 +1,51 @@
+{
+  "label": "doc_monitoring_01_discovery",
+  "description": "Built from the documented schema, not recorded live: List KQL Databases (properties.queryServiceUri, ingestionServiceUri, parentEventhouseItemId, databaseType per learn.microsoft.com/rest/api/fabric/kqldatabase/items/list-kql-databases) in a workspace with workspace monitoring enabled, next to an unrelated KQL database. The monitoring database name is the legacy default; hosts and ids are synthetic.",
+  "entries": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/workspaces/00000000-0000-4000-8000-000000000080/kqlDatabases",
+        "query": {},
+        "json": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "requestid": "00000000-0000-4000-8000-00000000008e"
+        },
+        "json": {
+          "value": [
+            {
+              "id": "00000000-0000-4000-8000-000000000082",
+              "displayName": "Sales events",
+              "description": "An unrelated KQL database.",
+              "type": "KQLDatabase",
+              "workspaceId": "00000000-0000-4000-8000-000000000080",
+              "properties": {
+                "parentEventhouseItemId": "00000000-0000-4000-8000-000000000084",
+                "queryServiceUri": "https://trd-other.z5.kusto.fabric.example.invalid",
+                "ingestionServiceUri": "https://ingest-trd-other.z5.kusto.fabric.example.invalid",
+                "databaseType": "ReadWrite"
+              }
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000081",
+              "displayName": "Monitoring KQL database",
+              "description": "",
+              "type": "KQLDatabase",
+              "workspaceId": "00000000-0000-4000-8000-000000000080",
+              "properties": {
+                "parentEventhouseItemId": "00000000-0000-4000-8000-000000000083",
+                "queryServiceUri": "https://trd-example.z5.kusto.fabric.example.invalid",
+                "ingestionServiceUri": "https://ingest-trd-example.z5.kusto.fabric.example.invalid",
+                "databaseType": "ReadWrite"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

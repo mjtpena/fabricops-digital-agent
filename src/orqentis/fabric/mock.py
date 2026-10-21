@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from orqentis.domain.common import ItemType
+from orqentis.domain.delta import DeltaCommitFile, DeltaCommitRef, DeltaTableRef
 from orqentis.domain.deployment import DeploymentState
 from orqentis.domain.estate import Capacity, FabricItem, Workspace
 from orqentis.domain.runs import ActivityRun, CapacitySnapshot, PipelineRun, Refresh
 from orqentis.domain.topology import Dependency
 from orqentis.fabric.errors import FabricNotFoundError
-from orqentis.fabric.fixtures import EstateFixture, ScenarioFixture
+from orqentis.fabric.fixtures import DeltaLogFixture, EstateFixture, ScenarioFixture
 
 
 class _MockWorkspaces:
@@ -93,6 +95,62 @@ class _MockSemanticModels:
         return refreshes[:top]
 
 
+class _MockMonitoring:
+    """Workspace monitoring over the scenario's refreshes (the same facts the Power BI refresh history serves)."""
+
+    def __init__(self, scenario: ScenarioFixture) -> None:
+        self._refreshes = scenario.refreshes
+
+    async def list_semantic_model_refreshes(
+        self, workspace_id: str, *, since: datetime, until: datetime, item_id: str | None = None
+    ) -> list[Refresh]:
+        found = [
+            r
+            for r in self._refreshes
+            if r.workspace_id == workspace_id
+            and (item_id is None or r.item_id == item_id)
+            and (when := r.end_time or r.start_time) is not None
+            and since <= when <= until
+        ]
+        found.sort(key=lambda r: r.start_time.timestamp() if r.start_time else 0.0, reverse=True)
+        return found
+
+
+_KEPT_ACTIONS = frozenset({"metaData", "commitInfo", "protocol"})
+
+
+class _MockDeltaLogs:
+    def __init__(self, scenario: ScenarioFixture) -> None:
+        self._logs: dict[tuple[str, str | None, str], DeltaLogFixture] = {
+            (log.item_id, log.schema_name, log.table): log for log in scenario.delta_logs
+        }
+
+    def _log(self, table: DeltaTableRef) -> DeltaLogFixture:
+        try:
+            return self._logs[(table.item_id, table.schema_name, table.table)]
+        except KeyError:
+            raise FabricNotFoundError(
+                f"No _delta_log recorded for {table.path} of {table.item_id}",
+                status_code=404,
+                error_code="PathNotFound",
+            ) from None
+
+    async def list_commits(self, table: DeltaTableRef) -> list[DeltaCommitRef]:
+        if (table.item_id, table.schema_name, table.table) not in self._logs:
+            return []  # declared but never written in this scenario: an empty log, not an error
+        return sorted(
+            (DeltaCommitRef(version=c.version, modified_at=c.committed_at) for c in self._log(table).commits),
+            key=lambda r: r.version,
+        )
+
+    async def read_commit(self, table: DeltaTableRef, version: int) -> DeltaCommitFile:
+        for commit in self._log(table).commits:
+            if commit.version == version:
+                lines = [json.dumps(a, separators=(",", ":")) for a in commit.actions if set(a) & _KEPT_ACTIONS]
+                return DeltaCommitFile(version=version, lines=lines)
+        raise FabricNotFoundError(f"Delta commit {version} not found", status_code=404, error_code="PathNotFound")
+
+
 class _MockCapacities:
     def __init__(self, estate: EstateFixture, scenario: ScenarioFixture) -> None:
         self._capacities = estate.capacities
@@ -143,6 +201,8 @@ class MockFabricClient:
         self._capacities = _MockCapacities(estate, scenario)
         self._deployments = _MockDeployments(estate)
         self._dependencies = _MockDependencies(estate)
+        self._monitoring = _MockMonitoring(scenario)
+        self._delta_logs = _MockDeltaLogs(scenario)
 
     @property
     def workspaces(self) -> _MockWorkspaces:
@@ -175,6 +235,14 @@ class MockFabricClient:
     @property
     def dependencies(self) -> _MockDependencies:
         return self._dependencies
+
+    @property
+    def monitoring(self) -> _MockMonitoring:
+        return self._monitoring
+
+    @property
+    def delta_logs(self) -> _MockDeltaLogs:
+        return self._delta_logs
 
     async def aclose(self) -> None:
         return None

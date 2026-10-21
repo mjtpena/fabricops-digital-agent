@@ -16,9 +16,20 @@ class EventType(StrEnum):
     ACTIVITY_RUN_FAILED = "ACTIVITY_RUN_FAILED"
     REFRESH_SUCCEEDED = "REFRESH_SUCCEEDED"
     REFRESH_FAILED = "REFRESH_FAILED"
+    # Job instances of items other than pipelines (ADR-0020): a notebook run, a Spark job definition run, a
+    # Dataflow refresh. Distinct types keep each rule, summary and metric label honest.
+    NOTEBOOK_RUN_SUCCEEDED = "NOTEBOOK_RUN_SUCCEEDED"
+    NOTEBOOK_RUN_FAILED = "NOTEBOOK_RUN_FAILED"
+    SPARK_JOB_SUCCEEDED = "SPARK_JOB_SUCCEEDED"
+    SPARK_JOB_FAILED = "SPARK_JOB_FAILED"
+    DATAFLOW_REFRESH_SUCCEEDED = "DATAFLOW_REFRESH_SUCCEEDED"
+    DATAFLOW_REFRESH_FAILED = "DATAFLOW_REFRESH_FAILED"
     CAPACITY_METRIC = "CAPACITY_METRIC"
     CAPACITY_THROTTLING = "CAPACITY_THROTTLING"
     SCHEMA_CHANGED = "SCHEMA_CHANGED"
+    # The schema of a Delta table at one version, written by the schema collector so the next run knows what "before"
+    # is without searching the log again (ADR-0020). No rule consumes it.
+    SCHEMA_SNAPSHOT = "SCHEMA_SNAPSHOT"
     DEPLOYMENT_COMPLETED = "DEPLOYMENT_COMPLETED"
     CREDENTIAL_EXPIRED = "CREDENTIAL_EXPIRED"
     # Written by the SLA sweep when an SLA enters a new state for a deadline day (see incidents/sla_sweep.py).

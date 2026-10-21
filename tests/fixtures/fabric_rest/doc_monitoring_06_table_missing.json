@@ -1,0 +1,42 @@
+{
+  "label": "doc_monitoring_06_table_missing",
+  "description": "Built from the documented schema, not recorded live: the Kusto query endpoint answers 400 BadRequest (the documented status for a badly formed request) while the SemanticModelLogs table does not exist yet. Microsoft documents that a monitoring table does not appear until the item generates telemetry; the exact error wording below is paraphrased, not recorded, and must be confirmed on a workspace without semantic model activity.",
+  "entries": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/rest/query",
+        "query": {},
+        "json": {
+          "db": "Monitoring KQL database",
+          "csl": "<REFRESHES_KQL from orqentis.fabric.rest.monitoring>",
+          "properties": {
+            "Options": {
+              "request_readonly": true,
+              "servertimeout": "00:00:30"
+            },
+            "Parameters": {
+              "workspace_id": "00000000-0000-4000-8000-000000000080",
+              "window_start": "2026-10-20T00:00:00Z",
+              "window_end": "2026-10-20T02:00:00Z",
+              "max_rows": 1000
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-ms-activity-id": "00000000-0000-4000-8000-00000000008f"
+        },
+        "json": {
+          "error": {
+            "code": "BadRequest",
+            "message": "Request is invalid and cannot be processed: Semantic error: 'table' operator: Failed to resolve table or column expression named 'SemanticModelLogs'"
+          }
+        }
+      }
+    }
+  ]
+}

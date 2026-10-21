@@ -13,6 +13,9 @@ from orqentis.domain.common import DomainModel, Metadata
 class EvidenceType(StrEnum):
     PIPELINE_FAILURE = "PIPELINE_FAILURE"
     ACTIVITY_FAILURE = "ACTIVITY_FAILURE"
+    # A failed job instance of a notebook, Spark job definition or Dataflow, and the recent runs of an item.
+    JOB_FAILURE = "JOB_FAILURE"
+    RUN_HISTORY = "RUN_HISTORY"
     ERROR_MESSAGE = "ERROR_MESSAGE"
     SEMANTIC_MODEL_REFRESH = "SEMANTIC_MODEL_REFRESH"
     WORKSPACE_METADATA = "WORKSPACE_METADATA"

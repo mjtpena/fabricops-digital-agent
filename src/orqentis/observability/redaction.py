@@ -12,8 +12,23 @@ _SENSITIVE_KEY = re.compile(
     r"authorization|connection[_-]?string|sas|signature|private[_-]?key|client[_-]?assertion)",
     re.IGNORECASE,
 )
-# Keys that look sensitive but carry non-secret metadata.
-_SAFE_KEYS = frozenset({"token_count", "input_tokens", "output_tokens", "total_tokens", "secret_expires_at"})
+# Keys that look sensitive but carry non-secret metadata. Exact names only, never a pattern: a new key that merely
+# contains "signature" or "token" is redacted until someone decides it is safe. The values under these keys are still
+# scanned by the text patterns below. ``signature_match`` and friends are our own error-signature classification (the id
+# and category of a known failure shape), not a cryptographic signature.
+_SAFE_KEYS = frozenset(
+    {
+        "token_count",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "secret_expires_at",
+        "signature_match",
+        "signature_id",
+        "primary_signature",
+        "unconfirmed_signature",
+    }
+)
 
 _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\bbearer\s+[a-z0-9\-._~+/]+=*"), f"Bearer {REDACTED}"),

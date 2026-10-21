@@ -1,0 +1,127 @@
+{
+  "label": "doc_monitoring_03_refreshes",
+  "description": "Built from the documented schema, not recorded live: POST /v1/rest/query on the monitoring database (Kusto v1 response: Tables with Columns and Rows, then a QueryStatus and a TableOfContents table, per learn.microsoft.com/kusto/api/rest/response). One failed and one succeeded refresh, newest first. The projected columns are the ones REFRESHES_KQL produces; the Status, Level and error values are illustrative because Microsoft does not document them. Hosts and ids are synthetic.",
+  "entries": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/rest/query",
+        "query": {},
+        "json": {
+          "db": "Monitoring KQL database",
+          "csl": "<REFRESHES_KQL from orqentis.fabric.rest.monitoring>",
+          "properties": {
+            "Options": {
+              "request_readonly": true,
+              "servertimeout": "00:00:30"
+            },
+            "Parameters": {
+              "workspace_id": "00000000-0000-4000-8000-000000000080",
+              "window_start": "2026-10-20T00:00:00Z",
+              "window_end": "2026-10-20T02:00:00Z",
+              "max_rows": 1000
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "x-ms-activity-id": "00000000-0000-4000-8000-00000000008f"
+        },
+        "json": {
+          "Tables": [
+            {
+              "TableName": "Table_0",
+              "Columns": [
+                {"ColumnName": "refresh_id", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "item_id", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "item_name", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "started_at", "DataType": "DateTime", "ColumnType": "datetime"},
+                {"ColumnName": "ended_at", "DataType": "DateTime", "ColumnType": "datetime"},
+                {"ColumnName": "duration_ms", "DataType": "Int64", "ColumnType": "long"},
+                {"ColumnName": "status", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "status_code", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "level", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "error_text", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "error_code", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "correlation_id", "DataType": "String", "ColumnType": "string"}
+              ],
+              "Rows": [
+                [
+                  "00000000-0000-4000-8000-000000000087",
+                  "00000000-0000-4000-8000-000000000085",
+                  "customers_model",
+                  "2026-10-20T01:14:48.4533333Z",
+                  "2026-10-20T01:15:16.0333333Z",
+                  27580,
+                  "Failed",
+                  "3238133764",
+                  "Error",
+                  "Failed to save modifications to the server. Error returned: 'The credentials provided for the Sql source are invalid. (Source at <oii>sales-sql.example.invalid;SalesDb</oii>.)'. Table: <oii>customers_clean</oii>.",
+                  "3238133764",
+                  "00000000-0000-4000-8000-00000000008a"
+                ],
+                [
+                  "00000000-0000-4000-8000-000000000088",
+                  "00000000-0000-4000-8000-000000000085",
+                  "customers_model",
+                  "2026-10-20T00:29:01.5000000Z",
+                  "2026-10-20T00:30:12.1000000Z",
+                  70600,
+                  "Succeeded",
+                  "0",
+                  "Informational",
+                  null,
+                  null,
+                  "00000000-0000-4000-8000-00000000008b"
+                ]
+              ]
+            },
+            {
+              "TableName": "Table_1",
+              "Columns": [
+                {"ColumnName": "Timestamp", "DataType": "DateTime", "ColumnType": "datetime"},
+                {"ColumnName": "Severity", "DataType": "Int32", "ColumnType": "int"},
+                {"ColumnName": "SeverityName", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "StatusCode", "DataType": "Int32", "ColumnType": "int"},
+                {"ColumnName": "StatusDescription", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "Count", "DataType": "Int32", "ColumnType": "int"},
+                {"ColumnName": "RequestId", "DataType": "Guid", "ColumnType": "guid"},
+                {"ColumnName": "ActivityId", "DataType": "Guid", "ColumnType": "guid"}
+              ],
+              "Rows": [
+                [
+                  "2026-10-20T02:00:00.1234567Z",
+                  4,
+                  "Info",
+                  0,
+                  "Query completed successfully",
+                  1,
+                  "00000000-0000-4000-8000-00000000008d",
+                  "00000000-0000-4000-8000-00000000008f"
+                ]
+              ]
+            },
+            {
+              "TableName": "Table_2",
+              "Columns": [
+                {"ColumnName": "Ordinal", "DataType": "Int64", "ColumnType": "long"},
+                {"ColumnName": "Kind", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "Name", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "Id", "DataType": "String", "ColumnType": "string"},
+                {"ColumnName": "PrettyName", "DataType": "String", "ColumnType": "string"}
+              ],
+              "Rows": [
+                [0, "QueryResult", "PrimaryResult", "00000000-0000-4000-8000-000000000092", ""],
+                [1, "QueryStatus", "QueryStatus", "00000000-0000-4000-8000-000000000093", ""],
+                [2, "TableOfContents", "TableOfContents", "00000000-0000-4000-8000-000000000094", ""]
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

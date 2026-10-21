@@ -53,6 +53,8 @@ DEFAULT_SIGNATURES: tuple[ErrorSignature, ...] = (
             r"(?i)\b(access )?token (has )?expired\b",
             r"(?i)\b(credentials?|password) (are |is )?(invalid|expired)\b",
             r"(?i)\b401\b.{0,40}unauthori[sz]ed",
+            # the analysis engine's wording when a data source refuses the credentials stored in the model
+            r"(?i)credentials provided for the .{1,60} source (?:are|is) invalid",
         ],
         entity_patterns=[r"for app '(?P<app>[^']+)'", r"connection (?P<connection>conn-[\w-]+)"],
         priority=100,
@@ -82,8 +84,13 @@ DEFAULT_SIGNATURES: tuple[ErrorSignature, ...] = (
         ],
         entity_patterns=[
             r"(?i)column\s+[\"'`]?(?P<column>[\w.]+)[\"'`]?\s+(?:is missing|not found|does not exist|cannot be)",
+            # Spark 3.4+: "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name
+            # `customer_id` cannot be resolved. Did you mean one of the following? [`client_id`, `full_name`]". Fabric
+            # nests this inside a JSON string, so the quotes around it may be escaped: the backticks are not.
+            r"(?i)\bwith name\s+[`'\"\\]*(?P<column>[\w.]+)[`'\"\\]*\s+cannot be resolved",
             r"(?i)cannot resolve [\"'`]?(?P<column>\w+)",
             r"(?i)input schema of (?P<table>\w+)",
+            r"(?i)did you mean one of the following\?\s*\[(?P<suggestions>[^\]]{1,300})\]",
         ],
         priority=90,
     ),
@@ -129,6 +136,21 @@ DEFAULT_SIGNATURES: tuple[ErrorSignature, ...] = (
         priority=60,
     ),
     ErrorSignature(
+        id="SIG-MODEL-REFRESH",
+        category=IncidentCategory.SEMANTIC_MODEL_REFRESH_FAILURE,
+        description="Semantic model refresh failed in the analysis engine",
+        patterns=[
+            r"\bModelRefresh_ShortMessage_\w+",
+            r"(?i)we cannot access the source (?:delta )?table",
+            r"(?i)\b(?:semantic model|dataset)\b.{0,40}\brefresh\b.{0,40}\bfail",
+        ],
+        entity_patterns=[
+            r"(?i)source (?:delta )?table '(?P<table>[^']{1,128})'",
+            r"(?i)referenced by table '(?P<model_table>[^']{1,128})'",
+        ],
+        priority=65,
+    ),
+    ErrorSignature(
         id="SIG-SOURCE-UNAVAILABLE",
         category=IncidentCategory.SOURCE_UNAVAILABLE,
         description="Source object or service unavailable",
@@ -138,6 +160,25 @@ DEFAULT_SIGNATURES: tuple[ErrorSignature, ...] = (
             r"\b503\b",
         ],
         priority=55,
+    ),
+    ErrorSignature(
+        id="SIG-NOTEBOOK-EXCEPTION",
+        category=IncidentCategory.ACTIVITY_FAILURE,
+        description="A notebook or Spark job raised an exception (its own code or data, not the platform)",
+        patterns=[
+            r"Traceback \(most recent call last\)",
+            r"(?i)\bnotebook execution (?:is in )?failed\b",
+            r"\b(?:Py4JJavaError|PythonException|SparkException|AnalysisException)\b",
+            r"(?i)errorName\W{1,8}[A-Za-z_][\w.]*(?:Error|Exception)\b",
+            r"\b[A-Z][A-Za-z0-9_]*(?:Error|Exception)\s*:",
+        ],
+        entity_patterns=[
+            # Fabric's wrapper: ..."errorName":"RuntimeError","errorValue":"<message>","message":"Notebook execution..."
+            r"(?i)errorName\W{1,8}(?P<exception>[A-Za-z_][\w.]*)",
+            r"(?i)errorValue\W{1,8}(?P<exception_message>[^\\\"]{1,300})",
+            r"\b(?P<exception>[A-Z][A-Za-z0-9_]*(?:Error|Exception))\s*:\s*(?P<exception_message>[^\n]{1,300})",
+        ],
+        priority=30,
     ),
 )
 
