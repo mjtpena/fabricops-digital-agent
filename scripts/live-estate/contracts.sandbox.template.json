@@ -125,5 +125,13 @@
       "freshness_item_id": "@@PROD.pipeline@@",
       "owner": "fabricops-programme"
     }
+  ],
+  "delta_tables": [
+    {
+      "id": "tbl-sandbox-customers-dev",
+      "item_id": "@@DEV.lakehouse@@",
+      "table": "customers",
+      "description": "The source table of the DEV sandbox. The OneLake role fabricopsDeltaLogReader (Read on Tables/customers) exists on this lakehouse only; declare PROD and TEST after granting the same role there."
+    }
   ]
 }

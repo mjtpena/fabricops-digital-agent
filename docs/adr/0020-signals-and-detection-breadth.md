@@ -167,6 +167,15 @@ watermark where it was, does not count it as a failed unit, and `/health/ready` 
 error and keeps the collector-errors alert meaningful. With workspace monitoring the default source, the Power BI refresh
 history call is no longer made at all in rest mode.
 
+### 9. Not built: deployment-drift detection
+
+The brief made it optional "only if a read-only path exists with the reader's grants". It does not. Deployment pipelines are
+visible only to a principal with a deployment-pipeline role, and the roles that expose them (Admin) can also deploy
+(`docs/security.md` section 11: the reader lists an empty set because no such role is granted, deliberately). The existing
+deployment *comparison* (is the item the same in TEST and PROD, was PROD changed recently) keeps working where the reader can
+see the pipeline; a rule that **opens** an incident for drift would need a role that can deploy, so it is not built and is a
+follow-up for the owner's decision.
+
 ## Alternatives considered
 
 * **Grant the reader Contributor to read refresh history or the monitoring database.** Rejected by D9: a write role on every

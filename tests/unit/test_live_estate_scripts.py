@@ -201,7 +201,7 @@ def test_generated_contracts_and_local_config_are_not_committable() -> None:
 def test_the_contracts_template_is_valid_json_with_only_placeholders_for_ids() -> None:
     template = (LIVE / "contracts.sandbox.template.json").read_text(encoding="utf-8")
     document = json.loads(template)
-    assert set(document) == {"external_sources", "data_products", "dependencies", "slas"}
+    assert set(document) == {"external_sources", "data_products", "dependencies", "slas", "delta_tables"}
     assert not re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", template, re.IGNORECASE)
 
 
@@ -223,3 +223,5 @@ def test_the_contracts_template_passes_the_contracts_validator_once_ids_are_fill
     contracts = report.contracts
     assert (len(contracts.external_sources), len(contracts.data_products), len(contracts.slas)) == (3, 3, 3)
     assert len(contracts.dependencies) == 17
+    # only the DEV lakehouse carries the OneLake role that lets the reader read a _delta_log (docs/security.md section 11)
+    assert [(t.id, t.table) for t in contracts.delta_tables] == [("tbl-sandbox-customers-dev", "customers")]

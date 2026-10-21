@@ -66,7 +66,7 @@ from orqentis.topology.graph import DependencyGraph
 CAUSAL_WINDOW = timedelta(hours=24)
 SNAPSHOT_GRANULARITY = timedelta(minutes=10)
 SKIPPED_STATUSES = {RunStatus.SKIPPED, RunStatus.NOT_STARTED, RunStatus.CANCELLED}
-_CODE_ITEMS = {ItemType.DATA_PIPELINE, ItemType.NOTEBOOK}
+_CODE_ITEMS = {ItemType.DATA_PIPELINE, ItemType.NOTEBOOK, ItemType.SPARK_JOB_DEFINITION, ItemType.DATAFLOW}
 
 
 @dataclass
