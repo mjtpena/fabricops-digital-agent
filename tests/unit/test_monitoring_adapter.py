@@ -539,6 +539,65 @@ async def test_a_database_named_for_another_workspace_or_for_nothing_is_not_the_
     assert auto_rig.wire.calls("POST", QUERY_PATH) == []
 
 
+async def test_a_database_that_is_only_named_like_the_workspace_is_not_chosen(auto_rig: Rig) -> None:
+    # The probe: "<workspace> ... Database" without the literal "_Database" suffix is not the monitoring item's shape.
+    # It used to be chosen, Kusto then said SemanticModelLogs was missing, and the answer was "no refreshes", silently.
+    lookalikes = [
+        monitoring_database(displayName="Sales Database"),
+        monitoring_database(displayName="Sales-Archive-Database", id="00000000-0000-4000-8000-000000000096"),
+    ]
+    auto_rig.serve(
+        respond(400, {"error": {"@message": "Failed to resolve table SemanticModelLogs"}}),
+        listing=discovery(*lookalikes),
+    )
+    workspace_named(auto_rig, "Sales")
+
+    with pytest.raises(FabricCapabilityUnavailableError) as caught:
+        await auto_rig.refreshes()
+
+    assert caught.value.error_code == "WorkspaceMonitoringNotEnabled"
+    assert caught.value.details == {"workspace_id": WORKSPACE, "visible_kql_databases": 2}
+    assert auto_rig.wire.calls("POST", QUERY_PATH) == []  # nothing was even queried
+
+
+async def test_a_missing_table_in_a_database_only_inferred_to_be_the_monitoring_one_is_unavailable_not_empty(
+    auto_rig: Rig,
+) -> None:
+    # "Sales_Archive_Database" has the monitoring item's shape, but an engineer could have created it. Without the table
+    # nothing says it is the monitoring database, so "no refreshes" would be a guess: the workspace is unobservable.
+    inferred = monitoring_database(displayName="Sales_Archive_Database")
+    auto_rig.serve(replay("live_monitoring_06_table_missing"), listing=discovery(inferred))
+    workspace_named(auto_rig, "Sales")
+
+    with pytest.raises(FabricCapabilityUnavailableError) as caught:
+        await auto_rig.refreshes()
+
+    assert caught.value.error_code == "SemanticModelLogsMissing"
+    assert caught.value.details == {"workspace_id": WORKSPACE}
+
+
+async def test_a_missing_table_in_the_legacy_named_database_is_still_no_refreshes_yet(auto_rig: Rig) -> None:
+    auto_rig.serve(replay("live_monitoring_06_table_missing"), listing=discovery(monitoring_database()))
+    workspace_named(auto_rig, "Sales")
+
+    assert await auto_rig.refreshes() == []
+
+
+async def test_a_missing_table_in_a_database_the_deployment_names_is_still_no_refreshes_yet(rig: Rig) -> None:
+    # (the same through the configured name, which is the owner saying "this is the monitoring database")
+    rig.serve(replay("live_monitoring_06_table_missing"), listing=discovery(monitoring_database(displayName=DATABASE)))
+
+    assert await rig.refreshes() == []
+
+
+async def test_an_inferred_database_whose_table_exists_is_used(auto_rig: Rig) -> None:
+    inferred = monitoring_database(displayName="Sales_Archive_Database")
+    auto_rig.serve(result(make_row()), listing=discovery(inferred))
+    workspace_named(auto_rig, "Sales")
+
+    assert len(await auto_rig.refreshes()) == 1
+
+
 async def test_a_workspace_with_no_kql_database_at_all_costs_no_workspace_lookup(auto_rig: Rig) -> None:
     auto_rig.serve(result(), listing=discovery())
 

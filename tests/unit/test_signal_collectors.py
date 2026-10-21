@@ -407,6 +407,30 @@ async def test_a_commit_without_a_modified_time_is_read(store: LocalEventStore) 
     assert len(changes(events)) == 1
 
 
+async def test_a_backlog_is_reported_and_clearing_it_is_recorded(store: LocalEventStore) -> None:
+    quiet = [{"commitInfo": {"operation": "WRITE"}}]
+    logs = FakeDeltaLogs({v: (at(11, v), quiet) for v in range(6)})
+    collector = schema_collector(logs, store, max_commits=4)
+
+    first = await collector.collect_scope("tbl-1", since=at(0), until=NOW)
+    assert collector.backlog("tbl-1") == 2 and collector.backlog("tbl-1") == 0  # two commits wait; consumed
+    assert [s.payload["behind"] for s in snapshots(first)] == [2]
+    await store.append(first)
+
+    # even with a window that starts after every commit, the commits that waited are read (the version is the cursor)
+    logs.reads.clear()
+    second = await collector.collect_scope("tbl-1", since=at(23), until=NOW + timedelta(days=30))
+    assert logs.reads == [4, 5] and collector.backlog("tbl-1") == 0
+    (cleared,) = snapshots(second)
+    assert cleared.payload["checkpoint"] is True and cleared.payload["version"] == 5 and cleared.payload["behind"] == 0
+    await store.append(second)
+
+    # the backlog is recorded as cleared: now the window decides again, and nothing old is read
+    logs.reads.clear()
+    assert await collector.collect_scope("tbl-1", since=at(23), until=NOW + timedelta(days=30)) == []
+    assert logs.reads == []
+
+
 async def test_a_log_that_starts_over_is_read_from_its_first_commit(store: LocalEventStore) -> None:
     logs = FakeDeltaLogs({v: (at(11, v), meta(BEFORE if v % 2 else AFTER)) for v in range(4)})
     collector = schema_collector(logs, store)

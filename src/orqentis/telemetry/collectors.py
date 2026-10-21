@@ -76,6 +76,10 @@ class ResumableCollector(ScopedCollector, Protocol):
         """After ``collect_scope(scope)``: the instant everything before which was processed, ``None`` if all of it."""
         ...
 
+    def backlog(self, scope: str) -> int:
+        """After ``collect_scope(scope)``: how many units (commits) it left for later; 0 when it read everything."""
+        ...
+
 
 class PipelineRunCollector:
     name = "pipeline-runs"
@@ -324,6 +328,7 @@ class SchemaChangeCollector:
         self._max_commits = max_commits
         self._max_backscan = max_backscan
         self._resume: dict[str, datetime] = {}
+        self._behind: dict[str, int] = {}
 
     def scopes(self) -> list[str]:
         return sorted(
@@ -340,8 +345,13 @@ class SchemaChangeCollector:
         """
         return self._resume.pop(scope, None)
 
+    def backlog(self, scope: str) -> int:
+        """Commits the last :meth:`collect_scope` of ``scope`` left unread (0 when it read everything). Consumed."""
+        return self._behind.pop(scope, 0)
+
     async def collect_scope(self, scope: str, *, since: datetime, until: datetime) -> list[OperationalEvent]:
         self._resume.pop(scope, None)
+        self._behind.pop(scope, None)
         declaration = self._catalog.delta_tables.get(scope)
         lakehouse = self._catalog.items.get(declaration.item_id) if declaration else None
         if declaration is None or lakehouse is None:
@@ -380,8 +390,15 @@ class SchemaChangeCollector:
         floor = stored.version if stored else -1
         if stored and commits and commits[-1].version < stored.version:
             floor = -1  # the log starts over (the table was dropped and created again): everything in it is new
-        pending = [c for c in commits if c.version > floor and (c.modified_at is None or c.modified_at >= since)]
+        # While commits are waiting from an earlier run, the version is the only cursor: the ingestor's window (and its
+        # lookback floor) says how far back to look for a scope it knows nothing about, and a backlog older than the
+        # lookback would otherwise be skipped by it. Otherwise everything older than the window was processed already.
+        backlogged = stored is not None and stored.behind > 0 and floor == stored.version
+        pending = [
+            c for c in commits if c.version > floor and (backlogged or c.modified_at is None or c.modified_at >= since)
+        ]
         batch = pending[: self._max_commits]
+        behind = len(pending) - len(batch)
 
         def event_time(ref: DeltaCommitRef | None, parsed: ParsedCommit | None = None) -> datetime:
             when = (parsed.committed_at if parsed else None) or (ref.modified_at if ref else None) or until
@@ -401,6 +418,7 @@ class SchemaChangeCollector:
                 timestamp=until,
                 source=self.SOURCE,
                 checkpoint=checkpoint,
+                behind=behind,
             )
 
         events: list[OperationalEvent] = []
@@ -441,16 +459,20 @@ class SchemaChangeCollector:
                     )
             events.append(snapshot(ref.version, parsed.schema))
             previous = (ref.version, parsed.schema)
-        partial = last is not None and len(pending) > len(batch)
+        partial = last is not None and behind > 0
         reached = last.version if last is not None else (commits[-1].version if commits else None)
         # A snapshot of the version reached already says how far the run got.
         recorded = (
             bool(events) and events[-1].event_type is EventType.SCHEMA_SNAPSHOT and _version_of(events[-1]) == reached
         )
-        if reached is not None and not recorded and (partial or (stored is None and previous is None)):
+        # A run that cleared a backlog says so (a checkpoint at `reached`, behind 0); otherwise the next run would
+        # keep reading from the old cursor without regard to age.
+        cleared = stored is not None and stored.behind > 0 and behind == 0
+        if reached is not None and not recorded and (partial or cleared or (stored is None and previous is None)):
             # Record how far this run got: when commits are left, so the next run resumes after this one; when the table
             # was searched for a schema and none was found, so it is not searched again on every run.
             events.append(snapshot(reached, previous[1] if previous else None, checkpoint=True))
+        self._behind[declaration.id] = behind
         if partial and last is not None:
             self._resume[declaration.id] = last.modified_at or since
         return events
@@ -466,7 +488,12 @@ class SchemaChangeCollector:
         if not recorded:
             return None
         _, version, newest = max(recorded, key=lambda r: (r[0], r[1]))
-        return _Baseline(version, SchemaSnapshot.from_payload(newest.payload))
+        behind = newest.payload.get("behind")
+        return _Baseline(
+            version,
+            SchemaSnapshot.from_payload(newest.payload),
+            behind if isinstance(behind, int) and not isinstance(behind, bool) and behind > 0 else 0,
+        )
 
     async def _first_schema(
         self, table: DeltaTableRef, earlier: Sequence[DeltaCommitRef]
@@ -490,6 +517,7 @@ class SchemaChangeCollector:
 class _Baseline:
     version: int
     schema: SchemaSnapshot | None  # None: a checkpoint of a table whose schema was never seen
+    behind: int = 0  # commits that were still waiting when it was recorded
 
 
 def _version_of(event: OperationalEvent) -> object:
@@ -694,6 +722,7 @@ class TelemetryIngestor:
         failed_scopes = 0
         unavailable_scopes = 0
         ok_scopes = 0
+        backlog = 0
         new_events = 0
         try:
             for scope in collector.scopes():
@@ -715,7 +744,10 @@ class TelemetryIngestor:
                 new_events += await self._store(events, result)
                 result.units_ok += 1
                 ok_scopes += 1
-                reached = collector.progress(scope) if isinstance(collector, ResumableCollector) else None
+                reached: datetime | None = None
+                if isinstance(collector, ResumableCollector):
+                    reached = collector.progress(scope)
+                    backlog += collector.backlog(scope)
                 (repaired if repair else done)[scope] = min(reached, until) if reached else until
         except Exception:
             self._metrics.collector_run(
@@ -726,6 +758,8 @@ class TelemetryIngestor:
             # Also when this run is cut short: what was stored is recorded, so the next run does not redo it.
             await self._event_store.advance_watermarks(collector.name, done)
             await self._event_store.advance_watermarks(collector.name, repaired, force=True)
+        if isinstance(collector, ResumableCollector):
+            self._metrics.collector_backlog(collector.name, backlog)
         self._metrics.collector_run(
             collector.name,
             seconds=self._seconds_since(started),

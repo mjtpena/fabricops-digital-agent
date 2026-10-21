@@ -332,6 +332,42 @@ async def test_the_watermark_never_passes_a_commit_that_was_not_processed(contai
     assert marks["tbl-1"] > t0 - timedelta(minutes=1)  # caught up: the watermark reached the present only at the end
 
 
+async def test_a_backlog_older_than_the_lookback_is_still_worked_off_and_is_visible(container: Container) -> None:
+    """A table that commits faster than ``max_commits`` per run falls behind; the lookback must not skip it."""
+    clock = container.clock
+    t0 = clock.now()
+    commits: dict[int, tuple[datetime | None, list[str]]] = {0: (t0 - timedelta(hours=2), lines(BEFORE))}
+    for v in range(1, 60):
+        commits[v] = (
+            t0 - timedelta(hours=1) + timedelta(minutes=v),
+            [json.dumps({"commitInfo": {"operation": "WRITE"}})],
+        )
+    commits[60] = (t0 - timedelta(minutes=5), lines(AFTER))  # the change comes last, behind 59 quiet commits
+    logs = Logs({"customers": commits, "orders": {}})
+    harness = MetricsHarness()
+    work = ingestor(container, collector(logs, container, max_commits=5), harness=harness)
+
+    await work.run()  # first sight: 5 of the 61 commits
+    assert harness.gauge("orqentis.collector.backlog") == 56  # visible: 56 commits waiting
+    clock.advance(timedelta(days=10))  # the collector was down: the backlog is now older than the 7 day lookback
+    found: list[tuple[int, int]] = []
+    for _ in range(14):
+        result = await work.run()
+        found += [
+            (e.payload["previous_version"], e.payload["current_version"])
+            for e in result.new_events
+            if e.event_type is EventType.SCHEMA_CHANGED
+        ]
+        clock.advance(timedelta(minutes=5))
+    # not skipped by the lookback floor; the schema before it was last recorded at version 59 (a checkpoint carries it)
+    assert found == [(59, 60)]
+    assert harness.gauge("orqentis.collector.backlog") == 0  # and the metric fell back when it caught up
+
+    reads = len(logs.reads)
+    await work.run()
+    assert len(logs.reads) == reads  # caught up: nothing is read again
+
+
 # ================================================== 8. a collector that cannot observe still records a run
 async def test_an_unavailable_collector_records_a_run_and_a_duration_that_the_alert_does_not_read(
     container: Container,

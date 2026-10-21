@@ -10,39 +10,63 @@ name and ``properties`` (``parentEventhouseItemId``, ``queryServiceUri``, ``inge
   workspace and no single configured value can match them all.
 
 **Neither form has been observed on a real monitoring database yet** (the owner has not enabled monitoring); both are
-the documented forms and are re-checked then. A deployment whose names follow neither sets
-``ORQENTIS_WORKSPACE_MONITORING_DATABASE``, which overrides the rules: only that exact name (case-insensitive) matches.
+the documented forms and are re-checked then. How sure a match is matters to the caller, so it is reported:
 
-Two databases matching the rules in one workspace is never resolved by guessing: the callers treat it as an error.
+* ``NAMED``: the configured name (``ORQENTIS_WORKSPACE_MONITORING_DATABASE`` replaces the rules and matches only that
+  exact name, case-insensitively), or the legacy name. The owner or the documentation says this is the database.
+* ``INFERRED``: the name has the monitoring item's documented shape. Any KQL database an engineer names that way matches
+  too, so a caller must not read "the table is missing" from such a database as "no activity yet".
+
+The monitoring item's shape is matched literally and case-sensitively, as Fabric writes it: the workspace's name (each
+character as itself, or as ``_`` where Fabric replaces it), a separator, an item name with at least one letter or digit,
+and the literal suffix ``_Database``. ``Sales Database`` and ``Sales-Archive-Database`` are not that shape.
+
+Two databases matching in one workspace is never resolved by guessing: the callers treat it as an error.
 """
 
 from __future__ import annotations
 
-import re
+from enum import StrEnum
 
 LEGACY_DATABASE_NAME = "Monitoring KQL database"
-_SUFFIX = "_database"
-_NOT_WORD = re.compile(r"[\W_]+")
+_SUFFIX = "_Database"
 
 
-def _slug(text: str) -> str:
-    """Case-folded, every run of characters Fabric would replace (spaces, brackets, punctuation) as one ``_``."""
-    return _NOT_WORD.sub("_", text.casefold()).strip("_")
+class Identification(StrEnum):
+    NAMED = "named"
+    INFERRED = "inferred"
 
 
-def is_monitoring_database(display_name: str, *, workspace_name: str | None, override: str = "") -> bool:
-    """Whether a KQL database called ``display_name`` is the monitoring database of the workspace ``workspace_name``.
+def _item_database(name: str, workspace_name: str) -> bool:
+    """Whether ``name`` is ``<workspace><separator><item name>_Database`` (illegal characters replaced by ``_``)."""
+    if not workspace_name or not name.endswith(_SUFFIX):
+        return False
+    stem = name[: -len(_SUFFIX)]
+    if len(stem) <= len(workspace_name):
+        return False  # no room for a separator and an item name
+    prefix, rest = stem[: len(workspace_name)], stem[len(workspace_name) :]
+    if not all(p == w or (p == "_" and not w.isalnum()) for p, w in zip(prefix, workspace_name, strict=True)):
+        return False
+    return not rest[0].isalnum() and any(c.isalnum() for c in rest)
 
-    ``override`` (the configured name) replaces the rules. Without it, a database is the monitoring database if it
-    has the legacy name, or if its name is the workspace's name followed by anything and ``_Database``. The second rule
-    needs ``workspace_name``; without one only the legacy name can match.
+
+def identify_monitoring_database(
+    display_name: str, *, workspace_name: str | None, override: str = ""
+) -> Identification | None:
+    """How ``display_name`` identifies the monitoring database of the workspace ``workspace_name``, or ``None``.
+
+    Without ``workspace_name`` only the legacy name (or the override) can match.
     """
     name = display_name.strip()
     configured = override.strip()
     if configured:
-        return name.casefold() == configured.casefold()
+        return Identification.NAMED if name.casefold() == configured.casefold() else None
     if name.casefold() == LEGACY_DATABASE_NAME.casefold():
-        return True
-    workspace = _slug(workspace_name) if workspace_name else ""
-    database = _slug(name)
-    return bool(workspace) and database.startswith(f"{workspace}_") and database.endswith(_SUFFIX)
+        return Identification.NAMED
+    if workspace_name and _item_database(name, workspace_name.strip()):
+        return Identification.INFERRED
+    return None
+
+
+def is_monitoring_database(display_name: str, *, workspace_name: str | None, override: str = "") -> bool:
+    return identify_monitoring_database(display_name, workspace_name=workspace_name, override=override) is not None

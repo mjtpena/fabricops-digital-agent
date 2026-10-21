@@ -81,10 +81,15 @@ same way until the catalog catches up. Two databases that look like the monitori
 its name differs: `Monitoring KQL database` for the legacy monitoring, `<workspace name> <monitoring item name>_Database` for
 the monitoring item that replaced it (documented; not yet observed on a real database). `fabric/monitoring_names.py` recognises
 either form for the workspace in question, and is used both by the collector (against the catalog, no call) and by the adapter
-(against the Fabric listing); `ORQENTIS_WORKSPACE_MONITORING_DATABASE` is now only an override with one exact name. The
-not-enabled error carries the number of KQL databases that were visible, which tells "none" from "some, not recognised". A
-Kusto 400 for a missing `SemanticModelLogs` table (a monitoring database with no semantic model activity yet) is read from the
-error's `@message`, where Kusto puts the cause, and returns no refreshes rather than an error.
+(against the Fabric listing); `ORQENTIS_WORKSPACE_MONITORING_DATABASE` is now only an override with one exact name. The item's
+shape is matched literally and case-sensitively (workspace name, separator, item name, the suffix `_Database`), so a
+"Sales Database" or "Sales-Archive-Database" is not taken for it. The not-enabled error carries the number of KQL databases that
+were visible, which tells "none" from "some, not recognised". A Kusto 400 for a missing `SemanticModelLogs` table is read from
+the error's `@message`, where Kusto puts the cause. What it means depends on how sure the match was: in a database that is
+**named** (the override, or the legacy name) it is "no semantic model activity yet" and returns no refreshes; in one that was
+only **inferred** from its name it may simply not be the monitoring database, and answering "no refreshes" would hide that, so
+the workspace is reported capability unavailable (`SemanticModelLogsMissing`). The cost is a visible, self-clearing
+"unavailable" for a new workspace until its first semantic model activity creates the table.
 
 **The spike could not settle permissions, and the documentation contradicts itself** (`docs/spikes/workspace-monitoring.md`):
 the workspace monitoring overview says "Workspace users with at least the Contributor role can query the monitoring
@@ -145,8 +150,12 @@ from its first commit and compared with the recorded schema.
 
 **Work is bounded without losing anything.** At most `ORQENTIS_DELTA_LOG_MAX_COMMITS` commits are read per table per run. When
 more are waiting, the collector says so (`ResumableCollector.progress`), the ingestor moves that table's watermark only as far
-as the last commit processed (never to "now"), and a checkpoint snapshot records the version reached so the next run continues
-after it rather than reading the same commits again. The directory listing is ordered oldest first, so a listing that hits the
+as the last commit processed (never to "now"), and a checkpoint snapshot records the version reached and how many commits are
+still waiting (`behind`). **While commits wait, the version is the only cursor**: the ingestor's window, and its lookback floor
+(168 hours), say how far back to look for a scope it knows nothing about, and a backlog older than that would otherwise be
+skipped. A run that clears the backlog records that (a checkpoint with `behind` 0) so the window decides again and old quiet
+commits are not re-read. The commits waiting are the gauge `orqentis.collector.backlog`: a number that keeps growing means a
+table commits faster than `ORQENTIS_DELTA_LOG_MAX_COMMITS` per collection cycle. The directory listing is ordered oldest first, so a listing that hits the
 page limit (100,000 entries) would hold only the oldest commits and is an error (`DeltaLogListingTruncated`), not a short list.
 A commit is read as a stream cut at `ORQENTIS_DELTA_LOG_MAX_COMMIT_BYTES` even when the server ignores the `Range` header and
 sends the whole file.

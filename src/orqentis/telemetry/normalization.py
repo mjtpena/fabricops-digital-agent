@@ -259,14 +259,17 @@ def schema_snapshot_event(
     timestamp: datetime,
     source: str,
     checkpoint: bool = False,
+    behind: int = 0,
 ) -> OperationalEvent:
     """The schema of a declared Delta table at ``version``: what the next run compares against.
 
     ``schema`` is ``None`` for a *checkpoint* of a table whose schema was never seen: it only records how far the log
-    was read, so a run that stopped early resumes after it. Snapshots are INFO events no rule consumes.
+    was read, so a run that stopped early resumes after it. ``behind`` is how many commits were still waiting when
+    it was taken: while it is above zero the next run continues from ``version`` whatever their age. Snapshots are
+    INFO events no rule consumes.
     """
     digest = hashlib.sha256(
-        json.dumps(schema.to_payload() if schema else None, sort_keys=True).encode("utf-8")
+        json.dumps([schema.to_payload() if schema else None, behind], sort_keys=True).encode("utf-8")
     ).hexdigest()[:12]
     table = declaration.table
     return OperationalEvent(
@@ -288,6 +291,7 @@ def schema_snapshot_event(
             "schema": declaration.schema_name,
             "version": version,
             "checkpoint": checkpoint,
+            "behind": behind,
             **(schema.to_payload() if schema else {"columns": None, "physical": {}, "columns_truncated": False}),
         },
     )

@@ -31,7 +31,7 @@ from urllib.parse import urlsplit
 
 from orqentis.domain.runs import FailureDetail, Refresh, RunStatus
 from orqentis.fabric.errors import FabricAuthError, FabricCapabilityUnavailableError, FabricError, FabricNotFoundError
-from orqentis.fabric.monitoring_names import is_monitoring_database
+from orqentis.fabric.monitoring_names import Identification, identify_monitoring_database
 from orqentis.fabric.rest.auth import FABRIC_SCOPE
 from orqentis.fabric.rest.http import FabricHttp, JsonObject, strip_privacy_tags
 from orqentis.fabric.rest.util import clean, iso, parse_datetime, segment
@@ -237,6 +237,8 @@ class _Target:
     query_uri: str
     database: str
     resolved_at: float
+    # How the database was recognised. An inferred one is only *named like* a monitoring database.
+    identification: Identification = Identification.NAMED
 
 
 class RestMonitoringService:
@@ -294,13 +296,19 @@ class RestMonitoringService:
         # The workspace's name is part of the monitoring item's database name (monitoring_names.py), so it is looked
         # up, once per cache lifetime, unless the deployment names the database itself.
         workspace_name = await self._workspace_name(workspace_id) if listed and not self._database_override else None
-        found = [
-            raw
+        identified = [
+            (raw, how)
             for raw in listed
-            if is_monitoring_database(
-                clean(raw.get("displayName")) or "", workspace_name=workspace_name, override=self._database_override
+            if (
+                how := identify_monitoring_database(
+                    clean(raw.get("displayName")) or "",
+                    workspace_name=workspace_name,
+                    override=self._database_override,
+                )
             )
+            is not None
         ]
+        found = [raw for raw, _ in identified]
         if not found:
             raise FabricCapabilityUnavailableError(
                 "Workspace monitoring is not enabled for this workspace, or its monitoring database is not visible "
@@ -318,7 +326,7 @@ class RestMonitoringService:
                 error_code="WorkspaceMonitoringAmbiguous",
                 details={"workspace_id": workspace_id, "candidates": len(found), "visible_kql_databases": len(listed)},
             )
-        database = found[0]
+        database, identification = identified[0]
         properties = database.get("properties")
         if not (isinstance(properties, dict) and clean(properties.get("queryServiceUri"))):
             # The list documents ``properties``; if a response leaves them out, ask for the one database.
@@ -336,7 +344,7 @@ class RestMonitoringService:
                 error_code="InvalidResponse",
                 details={"workspace_id": workspace_id},
             )
-        return _Target(query_uri=query_uri, database=name, resolved_at=self._clock())
+        return _Target(query_uri=query_uri, database=name, resolved_at=self._clock(), identification=identification)
 
     async def _target(self, workspace_id: str, *, refresh: bool = False) -> _Target:
         async with self._lock:
@@ -436,7 +444,20 @@ class RestMonitoringService:
                     raise
             except FabricError as exc:
                 if _table_missing(exc):
-                    # The table appears only once a semantic model has produced telemetry: no table, no refreshes.
+                    if target.identification is Identification.INFERRED:
+                        # Only the name says this is the monitoring database, and any KQL database can be named that
+                        # way. "No SemanticModelLogs" may mean "no activity yet" or "not the monitoring database":
+                        # answering "no refreshes" would hide the second, so the workspace is reported unobservable.
+                        raise FabricCapabilityUnavailableError(
+                            "The KQL database that looks like this workspace's monitoring database (only its name says "
+                            "so) has no SemanticModelLogs table: either monitoring has recorded no semantic model "
+                            "activity yet, or it is not the monitoring database "
+                            "(ORQENTIS_WORKSPACE_MONITORING_DATABASE names it)",
+                            error_code="SemanticModelLogsMissing",
+                            details={"workspace_id": workspace_id},
+                        ) from exc
+                    # The named (configured or legacy) monitoring database has no semantic model telemetry yet: the
+                    # table appears only once a semantic model has produced some. No table, no refreshes.
                     _log.info(
                         "workspace monitoring has no SemanticModelLogs table yet", extra={"workspace_id": workspace_id}
                     )

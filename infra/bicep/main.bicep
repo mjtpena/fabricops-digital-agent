@@ -419,7 +419,7 @@ param workspaceMonitoringDatabase string = ''
 @description('ORQENTIS_COLLECT_SCHEMA_CHANGES: read the _delta_log of the Delta tables declared in the contracts (delta_tables). Needs a OneLake data access role with Read on exactly those tables (infra/bicep/README.md section 5).')
 param collectSchemaChanges bool = true
 
-@description('ORQENTIS_DELTA_LOG_MAX_COMMITS: commits of one Delta table read per collection run (the oldest not yet processed; more are read on the next run, none is skipped).')
+@description('ORQENTIS_DELTA_LOG_MAX_COMMITS: commits of one Delta table read per collection run (the oldest not yet processed; more are read on the next run, none is skipped; the gauge orqentis.collector.backlog shows how many wait).')
 @minValue(1)
 @maxValue(1000)
 param deltaLogMaxCommits int = 50

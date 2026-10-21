@@ -22,9 +22,14 @@ statement below is marked as documented, inferred or unverified. Adapter: `src/o
 > item's is named after its workspace (section 2, row 2), so one configured value cannot match different workspaces. Nothing in
 > the API marks a KQL database as the monitoring one (the properties are `parentEventhouseItemId`, `queryServiceUri`,
 > `ingestionServiceUri` and `databaseType` = `ReadWrite` or `Shortcut`), so `fabric/monitoring_names.py` recognises it by name:
-> the legacy name, or `<workspace name>…_Database` after the same normalisation Fabric applies. `ORQENTIS_WORKSPACE_MONITORING_DATABASE`
-> is now an override (one exact name for every workspace). Two matches in a workspace are an error, never a choice, and the
-> not-enabled error says how many KQL databases the reader could see. Whether anything other than the name (the parent
+> the legacy name (**named**), or the monitoring item's documented shape (**inferred**): the workspace's name, a separator, an
+> item name and the literal, case-sensitive suffix `_Database` (a character Fabric replaces appears as `_`). `Sales Database`
+> and `Sales-Archive-Database` are not that shape. `ORQENTIS_WORKSPACE_MONITORING_DATABASE` is now an override (one exact
+> name for every workspace; also **named**). Two matches in a workspace are an error, never a choice, and the not-enabled
+> error says how many KQL databases the reader could see. **An inferred database whose `SemanticModelLogs` table is missing is
+> reported as capability unavailable (`SemanticModelLogsMissing`), not as "no refreshes"**: any engineer can name a KQL database
+> that way, so the missing table does not show that it is the monitoring database with no activity yet. Only a named one returns
+> `[]` there. Whether anything other than the name (the parent
 > Eventhouse's name, the item type `Monitoring`) identifies it is part of the live check (step 1).
 
 ## 1. Summary
@@ -275,9 +280,9 @@ Redact ids before pasting anything into the ledger. `<ws>` is a sandbox workspac
    then `az rest --method post --resource <resource> --url "<qs>/v1/rest/query" --body @query.json`. Pass: HTTP 200 (so `request_readonly`, `servertimeout`, `declare query_parameters` and the v1 shape are accepted) and in the primary table a row for the injected failure
    with `status` as seen in step 5, the engine message in `error_text`, a row for the success, no rows for DAX queries, and a row count equal to the number of refreshes in the window.
 7. Through the Python adapter, with the real settings and token provider: `RestMonitoringService.list_semantic_model_refreshes(<ws>, since, until)`. Pass: a `Refresh` with `RunStatus.FAILED`, `error.message` equal to the engine text (privacy markers gone) and the succeeded one;
-   `source == "fabric.workspace-monitoring"`; the request log shows only `GET .../kqlDatabases` and `POST .../v1/rest/query`.
+   `source == "fabric.workspace-monitoring"`; the request log shows only `GET .../kqlDatabases`, `POST .../v1/rest/query` and, unless `ORQENTIS_WORKSPACE_MONITORING_DATABASE` is set, `GET .../workspaces/{id}` (the workspace's name, needed to recognise the monitoring item's database).
 8. Negative cases. (a) A sandbox workspace without monitoring: expect `FabricCapabilityUnavailableError` with `error_code == "WorkspaceMonitoringNotEnabled"` (the collector raises it from the catalog, with no API call, when the estate holds no KQL database named like the monitoring database in that workspace; the adapter raises it when the Fabric listing has none). (b) Monitoring on, a principal without query rights: expect `FabricAuthError` (403). (c) Monitoring on, no semantic model activity ever:
-   expect `[]`. The stand-in's 400 is known (generic `message`, the table in `@message`, handled); confirm a real monitoring database answers the same way.
+   expect `[]` when the database is named (the override or the legacy name) and `FabricCapabilityUnavailableError(SemanticModelLogsMissing)` when it was only inferred from its name. The stand-in's 400 is known (generic `message`, the table in `@message`, handled); confirm a real monitoring database answers the same way. Once the real name is known, a structural signal (step 1) or a corrected name rule should make the monitoring item's database *named*.
 
 **Latency, coverage, scale.**
 

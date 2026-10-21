@@ -39,7 +39,11 @@ section does not match.
   for a missing `SemanticModelLogs` table is recognised from the error's `@message` (the generic `message` never named it);
   the monitoring database is recognised per workspace by its documented names instead of one configured name
   (`ORQENTIS_WORKSPACE_MONITORING_DATABASE` is now an override, empty by default), and the not-enabled error counts the KQL
-  databases the reader could see.
+  databases the reader could see. The name rule is literal (`<workspace> <item>_Database`, case-sensitive; "Sales
+  Database" no longer matches), and a missing `SemanticModelLogs` table in a database only inferred from its name is
+  capability unavailable (`SemanticModelLogsMissing`) rather than "no refreshes". A Delta table whose backlog is older than
+  the collection lookback is still worked off from its recorded version (the lookback floor no longer skips it), and
+  `orqentis.collector.backlog` shows the commits waiting.
 
 - Durable storage and a stateless app (ADR-0017, implements ADR-0008): PostgreSQL adapters (asyncpg, Entra token as the
   password, no password setting) for the event store, incidents, dependencies, approvals (compare-and-set), the audit
