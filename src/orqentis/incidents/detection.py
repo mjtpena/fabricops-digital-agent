@@ -12,6 +12,7 @@ from orqentis.domain.events import EventType, OperationalEvent
 from orqentis.domain.incidents import Incident, Symptom, TimelineKind
 from orqentis.domain.taxonomy import IncidentCategory, Severity
 from orqentis.incidents.service import IncidentCandidate, IncidentService
+from orqentis.incidents.sla import SLA_RULE_ID
 from orqentis.observability.logging import get_logger
 from orqentis.storage.event_store import EventQuery, EventStore
 from orqentis.storage.incidents import DuplicateIncidentError, IncidentQuery
@@ -176,7 +177,7 @@ class SlaBreachRule:
     and deadline day: the event's correlation id is ``sla:<id>:<date>``.
     """
 
-    rule_id = "DET-SLA-BREACHED"
+    rule_id = SLA_RULE_ID
 
     def evaluate(self, event: OperationalEvent) -> IncidentCandidate | None:
         if event.event_type is not EventType.SLA_ASSESSED or event.payload.get("state") != "BREACHED":

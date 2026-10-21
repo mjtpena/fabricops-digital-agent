@@ -47,8 +47,9 @@ class DeltaTableRef(DomainModel):
     id: str
     item_id: str
     workspace_id: str
-    table: str
-    schema_name: str | None = None
+    # The same shape the contracts allow: a name can never carry a path separator or a dot segment.
+    table: str = Field(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
+    schema_name: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 
     @property
     def path(self) -> str:

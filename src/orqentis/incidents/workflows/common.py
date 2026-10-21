@@ -51,6 +51,7 @@ from orqentis.incidents.classification import ErrorClassifier, SignatureMatch
 from orqentis.incidents.confidence import ConfidenceCalculator, ConfidenceSignals, Signal, corroboration_value
 from orqentis.incidents.history import IncidentHistory
 from orqentis.incidents.service import IncidentService
+from orqentis.incidents.sla import is_sla_incident
 from orqentis.incidents.workflows.base import InvestigationTrace
 from orqentis.policies.engine import PolicyEngine
 from orqentis.reports.publisher import ReportPublisher
@@ -120,14 +121,6 @@ class WorkflowState:
 
 def _iso(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
-
-
-SLA_RULE_ID = "DET-SLA-BREACHED"
-
-
-def is_sla_incident(incident: Incident) -> bool:
-    """Opened by the SLA breach rule: the SLA workflow investigates it whatever kind of item refreshes the product."""
-    return incident.metadata.get("detection_rule") == SLA_RULE_ID
 
 
 class DiagnosticWorkflow:
@@ -882,6 +875,10 @@ class DiagnosticWorkflow:
             return Signal(0.5, f"Error matches {signature.signature_id} but it maps to {signature.category}")
         return Signal(0.0, "Error matches no known signature")
 
+    def _dependency_evidence(self, st: WorkflowState, cited: list[Evidence]) -> list[Evidence]:
+        """The cited evidence that sits upstream of the failure point (the SLA workflow counts its blockers instead)."""
+        return [e for e in cited if e.resource_id in st.upstream_ids]
+
     def _signals(self, st: WorkflowState, root: Finding, category: str, runbook_id: str | None) -> ConfidenceSignals:
         evidence = st.incident.evidence_by_id()
         cited = [evidence[i] for i in root.evidence_ids if i in evidence]
@@ -910,7 +907,7 @@ class DiagnosticWorkflow:
             else None
         )
 
-        upstream_hits = [e for e in cited if e.resource_id in st.upstream_ids]
+        upstream_hits = self._dependency_evidence(st, cited)
         capacity_id = st.a.capacity.capacity_id if st.a.capacity else None
         shared_hits = [e for e in cited if capacity_id and e.resource_id == capacity_id]
         if upstream_hits:

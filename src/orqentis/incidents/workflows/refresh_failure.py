@@ -24,7 +24,8 @@ from orqentis.domain.events import EventType, OperationalEvent
 from orqentis.domain.evidence import EvidenceType
 from orqentis.domain.incidents import Incident
 from orqentis.incidents.run_history import points_from_events, summarize
-from orqentis.incidents.workflows.common import DiagnosticWorkflow, WorkflowState, is_sla_incident
+from orqentis.incidents.sla import is_sla_incident
+from orqentis.incidents.workflows.common import DiagnosticWorkflow, WorkflowState
 from orqentis.tools.models import ToolStatus
 
 _HISTORY_WINDOW = timedelta(days=14)

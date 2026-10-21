@@ -20,13 +20,14 @@ from typing import Any
 from orqentis.agents.models import SlaBreachObservation
 from orqentis.domain.common import ItemType
 from orqentis.domain.events import EventType, OperationalEvent
-from orqentis.domain.evidence import EvidenceType
+from orqentis.domain.evidence import Evidence, EvidenceType
 from orqentis.domain.incidents import Incident
 from orqentis.domain.runs import PipelineRun
 from orqentis.domain.sla import SLA, SLAAssessment
 from orqentis.incidents.confidence import Signal
 from orqentis.incidents.run_history import RunPoint, points_from_events, points_from_runs, summarize, usual_start_local
-from orqentis.incidents.workflows.common import DiagnosticWorkflow, WorkflowState, is_sla_incident
+from orqentis.incidents.sla import is_sla_incident
+from orqentis.incidents.workflows.common import DiagnosticWorkflow, WorkflowState
 from orqentis.incidents.workflows.item_job_failure import JOB_ITEM_TYPES
 from orqentis.tools.models import ToolStatus
 
@@ -70,6 +71,11 @@ class SlaBreachWorkflow(DiagnosticWorkflow):
     async def _after_upstream(self, st: WorkflowState) -> None:
         await self._record_upstream_incidents(st)
         self._classify(st)
+
+    def _dependency_evidence(self, st: WorkflowState, cited: list[Evidence]) -> list[Evidence]:
+        """An incident on the freshness item, or upstream of it, that was open when the deadline passed."""
+        blockers = {b.evidence_id for b in st.a.upstream_incidents}
+        return [e for e in cited if e.evidence_id in blockers]
 
     def _runbook_category(self, st: WorkflowState) -> str | None:
         return "SLA_BREACH"

@@ -14,7 +14,8 @@ from orqentis.domain.evidence import EvidenceType
 from orqentis.domain.incidents import Incident
 from orqentis.domain.runs import PipelineRun
 from orqentis.incidents.run_history import points_from_runs, summarize
-from orqentis.incidents.workflows.common import DiagnosticWorkflow, WorkflowState, is_sla_incident
+from orqentis.incidents.sla import is_sla_incident
+from orqentis.incidents.workflows.common import DiagnosticWorkflow, WorkflowState
 from orqentis.tools.models import ToolStatus
 
 JOB_ITEM_TYPES = frozenset({ItemType.NOTEBOOK, ItemType.SPARK_JOB_DEFINITION, ItemType.DATAFLOW})

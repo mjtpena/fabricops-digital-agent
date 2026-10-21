@@ -24,7 +24,7 @@ from orqentis.domain.events import EventSeverity, EventType, OperationalEvent
 from orqentis.domain.incidents import Incident, IncidentStatus
 from orqentis.domain.sla import SLA, SLAAssessment, SLAState
 from orqentis.incidents.detection_runner import DetectionRunner
-from orqentis.incidents.sla import SLAEvaluator
+from orqentis.incidents.sla import SLAEvaluator, is_sla_incident
 from orqentis.observability.logging import get_logger
 from orqentis.storage.event_store import EventStore
 from orqentis.storage.incidents import IncidentQuery, IncidentRepository
@@ -127,9 +127,14 @@ class SLASweeper:
 
     async def sweep(self) -> tuple[list[SLAAssessment], list[Incident]]:
         """Assess every SLA; returns the assessments and any incidents the detection rules opened from them."""
-        open_incidents = await self._repository.list(
-            IncidentQuery(statuses=[s for s in IncidentStatus if s.is_open], limit=1000)
-        )
+        # An SLA incident is about a missed deadline: it does not block the refresh it reports on.
+        open_incidents = [
+            i
+            for i in await self._repository.list(
+                IncidentQuery(statuses=[s for s in IncidentStatus if s.is_open], limit=1000)
+            )
+            if not is_sla_incident(i)
+        ]
         assessments: list[SLAAssessment] = []
         events: list[OperationalEvent] = []
         for sla in sorted(self._catalog.slas.values(), key=lambda s: s.id):

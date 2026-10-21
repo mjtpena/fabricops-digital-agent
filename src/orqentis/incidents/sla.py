@@ -7,8 +7,17 @@ from zoneinfo import ZoneInfo
 
 from orqentis.config.clock import Clock
 from orqentis.domain.events import EventType
+from orqentis.domain.incidents import Incident
 from orqentis.domain.sla import SLA, SLAAssessment, SLAState
 from orqentis.storage.event_store import EventQuery, EventStore
+
+# The detection rule that opens an incident for a breached SLA (incidents/detection.py).
+SLA_RULE_ID = "DET-SLA-BREACHED"
+
+
+def is_sla_incident(incident: Incident) -> bool:
+    """Opened by the SLA breach rule: about a missed deadline, not about a failure of the item that has to meet it."""
+    return incident.metadata.get("detection_rule") == SLA_RULE_ID
 
 
 class SLAEvaluator:

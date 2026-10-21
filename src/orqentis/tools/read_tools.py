@@ -18,7 +18,7 @@ from orqentis.domain.sla import SLAAssessment
 from orqentis.fabric.ports import FabricClient
 from orqentis.incidents.deployment import compare_deployments
 from orqentis.incidents.history import IncidentHistory
-from orqentis.incidents.sla import SLAEvaluator
+from orqentis.incidents.sla import SLAEvaluator, is_sla_incident
 from orqentis.runbooks.catalog import RunbookCatalog, RunbookQuery
 from orqentis.storage.event_store import EventQuery, EventStore
 from orqentis.tools.registry import ToolContext, ToolOutcome, ToolSpec
@@ -446,6 +446,7 @@ def build_read_tools(deps: ReadToolDependencies) -> list[ToolSpec]:
             [incident.primary_item_id]
             if incident is not None
             and incident.status.is_open
+            and not is_sla_incident(incident)
             and (
                 p.item_id == incident.primary_item_id
                 or deps.graph.find_path(incident.primary_item_id, p.item_id) is not None

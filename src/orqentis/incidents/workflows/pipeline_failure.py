@@ -12,12 +12,12 @@ from orqentis.domain.common import ItemType
 from orqentis.domain.evidence import EvidenceType
 from orqentis.domain.incidents import Incident
 from orqentis.domain.runs import ActivityRun, PipelineRun
+from orqentis.incidents.sla import is_sla_incident
 from orqentis.incidents.workflows.common import (
     SKIPPED_STATUSES,
     DiagnosticWorkflow,
     WorkflowDependencies,
     WorkflowState,
-    is_sla_incident,
 )
 from orqentis.tools.models import ToolStatus
 
