@@ -188,6 +188,10 @@ class MonitoringRefreshCollector:
     """
 
     name = "workspace-monitoring-refreshes"
+    # Events reach the monitoring database minutes after they happen (documentation: 10 to 15 minutes at worst), so a
+    # refresh that just ended can still look unfinished. Reading this much further back than the window means the End
+    # row is found on a later run; the event store de-duplicates by refresh id and status.
+    LATENCY_MARGIN = timedelta(minutes=30)
 
     def __init__(self, fabric: FabricClient, catalog: EstateCatalog, *, database_name: str) -> None:
         self._fabric = fabric
@@ -209,9 +213,12 @@ class MonitoringRefreshCollector:
         workspace = self._catalog.workspaces.get(scope)
         fallback = workspace.environment if workspace else Environment.UNKNOWN
         events: list[OperationalEvent] = []
-        for refresh in await self._fabric.monitoring.list_semantic_model_refreshes(scope, since=since, until=until):
+        window_start = since - self.LATENCY_MARGIN
+        for refresh in await self._fabric.monitoring.list_semantic_model_refreshes(
+            scope, since=window_start, until=until
+        ):
             when = refresh.end_time or refresh.start_time
-            if not is_reportable(refresh.status) or when is None or not since <= when <= until:
+            if not is_reportable(refresh.status) or when is None or not window_start <= when <= until:
                 continue
             model = self._catalog.items.get(refresh.item_id)
             events.append(

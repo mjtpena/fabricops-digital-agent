@@ -58,7 +58,7 @@ Approval boundary check (the agent attempts mutations directly)
 ```
 
 The full incident report is printed afterwards. Every statement in it is labelled **FACT**,
-**INFERENCE** or **RECOMMENDATION** and cites evidence ids. Three more scenarios run with
+**INFERENCE** or **RECOMMENDATION** and cites evidence ids. More scenarios run with
 `make demo-all` or `make demo SCENARIO=<name>`:
 
 | Scenario | What FabricOps concludes |
@@ -67,6 +67,11 @@ The full incident report is printed afterwards. Every statement in it is labelle
 | `auth_failure` | The service principal client secret expired 14h before the failure. The secret embedded in the Fabric error is redacted everywhere. Recurrence of INC-2026-0012. |
 | `capacity_pressure` | PROD F64 saturated (117% CU, background rejection). The contending workload is a DEV notebook on the PROD capacity. Failure on 3 consecutive Mondays between 05:51 and 06:04. |
 | `unknown_failure` | Root cause undetermined, LOW confidence. The recent deployment is surfaced as a possible factor without being asserted as the cause. Read-only escalation; no change proposed. |
+| `notebook_failure` | A notebook raised `ValueError` on its own. `ACTIVITY_FAILURE`, LOW confidence (one source, no history); read-only runbook. |
+| `refresh_failure` | A semantic model refresh failed because its source table is gone. Opened by the refresh rule; `SEMANTIC_MODEL_REFRESH_FAILURE` with a pending refresh approval. |
+| `refresh_failure_pipeline` | The same failure inside a pipeline's refresh activity: one incident (the pipeline's), same category and runbook, action on the model. |
+| `sla_breach` | A data product misses its deadline because the producing pipeline ran 10 minutes late (started 06:48, usually 05:00). `SLA_BREACH`, MEDIUM, notify-only runbook. |
+| `schema_drift_delta` | Schema drift found by reading the table's Delta log (version 42 renamed `customer_id`), HIGH confidence; the report names both columns. |
 
 ## Architecture
 

@@ -200,7 +200,8 @@ async def test_monitoring_refreshes_are_collected_from_workspaces_that_have_a_mo
     assert failed.payload["error_message"] == "cannot access the source"
     unknown = next(e for e in events if e.correlation_id == "ref-4")
     assert unknown.display_name == "sm-unknown" and unknown.environment is Environment.PROD  # the workspace's
-    assert monitoring.calls == [(WS, at(8), NOW)]
+    # the query reaches back a little further than the window: events arrive in the monitoring database late
+    assert monitoring.calls == [(WS, at(8) - MonitoringRefreshCollector.LATENCY_MARGIN, NOW)]
 
 
 def test_no_workspace_with_monitoring_means_no_scope_and_no_calls() -> None:

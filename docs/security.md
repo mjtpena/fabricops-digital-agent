@@ -262,6 +262,24 @@ input**:
 The synthetic estate contains a deliberately poisoned item description (`nb-transform-sales-dev`)
 to keep these defences under test.
 
+**Untrusted inputs added by the signal sources (ADR-0020).** Each is written by someone who is not FabricOps and is handled
+as data: sanitised (control, bidi and zero-width characters, envelope-like tags), length-clipped, count-bounded, scanned for
+instruction-like content, flagged on the evidence and wrapped in the untrusted-data envelope.
+
+| Input | Written by | Where it is bounded |
+|---|---|---|
+| Delta log: table and column names, `commitInfo.operation`, `engineInfo`, `userMetadata`, the schema string | anyone who can write to the table | `telemetry/delta.py` (names 256 characters, 2000 columns, 2 MiB schema string; malformed lines skipped); `fabric/rest/onelake.py` reads at most `ORQENTIS_DELTA_LOG_MAX_COMMIT_BYTES` of a commit and keeps only three action kinds |
+| Workspace monitoring rows: refresh error text, model names, ids | anyone who can run a refresh or name a model | `fabric/rest/monitoring.py` (text 2000 characters, names 256, ids must be GUIDs, privacy markers stripped, at most 1000 rows) |
+| Capacity Metrics model: workspace, item and kind names | anyone who can name a workspace or item on the capacity | `fabric/rest/capacity_metrics.py` (names 256 characters, no control or bidi characters, never reused in a later query) |
+| Notebook, Spark and Dataflow exception text | the job's author | the shared evidence recorder; the reasoner quotes at most 200 characters of it and states that it comes from the job |
+
+`tests/scenarios/test_signal_injection.py` poisons each of them with instruction-like text and checks that nothing it asks for
+happens: no approval is decided, nothing reaches the write client, the agent's tool allowlist and the policy are unchanged,
+the diagnosis is not redirected and every finding still cites evidence that exists. Two requests are built from values the
+data cannot influence: the KQL of the monitoring query is a constant with bound parameters, and the DAX of the capacity query
+takes only a GUID and timestamps built from integers (DAX has no parameters). The monitoring query endpoint is named by an API
+response, so the bearer token is sent only to hosts inside the Fabric API's parent domain.
+
 ## 9. Known gaps (MVP)
 
 * The local stores (SQLite, filesystem) are single-node and for development only: deployed environments refuse to
@@ -405,6 +423,22 @@ The execution-details endpoint is the only read-only route to refresh outcomes. 
 request id (a refresh started by a pipeline's semantic model refresh activity, whose run output should carry it: not verified here,
 because that activity needs a Power BI connection that the sandbox deliberately does not create), not for scheduled or manual
 refreshes.
+
+### Workspace monitoring and the Capacity Metrics model (WS7 spikes; documentation only, not verified live)
+
+Neither source has been read with the reader identity yet. The spikes (`docs/spikes/workspace-monitoring.md`,
+`docs/spikes/capacity-metrics.md`) give what is documented, what is inferred, and the exact checks for the live run.
+
+| Read | Needed (as documented) | Status |
+|---|---|---|
+| Find a workspace's monitoring database (`GET /v1/workspaces/{id}/kqlDatabases`) | workspace Viewer | documented; the adapter uses it |
+| **Query the monitoring database** (semantic model refresh outcomes) | **Contradictory documentation.** The monitoring overview: "Workspace users with at least the Contributor role can query the monitoring database". The roles and Kusto RBAC pages: workspace Viewer reads every item, including KQL databases | **Unresolved.** A Viewer-only principal against a real monitoring database settles it. Contributor is a write role and is Admin on every KQL database of the workspace: not an acceptable fix (D9). Narrower options in the spike: share the monitoring database with the principal (Read), or add it as a database viewer |
+| Query the Capacity Metrics model (`executeQueries`) | Read **and Build** on the model, plus the tenant setting "Semantic Model Execute Queries REST API" | Viewer has no Build; dataset permissions cannot be granted to a service principal through the users API (`docs/security.md` above); a security group with `ReadExplore` is untried; Contributor has Build and Write. The model is not a supported surface and its names changed between app versions |
+| `_delta_log` of a declared table | a OneLake data access role with `Read` on that table | proven live (above) |
+
+Enabling workspace monitoring needs a workspace **Admin** and is not something FabricOps does. Until the live checks pass, a
+403 from either query is a collector error; once the owner decides to accept one, the deployment lists the collector in
+`ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS` and it becomes "capability unavailable" (visible, but not an error).
 
 ### Failure-injection facts that affect detection
 

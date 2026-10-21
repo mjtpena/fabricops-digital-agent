@@ -13,6 +13,21 @@ section does not match.
 
 ### Added
 
+- Signal sources and detection breadth (ADR-0020, implements D9 and the schema half of ADR-0009): collectors for notebook,
+  Spark job definition and Dataflow runs; semantic model refresh outcomes from Fabric workspace monitoring (a parameterised,
+  read-only KQL query; `ORQENTIS_REFRESH_SOURCE`); Delta schema changes read from the `_delta_log` of the contracts'
+  new `delta_tables` through OneLake (rename only when column mapping proves it); a Capacity Metrics `executeQueries`
+  adapter (dormant until configured; the spikes could not confirm its source offline). Deterministic rules for notebook,
+  Spark job, Dataflow and refresh failures and for SLA breaches (severity from the data product's declared criticality or
+  the environment), one incident per failure (a failure a failed pipeline activity already covers opens nothing), and an
+  SLA breach is never declared while the freshness item's collector has no recent pass. Workflows for jobs, refreshes and
+  SLA breaches on a shared `DiagnosticWorkflow` base; runbooks `RB-NOTEBOOK-FAILURE-001` and `RB-SLA-BREACH-001`;
+  signatures for notebook exceptions and refresh errors; Spark's own `UNRESOLVED_COLUMN` message now yields the column.
+  Known permission gaps are *capability unavailable* (metric `orqentis.collector.unavailable`, `unavailable` on
+  `/health/ready`), not collector errors. Five new scenarios (`notebook_failure`, `refresh_failure`,
+  `refresh_failure_pipeline`, `sla_breach`, `schema_drift_delta`); spike write-ups in `docs/spikes/`.
+- Redaction no longer hides the error evidence's own `signature_match` (exact safe keys; the value is still scanned).
+
 - Durable storage and a stateless app (ADR-0017, implements ADR-0008): PostgreSQL adapters (asyncpg, Entra token as the
   password, no password setting) for the event store, incidents, dependencies, approvals (compare-and-set), the audit
   chain (chain-head row lock), the leader lease (database clock, fencing generation) and investigation jobs

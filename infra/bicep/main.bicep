@@ -399,6 +399,49 @@ param fabricScope string = ''
 @description('ORQENTIS_POWERBI_SCOPE: token scope of the Power BI API, ending in /.default. Empty: the public cloud scope.')
 param powerbiScope string = ''
 
+// ------------------------------------------------------------------------------------------------- signal sources
+
+@description('ORQENTIS_COLLECT_ITEM_JOBS: collect the job instances of notebooks, Spark job definitions and Dataflows (workspace Viewer is enough).')
+param collectItemJobs bool = true
+
+@description('ORQENTIS_REFRESH_SOURCE: where semantic model refresh outcomes come from. workspace_monitoring (default): the monitoring database of each workspace, readable with workspace Viewer. powerbi_api: the Power BI refresh history, which needs dataset Write and so is not available to the Viewer-only reader (every call is a 403). both, or none. See infra/bicep/README.md section 5.')
+@allowed([
+  'workspace_monitoring'
+  'powerbi_api'
+  'both'
+  'none'
+])
+param refreshSource string = 'workspace_monitoring'
+
+@description('ORQENTIS_WORKSPACE_MONITORING_DATABASE: display name of the monitoring KQL database in a monitored workspace.')
+param workspaceMonitoringDatabase string = 'Monitoring KQL database'
+
+@description('ORQENTIS_COLLECT_SCHEMA_CHANGES: read the _delta_log of the Delta tables declared in the contracts (delta_tables). Needs a OneLake data access role with Read on exactly those tables (infra/bicep/README.md section 5).')
+param collectSchemaChanges bool = true
+
+@description('ORQENTIS_CAPACITY_METRICS_WORKSPACE_ID: workspace the Fabric Capacity Metrics app is installed in. Set together with capacityMetricsDatasetId, or leave both empty (capacity utilisation is then unavailable).')
+param capacityMetricsWorkspaceId string = ''
+
+@description('ORQENTIS_CAPACITY_METRICS_DATASET_ID: the Capacity Metrics app semantic model. Set together with capacityMetricsWorkspaceId.')
+param capacityMetricsDatasetId string = ''
+
+@description('ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS: comma-separated collectors whose HTTP 403 this deployment expects and documents. They are reported as capability unavailable, not as collector errors. Any other 401/403 stays an error. Example: semantic-model-refreshes when refreshSource includes powerbi_api.')
+param expectedForbiddenCollectors string = ''
+
+@description('ORQENTIS_SLA_MAX_TELEMETRY_LAG_MINUTES: a missed SLA is declared only if the collector that observes the freshness item finished a pass this recently (0 turns the check off).')
+@minValue(0)
+@maxValue(1440)
+param slaMaxTelemetryLagMinutes int = 30
+
+@description('ORQENTIS_KUSTO_SCOPE: token scope of the Kusto/Eventhouse endpoint that serves workspace monitoring, ending in /.default. Empty: the public cloud scope.')
+param kustoScope string = ''
+
+@description('ORQENTIS_ONELAKE_BASE_URL: the OneLake endpoint. Empty: https://onelake.dfs.fabric.microsoft.com (public cloud).')
+param onelakeBaseUrl string = ''
+
+@description('ORQENTIS_ONELAKE_SCOPE: token scope of OneLake (Azure Storage), ending in /.default. Empty: the public cloud scope.')
+param onelakeScope string = ''
+
 // ------------------------------------------------------------------------------------------------- data + logs
 
 @description('Log Analytics retention in days.')
@@ -788,6 +831,11 @@ var keyVaultSecretNames = concat(
   map(configuredVaultReferences, s => length(split(s.uri, '/')) > 4 ? split(s.uri, '/')[4] : '')
 )
 
+// Signal source inputs checked when the deployment runs (see modules/input-check.bicep): 'ok', or what is wrong.
+var signalSourcesCheck = empty(capacityMetricsWorkspaceId) != empty(capacityMetricsDatasetId)
+  ? 'capacityMetricsWorkspaceId and capacityMetricsDatasetId go together: set both (the Capacity Metrics app is read through that one semantic model) or neither'
+  : 'ok'
+
 // service_principal inputs checked when the deployment runs (see modules/input-check.bicep): 'ok', or what is wrong.
 // Nested conditionals are evaluated lazily, so a parse of a URI only happens after the URI is known to be set.
 var credentialUri = empty(fabricServicePrincipalSecretUri)
@@ -1016,6 +1064,11 @@ var appEnv = concat(
     { name: 'ORQENTIS_FABRIC_RATE_PER_SECOND', value: string(fabricRatePerSecond) }
     { name: 'ORQENTIS_FABRIC_RATE_BURST', value: string(fabricRateBurst) }
     { name: 'ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES', value: string(fabricJobInstancesMaxPages) }
+    { name: 'ORQENTIS_COLLECT_ITEM_JOBS', value: collectItemJobs ? 'true' : 'false' }
+    { name: 'ORQENTIS_COLLECT_SCHEMA_CHANGES', value: collectSchemaChanges ? 'true' : 'false' }
+    { name: 'ORQENTIS_REFRESH_SOURCE', value: refreshSource }
+    { name: 'ORQENTIS_WORKSPACE_MONITORING_DATABASE', value: workspaceMonitoringDatabase }
+    { name: 'ORQENTIS_SLA_MAX_TELEMETRY_LAG_MINUTES', value: string(slaMaxTelemetryLagMinutes) }
     { name: 'ORQENTIS_COLLECTION_MAX_LOOKBACK_HOURS', value: string(collectionMaxLookbackHours) }
     { name: 'ORQENTIS_COLLECTION_OVERLAP_MINUTES', value: string(collectionOverlapMinutes) }
     { name: 'ORQENTIS_STARTUP_GRACE_SECONDS', value: string(startupGraceSeconds) }
@@ -1040,6 +1093,18 @@ var appEnv = concat(
   empty(powerbiApiBaseUrl) ? [] : [{ name: 'ORQENTIS_POWERBI_API_BASE_URL', value: powerbiApiBaseUrl }],
   empty(fabricScope) ? [] : [{ name: 'ORQENTIS_FABRIC_SCOPE', value: fabricScope }],
   empty(powerbiScope) ? [] : [{ name: 'ORQENTIS_POWERBI_SCOPE', value: powerbiScope }],
+  empty(kustoScope) ? [] : [{ name: 'ORQENTIS_KUSTO_SCOPE', value: kustoScope }],
+  empty(onelakeBaseUrl) ? [] : [{ name: 'ORQENTIS_ONELAKE_BASE_URL', value: onelakeBaseUrl }],
+  empty(onelakeScope) ? [] : [{ name: 'ORQENTIS_ONELAKE_SCOPE', value: onelakeScope }],
+  empty(expectedForbiddenCollectors)
+    ? []
+    : [{ name: 'ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS', value: expectedForbiddenCollectors }],
+  empty(capacityMetricsWorkspaceId) || empty(capacityMetricsDatasetId)
+    ? []
+    : [
+        { name: 'ORQENTIS_CAPACITY_METRICS_WORKSPACE_ID', value: capacityMetricsWorkspaceId }
+        { name: 'ORQENTIS_CAPACITY_METRICS_DATASET_ID', value: capacityMetricsDatasetId }
+      ],
   // service_principal mode: the Fabric tenant, and the LLM keeps using the reader managed identity (Azure
   // OpenAI lives in this tenant, not in the Fabric one).
   servicePrincipalMode
@@ -1158,6 +1223,14 @@ module servicePrincipalInputCheck 'modules/input-check.bicep' = {
   name: 'orqentis-check-service-principal-inputs'
   params: {
     result: any(servicePrincipalCheck) // a literal-typed parameter on purpose: ARM, not the compiler, rejects it
+  }
+}
+
+// Same for the signal sources (the Capacity Metrics app's workspace and model are both set, or neither).
+module signalSourcesInputCheck 'modules/input-check.bicep' = {
+  name: 'orqentis-check-signal-source-inputs'
+  params: {
+    result: any(signalSourcesCheck) // a literal-typed parameter on purpose: ARM, not the compiler, rejects it
   }
 }
 
@@ -1431,6 +1504,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     servicePrincipalInputCheck
     storageInputCheck
     notificationInputCheck
+    signalSourcesInputCheck
   ]
 }
 

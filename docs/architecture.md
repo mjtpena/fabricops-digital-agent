@@ -52,7 +52,7 @@ sequenceDiagram
 
 | Port (protocol) | Module | MVP adapter | Target adapter | Status |
 |---|---|---|---|---|
-| `FabricClient` + services (Workspace, Item, Job, Pipeline, SemanticModel, Capacity, Deployment, Dependency) | `fabric.ports` | `MockFabricClient` (synthetic estate) | `RestFabricClient` (Fabric + Power BI REST, read-only) | Both implemented |
+| `FabricClient` + services (Workspace, Item, Job, Pipeline, SemanticModel, Capacity, Deployment, Dependency, Monitoring, DeltaLog) | `fabric.ports` | `MockFabricClient` (synthetic estate) | `RestFabricClient` (Fabric + Power BI REST, workspace monitoring over Kusto REST, OneLake ADLS Gen2 and the Capacity Metrics model over `executeQueries`; read-only) | Both implemented (ADR-0020) |
 | `FabricWriteClient` | `fabric.ports` | `DisabledFabricWriteClient` (default), `MockFabricWriteClient` | REST write adapter | Write adapter deliberately not built (MVP is read-only) |
 | `TokenProvider` | `fabric.rest.auth` | `AzureIdentityTokenProvider` over `DefaultAzureCredential` / managed / workload identity / environment, with the configured authority host and scopes (sovereign clouds) | same | Implemented |
 | `LineageScanner` | `contracts.lineage` | none in the runtime | `PowerBiScanner` (Power BI admin Scanner API), used only by `orqentis contracts scaffold --scanner` under an interactive administrator sign-in | Implemented (CLI only) |
@@ -69,9 +69,9 @@ sequenceDiagram
 | `Mutex` | `runtime.mutex` | `InProcessMutex` | `PostgresMutex` (advisory lock on a dedicated connection) | Both implemented |
 | `AuditAnchorStore` | `observability.anchors` | `LocalAuditAnchorStore` | `BlobAuditAnchorStore` (write-once blobs in an immutable container; the name carries the full hash) | Both implemented |
 | `EpochMarkerStore` | `observability.epochs` | `LocalEpochMarkerStore` | `BlobEpochMarkerStore` (write-once markers in `audit-epochs`; the application's identity can only read it, an operator group writes it) | Both implemented |
-| `Collector` | `telemetry.collectors` | pipeline runs, refreshes, capacity, static replay | Eventhouse-backed capacity / schema collectors | Implemented for REST-available data |
-| `DetectionRule` | `incidents.detection` | `PipelineFailureRule` | more rules per secondary scenario | Implemented for the primary scenario |
-| `InvestigationWorkflow` | `incidents.workflows.base` | `PipelineFailureWorkflow` | refresh failure, SLA, drift workflows | Implemented for the primary scenario |
+| `Collector` | `telemetry.collectors` | pipeline runs; notebook, Spark job and Dataflow runs; refreshes (Power BI history or workspace monitoring); Delta schema changes; capacity (Capacity Metrics model); static replay | | Implemented (ADR-0020) |
+| `DetectionRule` | `incidents.detection` | `PipelineFailureRule`, `NotebookFailureRule`, `SparkJobFailureRule`, `DataflowFailureRule`, `RefreshFailureRule`, `SlaBreachRule` | rules per further signal | Implemented (ADR-0020) |
+| `InvestigationWorkflow` | `incidents.workflows` | `PipelineFailureWorkflow`, `ItemJobFailureWorkflow`, `RefreshFailureWorkflow`, `SlaBreachWorkflow`, all on the shared `DiagnosticWorkflow` | drift and deployment workflows | Implemented (ADR-0020) |
 
 ### Declared contracts and environments
 
@@ -146,6 +146,22 @@ timed, traced (OpenTelemetry span `investigation.step.NN`) and recorded in the
 A tool failure does not abort the investigation. It is recorded in the trace, and the missing
 evidence lowers confidence. An unexpected exception returns the incident from INVESTIGATING to
 DETECTED and is audited.
+
+**Other workflows (ADR-0020).** Steps 5 to 20 are the shared `DiagnosticWorkflow`
+(`incidents/workflows/common.py`); a workflow supplies only steps 2 to 4, the failure itself. The first workflow whose
+`supports` accepts the incident investigates it, and the SLA workflow is first because it claims an incident by the rule
+that opened it.
+
+| Workflow | Incidents | Steps 2 to 4 | Typical root cause |
+|---|---|---|---|
+| `pipeline-failure-v1` | a pipeline run failed (`DET-PIPELINE-FAILED`) | run, activity runs, error classification | by signature: schema drift, authentication, capacity, timeout, a failed refresh activity, ... |
+| `item-job-failure-v1` | a notebook, Spark job definition or Dataflow failed on its own (`DET-NOTEBOOK-FAILED`, `DET-SPARK-JOB-FAILED`, `DET-DATAFLOW-FAILED`) | job instance, recent runs, error classification | `ACTIVITY_FAILURE` (an exception raised by its own code or data), or a specific cause by signature |
+| `refresh-failure-v1` | a semantic model refresh failed (`DET-REFRESH-FAILED`) | the stored refresh event, refresh history, error classification; looks for an incident open upstream | `SEMANTIC_MODEL_REFRESH_FAILURE`, or `AUTH_FAILURE` when the source refused the credentials |
+| `sla-breach-v1` | a data product SLA was breached (`DET-SLA-BREACHED`) | the SLA assessment, the freshness item's recent runs, failed-run errors; blockers are incidents open at or upstream of the item | always `SLA_BREACH`; the statement says `LATE`, `BLOCKED`, `FAILED` or `NOT_RUN` |
+
+A failure is one incident: a notebook, refresh or Dataflow failure that a failed pipeline activity already covers (same
+target item, within ten minutes) opens nothing, so the pipeline's incident carries it. See ADR-0020 for the dedupe, the
+SLA telemetry check and the confidence each path earns.
 
 ## 6. The FabricOps Investigator
 
@@ -318,6 +334,17 @@ maximum lookback is re-read once and the watermark is corrected. The overlap is 
 are de-duplicated by `dedupe_key`. Fabric documents no ordering for "List Item Job Instances", so job
 listings filter by the watermark without stopping early and are capped at
 `ORQENTIS_FABRIC_JOB_INSTANCES_MAX_PAGES` pages.
+
+**Signal sources** (ADR-0020). Collectors, in the order they run (pipelines first, so their activity failures are stored before
+the failures they caused): `pipeline-runs`; `notebook-runs`, `spark-job-runs`, `dataflow-runs` (job instances per item);
+`semantic-model-refreshes` (Power BI history, off by default in rest mode) or `workspace-monitoring-refreshes` (one scope per
+workspace that has a monitoring database; it reads 30 minutes further back than its window because events arrive late);
+`delta-schema-changes` (one scope per `delta_tables` entry of the contracts); `capacity-metrics` (only when the Capacity
+Metrics app is configured, at most the last 24 hours, 10-minute buckets). A collector or scope that cannot observe by design
+is **capability unavailable**, not a failure: `IngestionResult.unavailable`, the `orqentis.collector.unavailable` counter and
+`unavailable` on `/health/ready`; only a documented, configured 403 (`ORQENTIS_EXPECTED_FORBIDDEN_COLLECTORS`) or a missing
+capability counts, any other 401/403 is an error. The SLA sweep records a breach only when the collector observing the
+freshness item completed a pass for it recently (`ORQENTIS_SLA_MAX_TELEMETRY_LAG_MINUTES`).
 
 **Durable detection** (`incidents/detection_runner.py`). Storing events and detecting from them are
 separate steps, and a run can be cut short between them. The event store numbers every inserted

@@ -154,9 +154,14 @@ of `fixtures/fabric/estate.json` (`external_sources`, `data_products`, `dependen
 [`contracts/estate.example.json`](../contracts/estate.example.json) is a small worked example. If the file
 is missing or invalid, startup fails with one error that names the path and every violation, so run
 `orqentis contracts validate` before you deploy it (see *Contracts workflow*).
-Capacity utilisation and Delta schema changes have no public REST API. Until the Eventhouse
-collectors arrive (milestone 9), the capacity tool reports `CAPABILITY_UNAVAILABLE`, the
-investigation continues, and the missing evidence lowers confidence.
+Delta schema changes are read from the `_delta_log` of the tables declared in the contracts (`delta_tables`; needs a
+OneLake data access role with Read on them). Semantic model refreshes are read from each workspace's monitoring database
+(`ORQENTIS_REFRESH_SOURCE`, default `workspace_monitoring` in rest mode; the Power BI refresh history needs dataset Write).
+Capacity utilisation is read from the Capacity Metrics app's model only when `ORQENTIS_CAPACITY_METRICS_WORKSPACE_ID` and
+`..._DATASET_ID` are set; otherwise the capacity tool reports `CAPABILITY_UNAVAILABLE`, the investigation continues, and the
+missing evidence lowers confidence. What each source needs, and what is still unverified live, is in ADR-0020 and
+`docs/spikes/`. A collector that cannot observe by design is reported as *capability unavailable*, not as an error
+(`docs/operations.md`, section 15).
 
 Tool calls have a 30s timeout and the HTTP client retries up to `ORQENTIS_HTTP_MAX_RETRIES` times,
 honouring `Retry-After` (capped at 60s). When the API is heavily throttled, lower the retries or
@@ -461,15 +466,21 @@ classifier.register(ErrorSignature(id="SIG-DBT", category="DBT_TEST_FAILURE", de
 ### Add a synthetic scenario
 
 Add `fixtures/telemetry/<name>.json` (`scenario`, `pipeline_runs`, `activity_runs`, `refreshes`,
-`capacity_snapshots`, `events`), referencing items in `fixtures/fabric/estate.json`. Fixtures are
+`capacity_snapshots`, `events`, `delta_logs`), referencing items in `fixtures/fabric/estate.json`. `pipeline_runs` also
+holds the runs of notebooks, Spark job definitions and Dataflows (set `item_type`); `delta_logs` replays the `_delta_log`
+of a table declared in the estate's `delta_tables`; an SLA breach is handed over as a recorded `SLA_ASSESSED` event
+(`tests/scenarios/test_signal_scenarios.py` checks it is the event the sweep itself would record). Fixtures are
 validated against the domain models, so typos fail fast. Run it with
 `orqentis demo --scenario <name>` and add assertions to `tests/scenarios/test_scenarios.py`.
 
 ### Add a detection rule or workflow
 
 Implement `DetectionRule` (`incidents/detection.py`) or `InvestigationWorkflow`
-(`incidents/workflows/base.py`) and register it in `bootstrap.py`. New workflows reuse the tool
-registry, the evidence recorder, the investigator, grounding, confidence, policy and reports.
+(`incidents/workflows/base.py`) and register it in `bootstrap.py`. New workflows subclass `DiagnosticWorkflow`
+(`incidents/workflows/common.py`): supply `supports` and the three steps that observe the failure (`_observe`), and the
+rest (lineage, blast radius, SLA, capacity, history, runbooks, grounded findings, confidence, recommendation, policy,
+report) is shared. A rule whose failure a pipeline usually explains sets `covered_by_activity_target`, so the engine opens
+no second incident for it.
 
 ## Conventions
 
