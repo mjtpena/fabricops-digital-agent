@@ -1,4 +1,4 @@
-"""``delta_tables``: the tables whose _delta_log FabricOps reads, declared in the contracts and checked like the rest."""
+"""``delta_tables``: the tables whose _delta_log FabricOps reads, declared in the contracts and checked."""
 
 from __future__ import annotations
 

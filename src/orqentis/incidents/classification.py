@@ -53,6 +53,8 @@ DEFAULT_SIGNATURES: tuple[ErrorSignature, ...] = (
             r"(?i)\b(access )?token (has )?expired\b",
             r"(?i)\b(credentials?|password) (are |is )?(invalid|expired)\b",
             r"(?i)\b401\b.{0,40}unauthori[sz]ed",
+            # the analysis engine's wording when a data source refuses the credentials stored in the model
+            r"(?i)credentials provided for the .{1,60} source (?:are|is) invalid",
         ],
         entity_patterns=[r"for app '(?P<app>[^']+)'", r"connection (?P<connection>conn-[\w-]+)"],
         priority=100,

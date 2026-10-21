@@ -260,7 +260,7 @@ async def test_a_schema_change_in_a_recent_commit_becomes_one_event() -> None:
     assert event.payload["table"] == "customers" and event.payload["user_metadata"] == "nightly load"
     assert event.dedupe_key == "schema:lh-1::customers:2" and event.source == "orqentis.collectors.delta-log"
     assert event.timestamp <= NOW and event.severity.value == "WARNING"
-    # the baseline is found by reading back from the newest earlier commit (1 has no schema, 0 does); 0 and 1 are not re-read
+    # the baseline is found by reading back from the newest earlier commit (1 has no schema, 0 does)
     assert logs.reads == [1, 0, 2]
 
 
@@ -302,7 +302,7 @@ async def test_the_number_of_commits_and_the_back_scan_are_bounded() -> None:
 
     no_scan = FakeDeltaLogs({0: (at(1), meta(BEFORE)), 1: (at(11), meta(AFTER))})
     assert await schema_collector(no_scan, max_backscan=0).collect_scope("tbl-1", since=at(10), until=NOW) == []
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="max_commits"):
         schema_collector(no_scan, max_commits=0)
 
 

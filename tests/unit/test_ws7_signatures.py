@@ -1,7 +1,7 @@
 """Error signatures added for the live findings: Spark's own column message, notebook exceptions, refresh errors.
 
-The messages are the forms Fabric returned in the sandbox (sanitised): the notebook activity nests the exception inside a
-JSON string, so its quotes arrive escaped.
+The messages are the forms Fabric returned in the sandbox (sanitised): the notebook activity nests the exception
+inside a JSON string, so its quotes arrive escaped.
 """
 
 from __future__ import annotations
@@ -24,7 +24,8 @@ def fabric_notebook_error(name: str, value: str) -> str:
         }
     )
     return (
-        "Operation on target transform_customers failed: Notebook execution failed at Notebook service with http status "
+        "Operation on target transform_customers failed: Notebook execution failed at Notebook service with "
+        "http status "
         f"code - '200', please check the Run logs on Notebook, additional details - '{detail}' : "
     )
 
@@ -66,7 +67,8 @@ def test_python_and_spark_traceback_shapes_are_recognised(
 
 def test_spark_s_own_column_message_names_the_column_and_suggests_a_replacement(classifier: ErrorClassifier) -> None:
     value = (
-        "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `customer_id` cannot be "
+        "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `customer_id` "
+        "cannot be "
         "resolved. Did you mean one of the following? [`client_id`, `full_name`, `country`]. SQLSTATE: 42703"
     )
     match = classifier.classify(fabric_notebook_error("AnalysisException", value))
@@ -76,14 +78,18 @@ def test_spark_s_own_column_message_names_the_column_and_suggests_a_replacement(
 
 
 def test_the_unescaped_form_is_read_the_same_way(classifier: ErrorClassifier) -> None:
-    text = "[UNRESOLVED_COLUMN.WITHOUT_SUGGESTION] A column, variable, or function parameter with name `order_ts` cannot be resolved."
+    text = (
+        "[UNRESOLVED_COLUMN.WITHOUT_SUGGESTION] A column, variable, or function parameter with name `order_ts` "
+        "cannot be resolved."
+    )
     match = classifier.classify(text)
     assert match is not None and match.entities["column"] == "order_ts" and "suggestions" not in match.entities
 
 
 def test_a_refresh_engine_error_is_a_refresh_failure(classifier: ErrorClassifier) -> None:
     text = (
-        "We cannot access the source Delta table 'customers_clean_removed' referenced by table 'customers_clean'. Either the "
+        "We cannot access the source Delta table 'customers_clean_removed' referenced by table 'customers_clean'. "
+        "Either the "
         "source Delta table does not exist, or you don't have access permissions."
     )
     match = classifier.classify(text)

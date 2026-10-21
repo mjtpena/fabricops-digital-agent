@@ -1,4 +1,4 @@
-"""Small builders for the WS7 collector, rule and workflow tests: items, catalogs and runs, with no Fabric behind them."""
+"""Small builders for the WS7 collector, rule and workflow tests: items, catalogs and runs (no Fabric behind)."""
 
 from __future__ import annotations
 

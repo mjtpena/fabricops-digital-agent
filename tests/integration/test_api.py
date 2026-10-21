@@ -119,7 +119,7 @@ def test_estate_and_runbooks(client: TestClient) -> None:
     assert deps["blast_radius"]["cross_workspace"] is True
     assert client.get("/estate/items/nope/dependencies", headers=VIEWER).status_code == 404
     runbooks = client.get("/runbooks", headers=VIEWER).json()
-    assert len(runbooks) == 7
+    assert len(runbooks) == 9
     assert client.get("/runbooks/RB-SCHEMA-DRIFT-001", headers=VIEWER).json()["category"] == "SCHEMA_DRIFT"
 
 

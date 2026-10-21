@@ -1,4 +1,4 @@
-"""WS7 scenarios: every injected failure class is detected by a deterministic rule and investigated to the right category.
+"""WS7 scenarios: each injected failure class is detected by a deterministic rule and investigated correctly.
 
 Each scenario is synthetic telemetry (fixtures/telemetry) played through the real collectors, rules, workflows,
 runbooks and policy. The four original scenarios live in test_scenarios.py and are unchanged.

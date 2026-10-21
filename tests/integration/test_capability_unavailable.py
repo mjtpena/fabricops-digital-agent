@@ -17,13 +17,13 @@ from orqentis.api.app import create_app
 from orqentis.bootstrap import Container, build_container
 from orqentis.config.settings import Settings
 from orqentis.domain.events import OperationalEvent
-from orqentis.incidents.detection_runner import DetectionRunner
 from orqentis.fabric.errors import (
     FabricAuthError,
     FabricCapabilityUnavailableError,
     FabricError,
     FabricNotFoundError,
 )
+from orqentis.incidents.detection_runner import DetectionRunner
 from orqentis.runtime.collection import CollectionService
 from orqentis.telemetry.collectors import TelemetryIngestor
 from tests.conftest import make_settings

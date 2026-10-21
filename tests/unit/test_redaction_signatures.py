@@ -1,4 +1,4 @@
-"""``signature_match`` is our own error classification, not a signature: it must survive redaction. Real ones must not."""
+"""``signature_match`` is our own error classification, not a signature: it survives redaction; real ones do not."""
 
 from __future__ import annotations
 
