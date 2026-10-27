@@ -24,7 +24,7 @@
 # directly. Inside the venv, `python` exists.
 
 # --------------------------------------------------------------------------------------------- builder
-FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:98a774c86033b17a976da188757e57b2ab976379f1233fe21f02bbdf550458c0 AS builder
+FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:4c138f8a3c4399006d928c3942a928a19f63390ac1dac91e9a3ebb667dbb0e84 AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -43,7 +43,7 @@ RUN pip install --upgrade pip \
     && pip install ".[llm,azure-monitor]"
 
 # --------------------------------------------------------------------------------------------- runtime
-FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:98a774c86033b17a976da188757e57b2ab976379f1233fe21f02bbdf550458c0 AS runtime
+FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:4c138f8a3c4399006d928c3942a928a19f63390ac1dac91e9a3ebb667dbb0e84 AS runtime
 
 ARG APP_UID=10001
 ARG APP_GID=10001
